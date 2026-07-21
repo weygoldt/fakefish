@@ -32,7 +32,10 @@ dataset. See `README.md` (top-level) and `firmware/README.md` (firmware design).
    `LOC_AMPLITUDE`, `MARKER_AMPLITUDE`, `MARKER_CAL_AMPLITUDE`) live in
    `firmware/eel_fakefish/eel_control.h` + `eel_fakefish.ino` — the firmware is the
    source of truth. If the firmware changes, update the mirror (and the export tool's
-   matching constants). This coupling is visualisation-only; it never feeds the sketch.
+   matching constants). Two Python modules mirror these levels: `_gallery_marker.py`
+   (visualisation only) and `build_sd_card.py`, which **bakes** the level / marker /
+   window constants into the SD-card WAVs — a firmware level change must be reflected
+   there too or the card and the sketch drift.
 3. **Flashing needs no Python and no dataset.** Anything reading
    `data/stimuli_config.yaml → paths.eods_root` is the *regeneration* path and
    requires the source recordings (not shipped). Keep that split intact.
