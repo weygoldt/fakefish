@@ -36,9 +36,12 @@ dataset. See `README.md` (top-level) and `firmware/README.md` (firmware design).
    (visualisation only) and `build_sd_card.py`, which **bakes** the level / marker /
    window constants into the SD-card WAVs — a firmware level change must be reflected
    there too or the card and the sketch drift.
-3. **Flashing needs no Python and no dataset.** Anything reading
-   `data/stimuli_config.yaml → paths.eods_root` is the *regeneration* path and
-   requires the source recordings (not shipped). Keep that split intact.
+3. **Flashing needs no Python; playback needs an SD card.** The firmware compiles and
+   flashes with no Python and no dataset. Playback reads a **WAV card** (one directory per
+   button) built by `fakefish-build-card`, which renders from the committed library and
+   needs Python but **no dataset**. Only the *library regeneration* path
+   (`fakefish-export`, reading `data/stimuli_config.yaml → paths.eods_root`) needs the
+   source recordings (not shipped). Keep that split intact.
 4. **Firmware is bench-owned.** Do not claim it flashed or field-tested it. The 22 nF
    bridging-cap swap is still owed; carry that warning in the README.
 

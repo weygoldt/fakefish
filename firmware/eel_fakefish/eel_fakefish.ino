@@ -1,130 +1,68 @@
-// Teensy 4.1 output driver for the eel stimulus library (the only board we ship).
+// Teensy 4.1 SD-card player for the fakefish stimulator (the only board we ship).
 //
-// The fakefish is a HAND-HELD field stimulator: the operator holds it and plays eel
-// stimuli at a wild eel through a dipole; only the electrodes go in the water. Four
-// buttons pick the program, an LED shows what is playing. See eel_control.h.
+// The fakefish is a HAND-HELD field stimulator: the operator holds it and plays stimuli at
+// a wild fish through a dipole; only the electrodes go in the water. Six buttons pick the
+// program, an LED shows what is playing. Each stimulus is a pre-rendered mono int16 @ 50 kHz
+// WAV on the SD card, organised one directory per button (see eel_control.h + sd_player.h);
+// all stimulus generation is offline Python (src/fakefish/build_sd_card.py). A press lists
+// the button's directory, picks a WAV at random, and streams it — applying a per-press
+// random polarity flip (anti-pitting) and the field-tunable MASTER_GAIN — to out_write().
 //
-// PWM + an RC low-pass IS a DAC. The 4.1 plays back the FULL mean EOD waveform —
-// both phases, not an approximation — through the shared device-agnostic engine;
-// only this driver's out_write() is board-specific. Pins 2 and 3 are
-// on the same FlexPWM submodule (phase-aligned carriers): ch_A = max(+w,0),
-// ch_B = max(-w,0), so the two unipolar PWM+RC channels form one BIPOLAR
-// differential output across the dipole. Which channel leads encodes polarity
-// (randomised between playbacks). The 4.1 is NOT restricted to monophasic pulses.
+// PWM + an RC low-pass IS a DAC. Pins 2 and 3 are on the same FlexPWM submodule
+// (phase-aligned carriers): ch_A = max(+w,0), ch_B = max(-w,0), so the two unipolar PWM+RC
+// channels form one BIPOLAR differential output across the dipole. Which channel leads
+// encodes polarity (randomised per press). out_write() and its noise shaping are UNCHANGED
+// from the flash-library firmware — only the sample SOURCE changed (SD stream, not the
+// overlap-add engine).
 //
 // !!! HARDWARE (enabling): the bridging cap must be 22 nF, NOT 220 nF. !!!
 //   Differential RC: pin 2 -> 220 ohm -> node A -> electrode A; pin 3 -> 220 ohm ->
 //   node B -> electrode B; a SINGLE cap BRIDGES node A<->node B (floating, not GND).
-//   The two 220 add (440 ohm) in series with the bridging cap -> differential
-//   corner fc = 1/(2*pi*440*C):
-//     22 nF  -> fc = 16.4 kHz: EOD passes (flat <2 kHz, edge intact) and the 10 kHz
-//               marker passes at -1.4 dB; 586 kHz carrier down -31 dB. CORRECT.
+//   440 ohm (two 220 in series) + the bridging cap -> differential corner:
+//     22 nF  -> fc = 16.4 kHz: EOD passes and the 10 kHz marker passes at -1.4 dB. CORRECT.
 //     220 nF -> fc = 1.6 kHz: low-passes the EOD itself. WRONG -- swap the cap.
-//   Differential source impedance = 440 ohm (bridging), less water-loading than
-//   caps-to-GND. The bridging cap filters DIFFERENTIAL carrier only; if the recorder
-//   is single-ended / water shares ground, add ~2.2-4.7 nF each node->GND too.
-//   V4A stainless, few volts, pulsed -> no DC-blocking cap (see README).
+//   V4A stainless, few volts, pulsed -> no DC-blocking cap; per-press polarity flip keeps
+//   the net charge near zero over a session (see README).
 //
-// RESOLUTION: 8-bit duty at the 585.9 kHz carrier (150 MHz FlexPWM clock / 256).
-// out_write() applies first-order error-feedback NOISE SHAPING per channel to
-// exploit the ~10x oversampling (50 kHz updates vs a <5 kHz signal), recovering
-// ~+3 effective bits in-band so the low-voltage pulses (~5 duty codes) render
-// cleanly. 50 kHz is adequate (100 kHz gives no meaningful in-band gain — the
-// residual is RC/quantization-limited, not sample-limited). Quantified in
-// tools/simulate_firmware.py. Carrier residual after the RC ~6% pp; if that must
-// drop, RAISE the carrier (7-bit/1.17 MHz), do NOT add a 2nd RC pole.
+// RESOLUTION: 8-bit duty at the 585.9 kHz carrier (150 MHz FlexPWM clock / 256). out_write()
+// applies first-order error-feedback NOISE SHAPING per channel (~+3 effective in-band bits).
 //
-// Self-contained sketch: this .ino + eel_player.{h,cpp} + eel_control.h +
-// eel_stimuli.{h,cpp} all live in this folder, so opening firmware/eel_fakefish/
-// in the Arduino IDE compiles with zero file copying. host_test/ is a subdir the
-// Arduino build ignores (not src/), so the g++ self-tests ride along untouched.
+// Self-contained sketch: this .ino + sd_player.h + eel_control.h all live in this folder.
+// eel_player.{h,cpp} + eel_stimuli.{h,cpp} also live here but are NOT used by the firmware
+// any more — they are the stimulus-library SOURCE that build_sd_card.py renders into the WAV
+// card. host_test/ is a subdir the Arduino build ignores.
 #include <IntervalTimer.h>
-#include "eel_player.h"
-#include "eel_control.h"   // 4 program buttons (pins 5-8) + indicator LED (pin 13)
+#include "eel_control.h"   // 6 program buttons (pins 5-10) + indicator LED (pin 13)
+#include "sd_player.h"     // SD WAV streaming: parse, ring buffer, per-button random pick
 
-// Board guard: __IMXRT1062__ is defined only for the i.MX RT1062 (Teensy 4.0/4.1).
-// The PWM+RC output stage below assumes the 4.1's FlexPWM; a wrong-board build still
-// compiles but won't drive the dipole correctly — so warn loudly at compile time.
 #if !defined(__IMXRT1062__)
 #warning "eel_fakefish targets the Teensy 4.1 (i.MX RT1062) — select that board in Tools > Board"
 #endif
 
-static const int PWM_A_PIN = 2;    // FlexPWM (submodule-shared with pin 3) -> RC -> electrode A
-static const int PWM_B_PIN = 3;    // FlexPWM -> RC -> electrode B
-static const float PWM_CARRIER_HZ = 585937.5f;  // 150 MHz FlexPWM clock / 256 (8-bit)
-static const int PWM_BITS = 8;
+static const int   PWM_A_PIN      = 2;              // FlexPWM (submodule-shared with pin 3) -> RC -> electrode A
+static const int   PWM_B_PIN      = 3;              // FlexPWM -> RC -> electrode B
+static const float PWM_CARRIER_HZ = 585937.5f;      // 150 MHz FlexPWM clock / 256 (8-bit)
+static const int   PWM_BITS       = 8;
+static const int   SAMPLE_RATE_HZ = 50000;          // the card's WAV rate; ISR period == 20 us
+static const int   ISR_PERIOD_US  = 1000000 / SAMPLE_RATE_HZ;  // 20 us
 
-// ===== OUTPUT LEVELS — the four knobs you tune ============================
-// Every signal the device emits has its OWN absolute level on a 0..1 scale. They are
-// independent on purpose: each answers a different physical constraint, and none of them
-// scales any other, so what you set is what you get. The scale maps to the drive across
-// the electrodes as (each phase drives one PWM rail; the sine LUT peaks at 31163/32767):
-//
-//     V_peak ~= 3.3 V * amplitude * LUT_peak/32640     (~3.15 V * amplitude for the sine)
-//
-// The output is BIPOLAR DIFFERENTIAL, so peak-to-peak is TWICE that — full scale is
-// ~5.7 Vpp, NOT 3.3 V. The 16.4 kHz RC costs ~1.4 dB at the 10 kHz marker and is nearly
-// flat over the EOD band (<2 kHz). These are OPEN-CIRCUIT figures: in water the 440 ohm
-// source impedance divides against the
-// electrode impedance, so the delivered level is lower and conductivity-dependent —
-// scope it on the bench. A rough guide (sine; a pulse peaks at 32767 so ~5% hotter):
-//     0.90 -> ~2.83 V peak / 5.67 Vpp
-//     0.45 -> ~1.42 V peak / 2.84 Vpp
-//     0.32 -> ~1.01 V peak / 2.02 Vpp
-//     0.25 -> ~0.79 V peak / 1.58 Vpp
-// Resolution is not a worry down here: 0.25 still peaks at duty code 61 of 255, and the
-// noise shaper hands back ~3 more effective bits on top.
-
-// VOLLEY items (C, and D's strike): the loud one. A hunting eel's strike is its
-// highest-voltage discharge, so this is the reference level everything else sits under.
-static const float VOLLEY_AMPLITUDE = 0.90f;
-
-// LOCALIZATION items — used by BOTH B (localization alone) and D's lead-in localization,
-// so the sensing discharge is identical however you reach it. An eel's localization
-// discharge is genuinely lower-voltage at the source than its volley, and this contrast is
-// the whole reason the two are separate: keep it BELOW VOLLEY_AMPLITUDE or a "localization"
-// will read as a strike. Amplitude is a firmware concern by design — the recorded amplitude
-// is distance-confounded, so it is deliberately left out of the stimulus library.
-static const float LOC_AMPLITUDE = 0.45f;
-
-// The 1 s sine LEAD-IN marker before every stimulus (B/C/D). Decoupled from the item
-// levels: the marker serves recorded detection SNR, not behavioural realism, so a
-// localization's lead-in is not obliged to be as quiet as the localization itself. It has
-// to be detectable at whatever range you are playing from — raise it for reach, lower it
-// if you are close enough to a recording electrode to clip that channel. (CALIBRATION does
-// NOT use this — see MARKER_CAL_AMPLITUDE.)
-static const float MARKER_AMPLITUDE = 0.25f;
-
-// The 10 s CALIBRATION tone (A) — deliberately the quietest. Calibration is run with the
-// stimulus electrodes held right next to a recording electrode, so the recorder sees the
-// tone at essentially zero distance and a full-scale tone SATURATES its input amplifier.
-// This and MARKER_AMPLITUDE answer OPPOSITE constraints — the lead-in must carry at range
-// (loud), the calibration must not clip a recorder in contact with it (quiet) — which is
-// why they are separate knobs. Cutting it costs nothing: the SNR case for a loud marker is
-// a far-field argument, and at contact range there is SNR to burn.
-static const float MARKER_CAL_AMPLITUDE = 0.25f;
+// ===== OUTPUT LEVEL — the one knob you tune ===============================
+// Every stimulus WAV already carries its own ABSOLUTE level (the loc / volley / marker
+// ratios are baked in by build_sd_card.py). MASTER_GAIN is a single overall trim applied to
+// every streamed sample so you can raise or lower the whole device's output in the field
+// without regenerating the card. 1.0 == the levels exactly as rendered; lower it if you are
+// close to a recording electrode, raise it (up to 1.0) for reach. The open-circuit full
+// scale is ~5.7 Vpp differential; in water the 440 ohm source impedance divides against the
+// load, so scope it on the bench. (Values above 1.0 only clip — the WAVs already use the
+// full-scale headroom.)
+static const float MASTER_GAIN = 1.0f;
 
 IntervalTimer sampleClock;
-volatile EelPlayer player;
+static SdPlayer sdplayer;
 volatile bool playing = false;
 
-// ---- Session state --------------------------------------------------------
-// A SESSION is one button press: an ordered segment list (tone -> gap -> item ...) that
-// the sample clock walks, one sample per tick, to completion. begin_session() fills
-// sess_segs[] COMPLETELY before starting the clock, and loop() only builds a new session
-// while !playing, so the ISR is the sole reader of a list that never changes under it.
-static Segment sess_segs[MAX_SESSION_SEGS];
-static volatile uint8_t  sess_n_segs = 0;
-static volatile uint8_t  seg_idx = 0;       // segment the ISR is currently emitting
-static volatile uint32_t seg_t = 0;         // sample index within a TONE/SILENCE segment
-static volatile int8_t   sess_polarity = 1; // ONE polarity per session (D's loc+volley share it)
-static volatile float    sess_tone_amp = 0.0f;  // this session's marker level (cal is quieter)
-static volatile uint32_t led_remaining = 0;            // blink countdown, in samples
-static volatile uint32_t led_prev_onset = LED_ONSET_NONE;
-
-// Per-channel first-order error-feedback noise-shaping accumulators (see header).
-// Reset per session in begin_session() so stale error can't glitch the newly-idle
-// channel after a polarity flip.
+// Per-channel first-order error-feedback noise-shaping accumulators. Reset per playback in
+// start_playback() so stale error can't glitch the newly-idle channel after a polarity flip.
 static volatile int32_t err_a = 0, err_b = 0;
 
 static inline int shape(int32_t mag, volatile int32_t* err) {
@@ -136,9 +74,8 @@ static inline int shape(int32_t mag, volatile int32_t* err) {
   return (int)q;
 }
 
-// out_write() is the platform seam: the shared engine hands it a signed int16;
-// this (4.1) mapping splits the sign across two phase-locked PWM+RC channels with
-// noise shaping.
+// out_write() is the platform seam: a signed int16 -> two phase-locked PWM+RC channels with
+// noise shaping. UNCHANGED from the flash-library firmware.
 static inline void out_write(int16_t s) {
   int32_t mag_a = (s > 0) ? s : 0;   // sign selects the electrode == polarity
   int32_t mag_b = (s < 0) ? -s : 0;
@@ -146,108 +83,56 @@ static inline void out_write(int16_t s) {
   analogWrite(PWM_B_PIN, shape(mag_b, &err_b));
 }
 
-// Arm the engine for segment `i` (an ITEM). Called on ENTERING an item segment — including
-// D's volley at the loc->volley seam, since two items cannot share one EelPlayer. Costs one
-// ring clear (EOD_HV_LEN floats) once per item, far inside the 20 us tick budget.
-static inline void arm_item(uint8_t i) {
-  const Segment* sg = &sess_segs[i];
-  const StimItem* it = &STIM_ITEMS[sg->item_index];
-  // The level follows the item's own kind, so a localization plays at LOC_AMPLITUDE
-  // whether it is program B or D's lead-in — they cannot drift apart.
-  const float amp = item_amplitude_for_kind(it->kind, LOC_AMPLITUDE, VOLLEY_AMPLITUDE);
-  eel_player_start_windowed((EelPlayer*)&player, it, amp, sess_polarity,
-                            sg->n_samples, sg->loop);
-  led_prev_onset = LED_ONSET_NONE;   // so the item's first pulse (last_onset == 0) blinks
-  led_remaining = 0;
-}
-
-// Advance to the next segment, arming the engine if that segment is an item.
-static inline void advance_segment() {
-  seg_idx++;
-  seg_t = 0;
-  if (seg_idx < sess_n_segs && sess_segs[seg_idx].kind == SEG_ITEM) arm_item(seg_idx);
-}
-
-// One sample-clock tick: walk the session's segments, emitting exactly one sample.
-// Empty segments (a zero-length gap, a finished item) are skipped within the same tick by
-// the loop, so no dead ticks. The LED rides along: solid through a tone, one blink per
-// pulse through an item, dark in a gap.
+// One sample-clock tick: pop one sample from the ring, scale by gain + this playback's
+// polarity, and drive out_write(). The ISR NEVER touches the SD card — loop() refills the
+// ring (single-producer/single-consumer). When the file is fully read and the ring drains,
+// tear down here (this path returns WITHOUT reaching out_write(), so clear the LED explicitly
+// or it sticks on).
 static void onSampleTick() {
-  int16_t s = 0;
-  bool led = false;
-  for (;;) {
-    if (seg_idx >= sess_n_segs) {
-      // Session finished — tear down. This path returns WITHOUT reaching out_write(), so
-      // the LED must be cleared explicitly here or it would stick on.
-      sampleClock.end();
-      analogWrite(PWM_A_PIN, 0);
-      analogWrite(PWM_B_PIN, 0);
-      digitalWriteFast(LED_PIN, LOW);
-      playing = false;
-      return;
-    }
-    const Segment* sg = &sess_segs[seg_idx];
-
-    if (sg->kind == SEG_TONE) {
-      if (seg_t < sg->n_samples) {
-        s = marker_sample(seg_t, sg->n_samples, MARKER_RAMP_SAMPLES, sess_tone_amp);
-        seg_t++;
-        led = led_on_for_segment(SEG_TONE, 0);
-        break;
-      }
-      advance_segment();
-      continue;
-    }
-
-    if (sg->kind == SEG_SILENCE) {
-      if (seg_t < sg->n_samples) {
-        seg_t++;
-        s = 0;
-        led = led_on_for_segment(SEG_SILENCE, 0);
-        break;
-      }
-      advance_segment();
-      continue;
-    }
-
-    // SEG_ITEM — the engine owns the sample; the LED follows its pulse onsets.
-    if (eel_player_next((EelPlayer*)&player, &s)) {
-      bool onset = onset_fired(player.last_onset, (uint32_t*)&led_prev_onset);
-      led_remaining = led_blink_step(led_remaining, onset, LED_BLINK_SAMPLES);
-      led = led_on_for_segment(SEG_ITEM, led_remaining);
-      break;
-    }
-    advance_segment();
+  int16_t s;
+  if (sdplayer.ring.pop(&s)) {
+    out_write(sdp_apply(s, MASTER_GAIN, sdplayer.polarity));
+  } else if (sdp_finished(&sdplayer)) {
+    sampleClock.end();
+    analogWrite(PWM_A_PIN, 0);
+    analogWrite(PWM_B_PIN, 0);
+    digitalWriteFast(LED_PIN, LOW);
+    playing = false;
+    return;
+  } else {
+    out_write(0);   // buffer underrun (SD stall) — emit silence, keep the cadence
   }
-  out_write(s);
-  digitalWriteFast(LED_PIN, led ? HIGH : LOW);
+  digitalWriteFast(LED_PIN, HIGH);   // solid while playing
 }
 
-// Start a session for `prog`: draw the item(s) and ONE shared polarity, build the segment
-// list, reset the noise-shaping accumulators (so leftover per-channel error can't glitch
-// the newly-idle channel / inject DC at marker onset), then start the 50 kHz clock LAST —
-// so the ISR can never observe a half-built list.
-static void begin_session(EelProgram prog) {
-  const int loc_idx = (prog == PROG_LOCALIZATION || prog == PROG_LOC_VOLLEY)
-                        ? eel_control_pick_localization() : -1;
-  const int vol_idx = (prog == PROG_VOLLEY || prog == PROG_LOC_VOLLEY)
-                        ? eel_control_pick_volley() : -1;
-  const uint8_t n = build_session(prog, loc_idx, vol_idx, sess_segs);
-  if (n == 0) return;   // the library has no item of a class this program needs — self-mute
-
-  sess_n_segs = n;
-  sess_polarity = random(2) ? 1 : -1;   // per session; D's loc and volley share the one draw
-  // Calibration is played against a recording electrode, so its tone is the quiet one.
-  sess_tone_amp = marker_amplitude_for_program(prog, MARKER_AMPLITUDE, MARKER_CAL_AMPLITUDE);
+// Start streaming a random WAV from button `b`'s directory. Self-mutes (no clock) if that
+// directory has no playable WAV. One polarity per playback (randomised for anti-pitting).
+static void start_playback(int b) {
+  const int8_t pol = random(2) ? 1 : -1;
   err_a = 0;
   err_b = 0;
-  seg_idx = 0;
-  seg_t = 0;
-  led_remaining = 0;
-  led_prev_onset = LED_ONSET_NONE;
-  if (sess_segs[0].kind == SEG_ITEM) arm_item(0);   // (every program currently opens on a tone)
+  if (!sdp_start(&sdplayer, BTN_DIRS[b], (int)random(1 << 30), pol, SAMPLE_RATE_HZ)) {
+    // A failed press is usually a spare/empty button, but it can also mean the card was
+    // pulled while idle. Re-probe: sdp_begin() re-runs SD.begin(), which flips card_ok false
+    // only if the card is truly gone (a present card with a missing/empty dir re-mounts fine
+    // and stays card_ok), so loop() then drops into the no-card recovery branch.
+    sdp_begin(&sdplayer);
+    return;
+  }
   playing = true;
-  sampleClock.begin(onSampleTick, 20);   // 20 us period == STIM_SAMPLE_RATE_HZ (50 kHz)
+  sampleClock.begin(onSampleTick, ISR_PERIOD_US);   // start the clock LAST
+}
+
+// Slow "no card" error blink (~1 Hz) so the operator sees a missing/failed SD card.
+static void error_blink() {
+  static uint32_t t0 = 0;
+  static bool on = false;
+  uint32_t now = millis();
+  if (now - t0 >= 500u) {
+    t0 = now;
+    on = !on;
+    digitalWriteFast(LED_PIN, on ? HIGH : LOW);
+  }
 }
 
 void setup() {
@@ -257,27 +142,29 @@ void setup() {
   analogWrite(PWM_A_PIN, 0);
   analogWrite(PWM_B_PIN, 0);
   randomSeed(analogRead(A0));
-  eel_control_begin();   // configure the 4 button pins + the LED, build the item lists
+  eel_control_begin();   // configure the 6 button pins + the LED
+  sdp_begin(&sdplayer);  // mount the SD card (retried in loop() if absent)
 }
 
-// Four one-shot program buttons — the button IS the program (no mode switch to latch, no
-// stop toggle). One press while idle plays that program once, start to finish:
-//   A  CALIBRATION   -> the bare 10 s 10 kHz sine, at the QUIET MARKER_CAL_AMPLITUDE (it is
-//                       played against a recording electrode) — a bench level/electrode
-//                       check + the long tone that measures the recorder/playback clock drift
-//   B  LOCALIZATION  -> a 1 s 10 kHz sine lead-in, the item's fixed per-item gap, then a
-//                       random localization item, bounded to LOC_PLAYBACK_S, at
-//                       LOC_AMPLITUDE
-//   C  VOLLEY        -> the same lead-in + gap, then a random volley item, in full at
-//                       VOLLEY_AMPLITUDE
-//   D  LOC -> VOLLEY -> ONE lead-in + gap, a SHORT localization (D_LOC_PLAYBACK_S), a
-//                       brief silence (D_INTERPHASE_GAP_MS), then a volley — the
-//                       sense-then-strike motif, loc and volley sharing one polarity
-// A press WHILE a session runs is IGNORED: playbacks are uninterruptible and always run to
-// completion, so a marker in the recording is always followed by the pulses it announced.
-// The lead-in marks every playback so downstream can locate it and pattern-match the known
-// IPI sequence. Item polarity is randomised per session (the symmetric marker has none).
+// Six one-shot program buttons — the button IS the program. One press while idle picks a
+// random WAV from that button's SD directory and streams it once, start to finish. A press
+// during a playback is ignored (uninterruptible). Buttons are debounced every loop so a held
+// button cannot spurious-retrigger at playback end.
+//
+//   A  /A  calibration    B  /B  localization   C  /C  volley
+//   D  /D  loc -> volley   E  /E  (spare)         F  /F  song
 void loop() {
-  const int prog = eel_control_program_fired();   // ticks every button's debounce
-  if (prog != PROG_NONE && !playing) begin_session((EelProgram)prog);
+  if (!sdplayer.card_ok) {
+    // No card mounted — flash an error and keep retrying so a late insert recovers.
+    error_blink();
+    static uint32_t last_try = 0;
+    if (millis() - last_try >= 1000u) {
+      last_try = millis();
+      if (sdp_begin(&sdplayer)) digitalWriteFast(LED_PIN, LOW);  // recovered -> clear the blink
+    }
+    return;
+  }
+  const int b = eel_control_button_fired();   // ticks every button's debounce
+  if (!playing && b != BTN_NONE) start_playback(b);
+  if (playing) sdp_prefetch(&sdplayer);       // keep the ring ahead of the ISR
 }
