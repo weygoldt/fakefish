@@ -1,0 +1,97 @@
+# Teensy fakefish playback-stimulus export — reproducible config.
+# Consumed by fakefish-export (scan + export). Run from the repo root.
+#
+#   fakefish-export scan   --config data/stimuli_config.yaml
+#   fakefish-export export --config data/stimuli_config.yaml
+
+paths:
+  # Production workspace (NOT the stale dummy set; single_eel_rec is clipped).
+  eods_root: /mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods
+  # Global cross-recording mean EOD waveform (with flanks). Default: <eods_root>/global_pulse_alignment_eel_eod.json
+  alignment_json: null
+  firmware_dir: firmware/eel_fakefish   # the self-contained Teensy 4.1 sketch folder
+  out_dir: data
+
+sample_rate:
+  playback_hz: 50000          # Teensy waveform playback rate (data is 48 kHz -> resampled)
+  original_hz_fallback: 48000
+
+scope:
+  # "all_lines" or an explicit list. Lines isolate single eels best.
+  sites: all_lines
+
+waveform:
+  trim_frac: 0.005            # trim to where |w| first/last exceeds 0.5 % of peak
+  flank_frac: 0.12            # fraction of length each side used as the baseline estimate
+  window: hann                # taper drawing the flanks to exactly 0 (hann|tukey|none).
+                              # The template has a broad ~1 % pre-pulse shoulder; a Hann
+                              # taper zeros the baseline (no playback clicks) and shortens
+                              # the effective pulse so volley pulses don't overlap.
+  window_tukey_alpha: 0.5     # flat-top fraction, only used when window: tukey
+
+volley_detector:              # step 1 — the gamma-shape rate detector
+  min_pulses: 8
+  volley_max_ipi_ms: 25.0     # antimode of the bimodal volley/localization IPI distribution
+  peak_in_first_frac: 0.5     # peak rate should fall in the first half of the train
+  # every EXPORTED volley must reach a peak instantaneous rate above this (a min IPI
+  # below 1000/this ms). Gates both scene selection and a hard emit-time backstop, so
+  # a fast-localization train or a truncated fragment can never play in VOLLEY mode.
+  volley_min_peak_hz: 100.0
+  # ... and no higher than this: a single eel's volley peaks at a few hundred Hz, so a
+  # real train above ~400 Hz is two fish volleying together (a multi-fish artifact).
+  volley_max_peak_hz: 400.0
+
+purity:                       # step 2 — single-fish verification
+  # NOTE: real eel volleys are intrinsically irregular at the ms scale (CV2 ~ 1
+  # for a *verified* single fish) and hunting fish MOVE, so CV2 + lag-1 are
+  # computed and plotted as diagnostics but do NOT hard-gate. The verdict rests
+  # on the spatial-TEMPORAL interleaving of a 2nd amplitude cluster (two co-active
+  # fish interleave in time; one moving fish is time-segregated) and any other
+  # tracker track concurrently active in the window.
+  cv2_report_only: true       # keep CV2/lag-1 diagnostic; set false to enable the soft guard below
+  cv2_extreme_median: 0.80    # soft guard (only if cv2_report_only=false): pathological median CV2
+  spatial_sil_sep: 0.45       # silhouette above this => the two clusters are genuinely separated
+  two_fish_min_frac: 0.08     # a 2nd cluster at least this large may be a real 2nd fish
+  interleave_thresh: 0.45     # minority runs/count above this => temporally interleaved => two fish
+  max_purify_frac: 0.02       # cap sprinkled-contaminant removal at 2 % of pulses
+  concurrent_margin_s: 2.0    # window padding when counting other active tracks
+  concurrent_min_pulses: 5    # an "active" other track needs this many pulses in-window
+  max_concurrent_tracks: 0    # a clean single-fish scene has no other track active
+
+selection:
+  n_volley_exemplars: 5       # 3-5, from different fish/events
+  n_localization_exemplars: 3 # 2-3, ~60 s each
+  localization_window_s: 60.0
+  localization_ipi_ms_lo: 60.0
+  localization_ipi_ms_hi: 1000.0
+  # multi-fish audit: a low-IPI sprinkle is NOT a reliable 2nd-fish cue (a single
+  # wide-localizing eel makes one too), so localization exemplars are gated on the
+  # reliable signal — no OTHER fish tracked concurrently in the window. Raise the cap
+  # to allow busier scenes. localization_low_ipi_ms only sets the reported diagnostic.
+  localization_max_concurrent_tracks: 0
+  localization_low_ipi_ms: 50.0
+  seed: 0
+  # include the synthetic volley/localization population (needs synthetic_population.npz
+  # from `python tools/synthetic_volleys.py synthesize`)
+  include_synthetic: true
+  # localization exemplars are trimmed to their longest gap-free run; a silence
+  # beyond this can't fit the uint16 sample-IPI (1.31 s ceiling) and isn't steady
+  localization_max_gap_s: 1.2
+  # Explicit human-confirmed picks. Leave empty to auto-rank the top single-fish
+  # candidates from the scan. Each item: {recording: <stem>, event_id: <int>}.
+  volley_picks: []
+  localization_picks: []
+
+marker:
+  # Out-of-band 5 kHz sine marker (the ANCHOR): a ~1 s sine lead-in precedes every
+  # volley/localization playback, and CALIBRATION mode is a 10 s sine. The tone itself
+  # (frequency/durations/amplitude) is a FIRMWARE concern (eel_fakefish/eel_control.h);
+  # only the per-item lead-in GAP is generated here. Each item gets its own gap, drawn
+  # once (uniform, deterministic off seed) and fixed — so downstream can key off the
+  # marker offset + the item's known gap to locate/identify the stimulus.
+  lead_gap_ms_lo: 50.0        # min silence (ms) between marker end and first pulse
+  lead_gap_ms_hi: 200.0       # max; must stay < 1310 ms (uint16 sample ceiling)
+
+budget:
+  # 128 kB soft budget — trivial on the 3.5's 512 kB flash and the 4.1's ~8 MB
+  max_flash_bytes: 131072

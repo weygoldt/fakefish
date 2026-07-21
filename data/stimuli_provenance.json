@@ -1,0 +1,441 @@
+{
+  "stim_format_version": 3,
+  "export_date_utc": "2026-07-16T07:52:53.019599+00:00",
+  "eeltracker_git_commit": "b1afd4ffc8c287d298938d488d4c0769e5cea333",
+  "eods_root": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods",
+  "alignment_json": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods/global_pulse_alignment_eel_eod.json",
+  "alignment_json_sha256": "b31b2cdc2fd38fe04429fadf317d81b234cb4e630a5c65813c421b3fe9e369ba",
+  "original_sample_rate_hz": 48000.0,
+  "playback_sample_rate_hz": 50000,
+  "resampling_method": "scipy.signal.resample_poly",
+  "waveform": {
+    "n_samples": 131,
+    "fwhm_us": 801.6197921719207,
+    "duration_us": 2620.0,
+    "peak_to_peak_norm": 1.0057566299146448,
+    "net_integral": 41.576658480510574,
+    "pos_neg_area_ratio": 386.57906304951877
+  },
+  "packet_bytes": 11922,
+  "flash_budget_bytes": 131072,
+  "selection_criteria": {
+    "volley_min_pulses": 8,
+    "volley_max_ipi_ms": 25.0,
+    "volley_min_peak_hz": 100.0,
+    "volley_max_peak_hz": 400.0,
+    "spatial_sil_sep": 0.45,
+    "two_fish_min_frac": 0.08,
+    "interleave_thresh": 0.45,
+    "max_purify_frac": 0.02,
+    "concurrent_margin_s": 2.0,
+    "concurrent_min_pulses": 5,
+    "max_concurrent_tracks": 0,
+    "localization_window_s": 60.0,
+    "localization_max_concurrent_tracks": 0,
+    "localization_low_ipi_ms": 50.0
+  },
+  "lead_in_marker": {
+    "nominal_freq_hz": 10000,
+    "leadin_s": 1.0,
+    "calibration_s": 10.0,
+    "note": "out-of-band 10 kHz sine ANCHOR: 10 s in CALIBRATION mode (replaces the old 50 Hz eel-EOD cal train), ~1 s lead-in before every volley/localization playback. Zero-start LUT + raised-cosine ramp; amplitude is a firmware global (decoupled from the localization scale). Duration alone distinguishes the 10 s cal from the 1 s lead-in.",
+    "lead_gap_ms_lo": 50.0,
+    "lead_gap_ms_hi": 200.0,
+    "per_item_gap": [
+      {
+        "index": 0,
+        "label": "flona08-20250915T1652-1_pulses#ev285",
+        "kind": "real_volley",
+        "gap_samp": 8135,
+        "gap_ms": 162.7
+      },
+      {
+        "index": 1,
+        "label": "flona16-20250920T1635-1_pulses#ev5",
+        "kind": "real_volley",
+        "gap_samp": 9967,
+        "gap_ms": 199.34
+      },
+      {
+        "index": 2,
+        "label": "flona12-20250918T1608-1_pulses#ev69",
+        "kind": "real_volley",
+        "gap_samp": 8225,
+        "gap_ms": 164.5
+      },
+      {
+        "index": 3,
+        "label": "flona16-20250916T1521-1_pulses#ev490",
+        "kind": "real_volley",
+        "gap_samp": 8827,
+        "gap_ms": 176.54
+      },
+      {
+        "index": 4,
+        "label": "flona12-20250916T1452-1_pulses#ev92",
+        "kind": "real_volley",
+        "gap_samp": 3344,
+        "gap_ms": 66.88
+      },
+      {
+        "index": 5,
+        "label": "flona16-20250920T1635-1_pulses#track2582",
+        "kind": "localization",
+        "gap_samp": 9661,
+        "gap_ms": 193.22
+      },
+      {
+        "index": 6,
+        "label": "flona12-20250918T1608-1_pulses#track5896",
+        "kind": "localization",
+        "gap_samp": 9836,
+        "gap_ms": 196.72
+      },
+      {
+        "index": 7,
+        "label": "synth_volley_body0.6s_tot0.6s_0",
+        "kind": "synth_volley",
+        "gap_samp": 8115,
+        "gap_ms": 162.3
+      },
+      {
+        "index": 8,
+        "label": "synth_volley_body0.6s_tot0.6s_1",
+        "kind": "synth_volley",
+        "gap_samp": 3621,
+        "gap_ms": 72.42
+      },
+      {
+        "index": 9,
+        "label": "synth_volley_body0.6s_tot0.6s_2",
+        "kind": "synth_volley",
+        "gap_samp": 4484,
+        "gap_ms": 89.68
+      },
+      {
+        "index": 10,
+        "label": "synth_volley_body0.9s_tot0.9s_0",
+        "kind": "synth_volley",
+        "gap_samp": 9981,
+        "gap_ms": 199.62
+      },
+      {
+        "index": 11,
+        "label": "synth_volley_body0.9s_tot0.9s_1",
+        "kind": "synth_volley",
+        "gap_samp": 6264,
+        "gap_ms": 125.28
+      },
+      {
+        "index": 12,
+        "label": "synth_volley_body0.9s_tot0.9s_2",
+        "kind": "synth_volley",
+        "gap_samp": 5649,
+        "gap_ms": 112.98
+      },
+      {
+        "index": 13,
+        "label": "synth_volley_body1.2s_tot1.2s_0",
+        "kind": "synth_volley",
+        "gap_samp": 4368,
+        "gap_ms": 87.36
+      },
+      {
+        "index": 14,
+        "label": "synth_volley_body1.2s_tot1.2s_1",
+        "kind": "synth_volley",
+        "gap_samp": 9995,
+        "gap_ms": 199.9
+      },
+      {
+        "index": 15,
+        "label": "synth_volley_body1.2s_tot1.2s_2",
+        "kind": "synth_volley",
+        "gap_samp": 4705,
+        "gap_ms": 94.1
+      },
+      {
+        "index": 16,
+        "label": "synth_volley_body1.6s_tot1.6s_0",
+        "kind": "synth_volley",
+        "gap_samp": 8019,
+        "gap_ms": 160.38
+      },
+      {
+        "index": 17,
+        "label": "synth_volley_body1.6s_tot1.6s_1",
+        "kind": "synth_volley",
+        "gap_samp": 8839,
+        "gap_ms": 176.78
+      },
+      {
+        "index": 18,
+        "label": "synth_volley_body1.6s_tot1.5s_2",
+        "kind": "synth_volley",
+        "gap_samp": 9382,
+        "gap_ms": 187.64
+      },
+      {
+        "index": 19,
+        "label": "synth_volley_body2.0s_tot2.0s_0",
+        "kind": "synth_volley",
+        "gap_samp": 4859,
+        "gap_ms": 97.18
+      },
+      {
+        "index": 20,
+        "label": "synth_volley_body2.0s_tot2.0s_1",
+        "kind": "synth_volley",
+        "gap_samp": 3863,
+        "gap_ms": 77.26
+      },
+      {
+        "index": 21,
+        "label": "synth_volley_body2.0s_tot2.0s_2",
+        "kind": "synth_volley",
+        "gap_samp": 3257,
+        "gap_ms": 65.14
+      },
+      {
+        "index": 22,
+        "label": "synth_volley_body2.5s_tot2.5s_0",
+        "kind": "synth_volley",
+        "gap_samp": 7986,
+        "gap_ms": 159.72
+      },
+      {
+        "index": 23,
+        "label": "synth_volley_body2.5s_tot2.5s_1",
+        "kind": "synth_volley",
+        "gap_samp": 9768,
+        "gap_ms": 195.36
+      },
+      {
+        "index": 24,
+        "label": "synth_volley_body2.5s_tot2.5s_2",
+        "kind": "synth_volley",
+        "gap_samp": 6288,
+        "gap_ms": 125.76
+      },
+      {
+        "index": 25,
+        "label": "synth_loc_1hz",
+        "kind": "localization",
+        "gap_samp": 7125,
+        "gap_ms": 142.5
+      },
+      {
+        "index": 26,
+        "label": "synth_loc_2hz",
+        "kind": "localization",
+        "gap_samp": 7326,
+        "gap_ms": 146.52
+      },
+      {
+        "index": 27,
+        "label": "synth_loc_3hz",
+        "kind": "localization",
+        "gap_samp": 3817,
+        "gap_ms": 76.34
+      },
+      {
+        "index": 28,
+        "label": "synth_loc_5hz",
+        "kind": "localization",
+        "gap_samp": 9231,
+        "gap_ms": 184.62
+      },
+      {
+        "index": 29,
+        "label": "synth_loc_7hz",
+        "kind": "localization",
+        "gap_samp": 2657,
+        "gap_ms": 53.14
+      },
+      {
+        "index": 30,
+        "label": "synth_loc_10hz",
+        "kind": "localization",
+        "gap_samp": 6352,
+        "gap_ms": 127.04
+      }
+    ]
+  },
+  "scenes": [
+    {
+      "kind": "volley",
+      "recording": "flona08-20250915T1652-1_pulses",
+      "site": "line_site_3_4",
+      "event_id": 285,
+      "t_start_s": 116156.72770833333,
+      "t_end_s": 116157.255,
+      "n_pulses": 80,
+      "n_purified_out": 0,
+      "mean_amp": 1971.3567352294922,
+      "gamma_score": 0.8717834879698534,
+      "peak_rate_hz": 335.6643363901196,
+      "low_ipi_frac": null,
+      "cv2_mean": 0.13054656268233453,
+      "cv2_p95": 0.3515214102336616,
+      "cv2_max": 0.4422110580279473,
+      "lag1_autocorr": 0.19134565971736744,
+      "spatial_dominant_frac": 0.575,
+      "spatial_silhouette": 0.5021015716002302,
+      "spatial_interleave": 0.058823529411764705,
+      "spatial_minority_frac": 0.425,
+      "n_concurrent_tracks": 2,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "volley",
+      "recording": "flona16-20250920T1635-1_pulses",
+      "site": "line_site_7",
+      "event_id": 5,
+      "t_start_s": 17924.1815625,
+      "t_end_s": 17924.320395833332,
+      "n_pulses": 30,
+      "n_purified_out": 0,
+      "mean_amp": 1882.3333740234375,
+      "gamma_score": 0.8399523222099127,
+      "peak_rate_hz": 366.4122132689627,
+      "low_ipi_frac": null,
+      "cv2_mean": 0.09830879722599792,
+      "cv2_p95": 0.3595705010550471,
+      "cv2_max": 0.4548736463777985,
+      "lag1_autocorr": -0.5569872701105896,
+      "spatial_dominant_frac": 0.5666666666666667,
+      "spatial_silhouette": 0.5708186341460525,
+      "spatial_interleave": 0.07692307692307693,
+      "spatial_minority_frac": 0.43333333333333335,
+      "n_concurrent_tracks": 1,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "volley",
+      "recording": "flona12-20250918T1608-1_pulses",
+      "site": "line_site_6",
+      "event_id": 69,
+      "t_start_s": 128790.5140625,
+      "t_end_s": 128790.752875,
+      "n_pulses": 43,
+      "n_purified_out": 0,
+      "mean_amp": 848.3068776685138,
+      "gamma_score": 0.8365246228012921,
+      "peak_rate_hz": 377.9527563157118,
+      "low_ipi_frac": null,
+      "cv2_mean": 0.12807835781197796,
+      "cv2_p95": 0.4615384628880414,
+      "cv2_max": 0.8481012675015829,
+      "lag1_autocorr": 0.30015545250539677,
+      "spatial_dominant_frac": 0.6976744186046512,
+      "spatial_silhouette": 0.7180397838527857,
+      "spatial_interleave": 0.07692307692307693,
+      "spatial_minority_frac": 0.3023255813953488,
+      "n_concurrent_tracks": 1,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "volley",
+      "recording": "flona16-20250916T1521-1_pulses",
+      "site": "line_site_7",
+      "event_id": 490,
+      "t_start_s": 116805.68922916667,
+      "t_end_s": 116805.81654166666,
+      "n_pulses": 34,
+      "n_purified_out": 0,
+      "mean_amp": 407.27058859432447,
+      "gamma_score": 0.7739698783313544,
+      "peak_rate_hz": 360.90225523980155,
+      "low_ipi_frac": null,
+      "cv2_mean": 0.1953204241045777,
+      "cv2_p95": 0.6718390801067867,
+      "cv2_max": 0.6858513176273062,
+      "lag1_autocorr": -0.10248416847311109,
+      "spatial_dominant_frac": 0.5588235294117647,
+      "spatial_silhouette": 0.4402576095237928,
+      "spatial_interleave": 0.2,
+      "spatial_minority_frac": 0.4411764705882353,
+      "n_concurrent_tracks": 0,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "volley",
+      "recording": "flona12-20250916T1452-1_pulses",
+      "site": "line_site_6",
+      "event_id": 92,
+      "t_start_s": 137465.61691666668,
+      "t_end_s": 137465.96266666666,
+      "n_pulses": 75,
+      "n_purified_out": 0,
+      "mean_amp": 242.38873291015625,
+      "gamma_score": 0.7960474330687344,
+      "peak_rate_hz": 360.9022571351949,
+      "low_ipi_frac": null,
+      "cv2_mean": 0.1763852348632228,
+      "cv2_p95": 0.89262117457218,
+      "cv2_max": 1.193939398031569,
+      "lag1_autocorr": -0.01605787511963734,
+      "spatial_dominant_frac": 0.68,
+      "spatial_silhouette": 0.6076482494080604,
+      "spatial_interleave": 0.041666666666666664,
+      "spatial_minority_frac": 0.32,
+      "n_concurrent_tracks": 2,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "localization",
+      "recording": "flona16-20250920T1635-1_pulses",
+      "site": "line_site_7",
+      "event_id": 2582,
+      "t_start_s": 129613.12072916667,
+      "t_end_s": 129673.01333333334,
+      "n_pulses": 217,
+      "n_purified_out": 0,
+      "mean_amp": 5.827837825370824,
+      "gamma_score": 0.8318630195289598,
+      "peak_rate_hz": 12.483745122871833,
+      "low_ipi_frac": 0.0,
+      "cv2_mean": 0.3516651114809911,
+      "cv2_p95": 0.8618579125449101,
+      "cv2_max": 1.7562884412594582,
+      "lag1_autocorr": 0.10281333834915402,
+      "spatial_dominant_frac": 0.6082949308755761,
+      "spatial_silhouette": 0.33213221020893424,
+      "spatial_interleave": 0.2823529411764706,
+      "spatial_minority_frac": 0.391705069124424,
+      "n_concurrent_tracks": 0,
+      "overlapping_volley": false,
+      "single_fish": true
+    },
+    {
+      "kind": "localization",
+      "recording": "flona12-20250918T1608-1_pulses",
+      "site": "line_site_6",
+      "event_id": 5896,
+      "t_start_s": 171669.89708333334,
+      "t_end_s": 171729.89166666666,
+      "n_pulses": 156,
+      "n_purified_out": 1,
+      "mean_amp": 7.518885685847356,
+      "gamma_score": 0.8773441845128063,
+      "peak_rate_hz": 9.387834928195693,
+      "low_ipi_frac": 0.0,
+      "cv2_mean": 0.28461155337097027,
+      "cv2_p95": 0.8361791006835687,
+      "cv2_max": 1.446539720688675,
+      "lag1_autocorr": 0.5660187847241465,
+      "spatial_dominant_frac": 0.5448717948717948,
+      "spatial_silhouette": 0.42955492605042056,
+      "spatial_interleave": 0.11267605633802817,
+      "spatial_minority_frac": 0.4551282051282051,
+      "n_concurrent_tracks": 0,
+      "overlapping_volley": false,
+      "single_fish": true
+    }
+  ]
+}

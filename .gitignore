@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Regenerable figure output (galleries / simulations write here)
+figs/
+
+# Regenerable export intermediates (recreate with `fakefish-export scan` /
+# `fakefish-synth-volleys`; need the source recordings)
+data/stimuli_candidates.json
+data/stimuli_qc.pdf
