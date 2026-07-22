@@ -27,23 +27,20 @@ dataset. See `README.md` (top-level) and `firmware/README.md` (firmware design).
    banner string and the `eeltracker_git_commit` provenance key are kept verbatim so
    a regenerated file matches the frozen schema. Only the value of the key (this
    repo's HEAD) changes.
-2. **`src/fakefish/_gallery_marker.py` mirrors the firmware.** The marker
-   frequency/amplitude and the four output levels (`VOLLEY_AMPLITUDE`,
-   `LOC_AMPLITUDE`, `MARKER_AMPLITUDE`, `MARKER_CAL_AMPLITUDE`) live in
-   `firmware/eel_fakefish/eel_control.h` + `eel_fakefish.ino` — the firmware is the
-   source of truth. If the firmware changes, update the mirror (and the export tool's
-   matching constants). Two Python modules mirror these levels: `_gallery_marker.py`
-   (visualisation only) and `build_sd_card.py`, which **bakes** the level / marker /
-   window constants into the SD-card WAVs — a firmware level change must be reflected
-   there too or the card and the sketch drift.
+2. **`build_sd_card.py` owns the output levels; `_gallery_marker.py` mirrors them.** In
+   the SD architecture the per-stimulus levels (volley 0.90 / localization 0.45 / marker
+   0.25 of full scale) and the marker LUT / lead-in / gap / window constants are **baked
+   into the WAVs** by `build_sd_card.py`; the firmware keeps only a single `MASTER_GAIN`
+   trim. `_gallery_marker.py` re-declares the same level / marker constants for the
+   galleries — keep it in sync with `build_sd_card.py` or the galleries and the card drift.
 3. **Flashing needs no Python; playback needs an SD card.** The firmware compiles and
    flashes with no Python and no dataset. Playback reads a **WAV card** (one directory per
    button) built by `fakefish-build-card`, which renders from the committed library and
    needs Python but **no dataset**. Only the *library regeneration* path
    (`fakefish-export`, reading `data/stimuli_config.yaml → paths.eods_root`) needs the
    source recordings (not shipped). Keep that split intact.
-4. **Firmware is bench-owned.** Do not claim it flashed or field-tested it. The 22 nF
-   bridging-cap swap is still owed; carry that warning in the README.
+4. **Firmware is bench-owned.** Do not claim it flashed or field-tested it (the hardware
+   itself is built and fixed).
 
 ## Toolchain conventions
 

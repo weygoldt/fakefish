@@ -82,24 +82,21 @@ one). Two FlexPWM pins (2, 3, same submodule → phase-aligned carriers) at the 
 carrier (150 MHz FlexPWM clock ÷ 256, 8-bit duty), each followed by a **1-pole RC**. This
 stage is **unchanged** from the flash-library firmware.
 
-> ### ⚠️ HARDWARE: the bridging cap must be **22 nF, not 220 nF**
-> Differential RC — **one 220 Ω per channel** and a **single cap BRIDGING the two nodes**
-> (across A–B, floating; NOT to GND). Electrodes sit on nodes A and B:
-> ```
->   pin 2 ──[220 Ω]──┬── node A ──► electrode A
->                    ├─[ C ]─┐   (C across A–B)
->   pin 3 ──[220 Ω]──┴───────┴── node B ──► electrode B
-> ```
-> The two 220 Ω add (440 Ω) in series with the bridging cap → differential corner
-> f_c = 1/(2π·440·C):
-> - **22 nF** → f_c = **16.4 kHz**: EOD passes (flat <2 kHz, ~410 µs edge intact) and the
->   10 kHz marker at −1.4 dB; 586 kHz carrier down −31 dB. **Correct.**
-> - **220 nF** → f_c = 1.6 kHz: sits *inside* the EOD band. **Wrong — swap the cap.**
->
-> Bridging (vs caps-to-GND) gives a **440 Ω** differential source impedance (less
-> conductivity-dependent amplitude loss) and one fewer part. **Caveat:** it filters the
-> *differential* carrier but not common-mode; if the recorder is single-ended or shares a
-> ground with the rig, add a small **~2.2–4.7 nF node→GND** on top of the 22 nF bridge.
+The RC is **differential**: one 220 Ω per channel and a single cap **bridging** the two
+nodes (across A–B, floating — not to GND), with the electrodes on nodes A and B:
+
+```
+  pin 2 ──[220 Ω]──┬── node A ──► electrode A
+                   ├─[ C ]─┐   (C across A–B)
+  pin 3 ──[220 Ω]──┴───────┴── node B ──► electrode B
+```
+
+The two 220 Ω (440 Ω) in series with the 22 nF bridge put the differential corner at
+**f_c ≈ 16.4 kHz** — the EOD passes flat (<2 kHz, ~410 µs edge intact), the 10 kHz marker
+at −1.4 dB, and the 586 kHz carrier is down −31 dB. Bridging (vs caps-to-GND) gives a
+440 Ω differential source impedance (less conductivity-dependent loss) and one fewer part.
+If the recorder is single-ended or shares a ground with the rig, add a small ~2.2–4.7 nF
+node→GND on top of the bridge.
 
 - **Resolution:** 8-bit duty; `out_write()` applies **first-order error-feedback noise
   shaping** per channel (`q=(v+64)>>7; err=v-(q<<7)`), exploiting the ~10× oversampling
@@ -264,14 +261,13 @@ current flows only in short pulses.
 
 ## Build
 
-1. **Swap the bridging cap to 22 nF first** (see the hardware warning above).
-2. Build a card: `fakefish-build-card --out /path/to/sdcard`, then insert the microSD.
-3. Open **`firmware/eel_fakefish/`** in the Arduino IDE (Teensyduino). Everything is in that
+1. Build a card: `fakefish-build-card --out /path/to/sdcard`, then insert the microSD.
+2. Open **`firmware/eel_fakefish/`** in the Arduino IDE (Teensyduino). Everything is in that
    one folder — no copying.
-4. Tools → Board → **Teensy 4.1**. (A non-4.1 build raises a `#warning`.)
-5. Optionally tune `MASTER_GAIN` in `eel_fakefish.ino`; wire the six buttons + the LED (see
+3. Tools → Board → **Teensy 4.1**. (A non-4.1 build raises a `#warning`.)
+4. Optionally tune `MASTER_GAIN` in `eel_fakefish.ino`; wire the six buttons + the LED (see
    *Wiring*), and flash.
-6. `loop()` is the six-button interface — press a button to play a random WAV from its
+5. `loop()` is the six-button interface — press a button to play a random WAV from its
    directory. The LED is solid while playing; a ~1 Hz blink means no card.
 
 ## Test the firmware logic on a PC

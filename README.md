@@ -21,12 +21,10 @@ This repo has two independent halves:
 
 ## Quickstart — build a card → flash → play
 
-1. **Hardware:** on the Teensy's dual-PWM + RC output, the bridging capacitor should
-   be **22 nF** (not 220 nF). Swap it if needed. ⚠️ See `firmware/README.md`.
-2. **Build the SD card** (needs the Python toolchain but no dataset — it renders from the
+1. **Build the SD card** (needs the Python toolchain but no dataset — it renders from the
    committed library): `uv run fakefish-build-card --out /path/to/sdcard`, then put the
    microSD in the Teensy 4.1's built-in slot.
-3. Open **`firmware/eel_fakefish/`** in the Arduino IDE (open the *folder* — every source
+2. Open **`firmware/eel_fakefish/`** in the Arduino IDE (open the *folder* — every source
    lives inside it, nothing to copy). Select **Teensy 4.1**. **Compile & upload.**
 
 Six one-shot program buttons (A calibration · B localization · C volley ·
@@ -37,7 +35,7 @@ card layout, and the design rationale are in
 **[`firmware/README.md`](firmware/README.md)** — the crown-jewel doc.
 
 > ⚠️ The firmware has **not** been bench-flashed with the latest changes. Test on a
-> real Teensy 4.1 before field use, and confirm the 22 nF cap.
+> real Teensy 4.1 before field use.
 
 ---
 

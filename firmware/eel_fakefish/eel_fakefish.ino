@@ -15,14 +15,11 @@
 // from the flash-library firmware — only the sample SOURCE changed (SD stream, not the
 // overlap-add engine).
 //
-// !!! HARDWARE (enabling): the bridging cap must be 22 nF, NOT 220 nF. !!!
-//   Differential RC: pin 2 -> 220 ohm -> node A -> electrode A; pin 3 -> 220 ohm ->
-//   node B -> electrode B; a SINGLE cap BRIDGES node A<->node B (floating, not GND).
-//   440 ohm (two 220 in series) + the bridging cap -> differential corner:
-//     22 nF  -> fc = 16.4 kHz: EOD passes and the 10 kHz marker passes at -1.4 dB. CORRECT.
-//     220 nF -> fc = 1.6 kHz: low-passes the EOD itself. WRONG -- swap the cap.
-//   V4A stainless, few volts, pulsed -> no DC-blocking cap; per-press polarity flip keeps
-//   the net charge near zero over a session (see README).
+// HARDWARE: the differential output RC is two 220 ohm (440 ohm) in series with a 22 nF cap
+//   bridging the two channels (across A<->B, floating; NOT to GND), electrodes on nodes A/B.
+//   Corner fc ~= 16.4 kHz: the EOD passes flat and the 10 kHz marker at -1.4 dB; the 586 kHz
+//   carrier is down -31 dB. V4A stainless, few volts, pulsed -> no DC-blocking cap; the
+//   per-press polarity flip keeps net charge near zero over a session (see README).
 //
 // RESOLUTION: 8-bit duty at the 585.9 kHz carrier (150 MHz FlexPWM clock / 256). out_write()
 // applies first-order error-feedback NOISE SHAPING per channel (~+3 effective in-band bits).
