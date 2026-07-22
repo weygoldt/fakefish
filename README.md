@@ -19,20 +19,55 @@ This repo has two independent halves:
 
 ---
 
-## Quickstart — build a card → flash → play
+## Quickstart tutorial — from clone to a stimulus in the water
 
-1. **Build the SD card** (needs the Python toolchain but no dataset — it renders from the
-   committed library): `uv run fakefish-build-card --out /path/to/sdcard`, then put the
-   microSD in the Teensy 4.1's built-in slot.
-2. Open **`firmware/eel_fakefish/`** in the Arduino IDE (open the *folder* — every source
-   lives inside it, nothing to copy). Select **Teensy 4.1**. **Compile & upload.**
+**You need:** a Teensy 4.1, a microSD card, six momentary push-buttons, an indicator LED,
+and the differential RC + electrode output stage wired to pins 2/3 (the exact RC is in
+[`firmware/README.md`](firmware/README.md)).
 
-Six one-shot program buttons (A calibration · B localization · C volley ·
-D localization→volley · E spare · F song) and a pin-13 indicator LED (solid = playing,
-~1 Hz blink = no card). Each stimulus is a WAV under one directory per button on the card;
-reassign a button by moving WAVs between directories — no reflash. Full instructions, the
-card layout, and the design rationale are in
-**[`firmware/README.md`](firmware/README.md)** — the crown-jewel doc.
+### 1 · Build the SD card
+```sh
+git clone https://github.com/weygoldt/fakefish && cd fakefish
+uv sync                                          # or: pip install -e .
+uv run fakefish-build-card --out /path/to/sdcard
+```
+This renders the whole stimulus library to the card — **one directory per button** (you'll
+see `/A /B /C /D /F` + a `manifest.json`). Copy them to the root of a FAT32 microSD and put
+it in the Teensy's built-in slot. No field dataset is needed; it renders from the committed
+library. (Program **F** plays `data/rickroll.wav` if present, otherwise a synth melody.)
+
+### 2 · Flash the firmware
+Open **`firmware/eel_fakefish/`** in the Arduino IDE (Teensyduino) — the whole sketch is in
+that one folder, nothing to copy. Select **Tools → Board → Teensy 4.1**, then **Upload**.
+
+### 3 · Wire it (once)
+Six buttons, each from its pin to **GND** (they're `INPUT_PULLUP`, active-low); the LED on
+pin 13; the electrodes on the differential RC output (pins 2/3). Wiring diagram in
+[`firmware/README.md`](firmware/README.md).
+
+| Button | Pin | One press plays |
+|--------|-----|-----------------|
+| **A** | 5 | a **calibration** tone (10 s, 10 kHz) |
+| **B** | 6 | a random **localization** session |
+| **C** | 7 | a random **volley** session |
+| **D** | 8 | a random **localize → strike** session |
+| **E** | 9 | *(spare — empty directory, silent)* |
+| **F** | 10 | the **song** |
+
+### 4 · Use it in the field
+Point the electrodes at the fish and **press a button once** — it plays that stimulus start
+to finish (playbacks are uninterruptible). Each press picks a *random* WAV from that button's
+directory and a random polarity. The **LED is solid while playing**, dark when idle; a
+**~1 Hz blink means no SD card**.
+
+### 5 · Tune / customise — no reflash
+- **Overall output level:** `MASTER_GAIN` in `eel_fakefish.ino` (per-stimulus levels are
+  baked into the WAVs).
+- **Reassign a button:** move WAVs between the card's directories.
+- **Change a stimulus or the song:** re-run `fakefish-build-card` (e.g. `--song mytune.wav`).
+
+The design rationale, the card layout, and the RC/marker details are all in the crown-jewel
+doc **[`firmware/README.md`](firmware/README.md)**.
 
 > ⚠️ The firmware has **not** been bench-flashed with the latest changes. Test on a
 > real Teensy 4.1 before field use.
