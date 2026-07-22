@@ -15,3 +15,6 @@ figs/
 # `fakefish-synth-volleys`; need the source recordings)
 data/stimuli_candidates.json
 data/stimuli_qc.pdf
+
+# Large / copyrighted demo song (kept local; build_sd_card falls back to a synth melody)
+data/rickroll.wav

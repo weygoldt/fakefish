@@ -69,10 +69,19 @@ def test_windowed_loc_parity(parsed):
             assert np.array_equal(bc._to_i16(a), bc._to_i16(ref)), f"loc {i} win {win}"
 
 
+def _write_tone_wav(path, rate=48000, channels=2, seconds=0.2):
+    t = np.arange(int(seconds * rate))
+    tone = (0.9 * 32767 * np.sin(2 * np.pi * 440 * t / rate)).astype(np.int16)
+    data = np.stack([tone] * channels, axis=1) if channels > 1 else tone
+    wavfile.write(path, rate, data)
+    return path
+
+
 def test_build_card_structure_and_levels(tmp_path, parsed):
     out = tmp_path / "card"
     vol, loc = _split(parsed)
-    bc.build_card(out, FW, bc.CardConfig(d_pairings=6))
+    song = _write_tone_wav(tmp_path / "song_src.wav")  # small song so the test skips data/rickroll.wav
+    bc.build_card(out, FW, bc.CardConfig(d_pairings=6, song_wav=song))
 
     # one directory per button, expected counts (D limited to 6 for speed)
     assert len(list((out / "A").glob("*.wav"))) == 1
@@ -106,6 +115,25 @@ def test_song_zero_mean(tmp_path):
     # peak ~= 0.5 full scale (a sample rarely lands exactly on the sine crest -> 16383/16384)
     assert 16383 <= int(np.abs(song).max()) <= 16384
     assert abs(float(song.mean())) < 5.0  # ~zero-mean -> safe under a polarity flip
+
+
+def test_load_wav_song(tmp_path):
+    # stereo int16 @ 48 kHz -> mono int16 @ 50 kHz, peak-normalised, DC-removed
+    src = _write_tone_wav(tmp_path / "src.wav", rate=48000, channels=2, seconds=0.3)
+    song = bc.load_wav_song(src, amplitude=0.5)
+    assert song.dtype == np.int16
+    assert song.ndim == 1
+    assert abs(song.size - int(0.3 * bc.RATE_HZ)) < 200      # resampled 48k -> 50k
+    assert 16383 <= int(np.abs(song).max()) <= 16384         # peak-normalised to ~0.5 FS
+    assert abs(float(song.mean())) < 5.0                     # DC removed
+
+    # an 8-bit UNSIGNED WAV (centred at 128) must convert without a DC pedestal
+    t = np.arange(int(0.1 * 44100))
+    u8 = (128 + 100 * np.sin(2 * np.pi * 220 * t / 44100)).astype(np.uint8)
+    p8 = tmp_path / "u8.wav"
+    wavfile.write(p8, 44100, u8)
+    s8 = bc.load_wav_song(p8, amplitude=0.5)
+    assert s8.dtype == np.int16 and abs(float(s8.mean())) < 20.0
 
 
 def test_mv_roundtrip():

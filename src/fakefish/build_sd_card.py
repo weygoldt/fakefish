@@ -12,7 +12,7 @@ Card layout (one dir per button; ``E`` is left unused)::
     /B/  localization : one WAV per loc item    = marker -> gap -> loc (20 s window)  @ LOC
     /C/  volley       : one WAV per volley item  = marker -> gap -> volley             @ VOLLEY
     /D/  loc->volley  : loc->volley sessions     = marker -> gap -> loc(5 s) -> gap -> volley
-    /F/  song         : the demo song
+    /F/  song         : a supplied WAV (data/rickroll.wav, → mono/50 kHz) or a synth melody
 
 Two fidelity rules make these WAVs a faithful migration of the on-device sessions
 (``firmware/eel_fakefish/{eel_control.h,eel_fakefish.ino,eel_player.cpp}``):
@@ -268,6 +268,41 @@ def synth_song(bpm: float = 114.0, amplitude: float = 0.5) -> np.ndarray:
     return _to_i16_from_units(np.concatenate(parts) * 32767.0)
 
 
+def load_wav_song(path: Path, amplitude: float = 0.5) -> np.ndarray:
+    """Load an arbitrary WAV as a mono ``int16`` @ 50 kHz song (mode c: a raw waveform).
+
+    Handles any common PCM dtype → float, stereo → mono, resample to the firmware rate, and
+    DC-removal + peak-normalisation to ``amplitude`` of full scale. The DC removal matters:
+    the song is a *continuous* minutes-long playback (unlike the short pulse stimuli), and
+    the firmware's polarity flip is only per-press, so a DC offset would inject net charge
+    into the electrodes for the whole song — removing the mean keeps it balanced.
+    """
+    from math import gcd
+
+    from scipy.io import wavfile
+    from scipy.signal import resample_poly
+
+    rate, data = wavfile.read(path)
+    x = np.asarray(data, dtype=np.float64)
+    if data.dtype == np.uint8:            # 8-bit PCM WAV is UNSIGNED, centred at 128
+        x = (x - 128.0) / 128.0
+    elif data.dtype == np.int16:
+        x = x / 32768.0
+    elif data.dtype == np.int32:
+        x = x / 2147483648.0
+    elif not np.issubdtype(data.dtype, np.floating):
+        raise ValueError(f"unsupported WAV dtype for the song: {data.dtype}")
+    if x.ndim > 1:                        # stereo / multichannel → mono
+        x = x.mean(axis=1)
+    if int(rate) != RATE_HZ:              # resample to the firmware playback rate
+        g = gcd(int(rate), RATE_HZ)
+        x = resample_poly(x, RATE_HZ // g, int(rate) // g)
+    x = x - float(np.mean(x))             # remove DC (continuous playback; see docstring)
+    peak = float(np.max(np.abs(x))) or 1.0
+    x = x / peak * float(amplitude)
+    return _to_i16_from_units(x * 32767.0)
+
+
 # ===== Card builder ===================================================================
 @dataclass(slots=True)
 class CardConfig:
@@ -275,6 +310,7 @@ class CardConfig:
 
     levels: Levels = field(default_factory=Levels)
     d_pairings: int = 0  # program-D WAVs: 0 == ALL loc x volley combos; N>0 == N rotated pairings
+    song_wav: Optional[Path] = None  # /F source WAV; None -> data/rickroll.wav, else the synth
     song_bpm: float = 114.0
     song_amplitude: float = 0.5
 
@@ -344,8 +380,15 @@ def build_card(out_dir: Path, firmware: Path, cfg: CardConfig) -> dict:
         _emit("D", f"locvol_{vi:02d}_{li:02d}.wav",
               render_loc_volley(eod, items[li], items[vi], int(gaps[li]), cfg.levels))
 
-    # F: demo song
-    _emit("F", "song.wav", synth_song(cfg.song_bpm, cfg.song_amplitude))
+    # F: the song — a supplied WAV rendered to the card, or the synth fallback if absent.
+    song_src = cfg.song_wav if cfg.song_wav is not None else (_res.DATA_DIR / "rickroll.wav")
+    if Path(song_src).exists():
+        song = load_wav_song(Path(song_src), cfg.song_amplitude)
+        log.info("song: %s → %.1f s @ 50 kHz", Path(song_src).name, song.size / RATE_HZ)
+    else:
+        song = synth_song(cfg.song_bpm, cfg.song_amplitude)
+        log.info("song: synthesised fallback (no %s found)", song_src)
+    _emit("F", "song.wav", song)
 
     manifest["total_wavs"] = sum(len(v) for v in manifest["buttons"].values())
     manifest["total_mb"] = round(total_bytes / 1e6, 1)
@@ -365,11 +408,12 @@ def build(
     out: Path = typer.Option(..., "--out", "-o", help="SD-card root directory to fill"),
     firmware: Path = typer.Option(_res.DEFAULT_FIRMWARE, "--firmware", "-f"),
     d_pairings: int = typer.Option(0, "--d-pairings", help="program-D WAVs (0 = all loc x volley combos)"),
+    song: Optional[Path] = typer.Option(None, "--song", help="song WAV for /F (default: data/rickroll.wav, else synth)"),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Render the whole stimulus library (+ song) into an SD-card directory tree."""
     configure_logging(verbose)
-    cfg = CardConfig(d_pairings=d_pairings)
+    cfg = CardConfig(d_pairings=d_pairings, song_wav=song)
     manifest = build_card(out, firmware, cfg)
     log.info("wrote %d WAVs (%.1f MB) to %s", manifest["total_wavs"], manifest["total_mb"], out)
     for button, files in manifest["buttons"].items():
