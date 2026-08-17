@@ -121,6 +121,7 @@ if [ ! -x "$TEENSY_GXX" ]; then
 else
   syntax_check_sketch eel_fakefish_button
   syntax_check_sketch eel_fakefish_rc
+  syntax_check_sketch rc_input_test      # standalone bring-up diagnostic (bundles no core)
 fi
 
 # ===== 4. python ===========================================================
