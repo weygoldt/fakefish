@@ -1,0 +1,105 @@
+{
+  "_comment": [
+    "SINGLE SOURCE OF TRUTH for the fakefish playback/session constants.",
+    "",
+    "Edit ONLY this file, then run `uv run fakefish-gen-constants`. That regenerates BOTH",
+    "  firmware/eel_core/stim_levels.h   (C, consumed by the sketches)",
+    "  src/fakefish/_constants.py        (Python, consumed by the toolchain)",
+    "and the CI gate asserts the regeneration leaves no git diff. Never hand-edit either",
+    "generated file — your edit will be silently reverted by the next codegen run.",
+    "",
+    "NOT here on purpose:",
+    "  * the SAMPLE RATE. It stays single-sourced in the export-generated eel_stimuli.h",
+    "    (STIM_SAMPLE_RATE_HZ) / export_teensy_stimuli.PLAYBACK_RATE_HZ; the generated files",
+    "    derive every sample-unit figure FROM it rather than restating it.",
+    "  * StimKind. Already single-sourced in the export tool, which defines the Python STIM_*",
+    "    values and emits the matching C enum.",
+    "  * pins, thresholds, debounce, calibration. Those are per-surface (L3) or per-board (L1)",
+    "    and live in firmware/eel_core/config.h or the sketch's own control header.",
+    "",
+    "THE TWO MARKERS ARE DIFFERENT MECHANISMS AND ARE NOT UNIFIED.",
+    "  sd_path.sine_marker  = a 10 kHz SINE TONE baked into the WAVs by build_sd_card.py,",
+    "                         used by the 6-button SD device. Emitted as SD_MARKER_*.",
+    "  rc_path.pulse_marker = a coded EOD PULSE BURST synthesised live by the RC device,",
+    "                         tagged by pulse count (volley vs sham). Emitted as PULSE_MARKER_*.",
+    "The distinct prefixes are deliberate: a bare MARKER_* name in a repo with two marker",
+    "mechanisms is a trap."
+  ],
+
+  "sd_path": {
+    "_comment": [
+      "Consumed today by build_sd_card.py (Python), which BAKES these into the WAV card.",
+      "Also emitted to C as SD_* for a future live surface that renders these on-device."
+    ],
+    "levels": {
+      "_comment": "Absolute output levels as a fraction of full scale (baked into the WAVs, NOT peak-normalised).",
+      "volley": 0.90,
+      "loc": 0.45,
+      "sine_marker": 0.25,
+      "sine_marker_cal": 0.25
+    },
+    "sine_marker": {
+      "_comment": [
+        "The 10 kHz out-of-band anchor tone. Its LUT is DERIVED, never stored:",
+        "  lut[k] = round(32767 * sin(2*pi*k / (sample_rate_hz / freq_hz)))",
+        "At 50 kHz / 10 kHz that is 5 samples per cycle -> [0, 31163, 19260, -19260, -31163],",
+        "which sums to exactly 0 (zero net charge). The 32767 amplitude is load-bearing:",
+        "32640 and 32768 both produce a different LUT."
+      ],
+      "freq_hz": 10000,
+      "ramp_samples": 100
+    },
+    "session": {
+      "_comment": "Session structure. Seconds/ms here; sample units are derived at codegen from the sample rate.",
+      "leadin_s": 1,
+      "cal_s": 10,
+      "loc_s": 20,
+      "d_loc_s": 5,
+      "d_gap_ms": 300
+    },
+    "fullscale_pulse_peak_mv": 3313.0
+  },
+
+  "rc_path": {
+    "_comment": [
+      "Consumed today by the RC sketch (C). NOMINAL levels only — on the 36 V DRV8871 stage",
+      "amplitude 1.0 means the full rail, so these are rail fractions, not volts."
+    ],
+    "pulse_marker": {
+      "_comment": [
+        "Coded preamble: a short EOD burst at a fixed IPI, tagged by PULSE COUNT — a volley is",
+        "pulses_volley pulses then the discharge, a sham is pulses_sham pulses then silence.",
+        "ipi_samp 500 @ 50 kHz = 10 ms = 100 Hz: clearly above localization (<=20 Hz) and below",
+        "the volley peak (~300-400 Hz). max_pulses sizes the static marker IPI table."
+      ],
+      "ipi_samp": 500,
+      "pulses_volley": 2,
+      "pulses_sham": 4,
+      "max_pulses": 8,
+      "amp": 0.5
+    },
+    "amp": {
+      "_comment": [
+        "The amplitude control sets the VOLLEY (max); localization is DERIVED as volley /",
+        "volley_amp_ratio (half at 2.0). Anchoring at the volley keeps the 2:1 ratio at every",
+        "pot position and needs no clamp. panel_volley_amp is the bench default with no transmitter."
+      ],
+      "volley_amp_ratio": 2.0,
+      "panel_volley_amp": 1.0,
+      "master_min": 0.0,
+      "master_max": 1.0
+    },
+    "loc_rate": {
+      "_comment": [
+        "Live localization train. refractory_samp is the minimum IPI (5 ms @ 50 kHz); it MUST",
+        "stay greater than EOD_HV_LEN so localization pulses can never overlap — that is what",
+        "lets locgen use a single-pulse scheduler instead of the overlap-add engine."
+      ],
+      "min_hz": 1.0,
+      "max_hz": 20.0,
+      "panel_rate_hz": 5.0,
+      "panel_cv": 0.2,
+      "refractory_samp": 250
+    }
+  }
+}

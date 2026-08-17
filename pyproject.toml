@@ -20,6 +20,8 @@ dev = [
 ]
 
 [project.scripts]
+# Codegen: shared/stim_constants.json -> stim_levels.h + _constants.py (no dataset needed):
+fakefish-gen-constants = "fakefish.gen_constants:app"
 # Regeneration path (needs the source recordings; not shipped):
 fakefish-export = "fakefish.export_teensy_stimuli:app"
 fakefish-synth-volleys = "fakefish.synthetic_volleys:app"

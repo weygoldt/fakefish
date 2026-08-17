@@ -1,8 +1,10 @@
 """Shared constants + drawing for the fakefish stimulus galleries.
 
-Everything here MIRRORS ``firmware/eel_fakefish/eel_control.h`` and the output-level
-knobs in ``eel_fakefish.ino`` — this is a visualisation helper, the firmware is the
-source of truth. Keep these in sync when the firmware changes.
+The levels and timings here are IMPORTED from the generated ``fakefish._constants``
+(source: ``shared/stim_constants.json``) — the same file that generates the firmware's
+``stim_levels.h`` and feeds ``build_sd_card.py``. They used to be re-declared literals in
+this module, which meant the galleries could silently drift away from the card they claim
+to depict; they are now single-sourced and cannot.
 
 The galleries draw **absolute device output** on a shared y-axis: the electrode drive
 as a fraction of the device's full scale (±1). So the 10 kHz marker is drawn at its
@@ -17,14 +19,34 @@ from __future__ import annotations
 
 import numpy as np
 
-# ---- Mirror firmware/eel_fakefish/eel_control.h + eel_fakefish.ino (viz only) --------
-MARKER_LEADIN_S = 1.0     # MARKER_LEADIN_S — the pre-stimulus lead-in tone
-MARKER_FREQ_HZ = 10000    # MARKER_FREQ_HZ — the out-of-band anchor frequency
-MARKER_AMPLITUDE = 0.25   # MARKER_AMPLITUDE (lead-in level, × full scale)
-LOC_AMPLITUDE = 0.45      # LOC_AMPLITUDE (localization items)
-VOLLEY_AMPLITUDE = 0.90   # VOLLEY_AMPLITUDE (volley items, and program D's strike)
-D_LOC_PLAYBACK_S = 5.0    # D_LOC_PLAYBACK_S — program D's short localization lead
-D_INTERPHASE_GAP_S = 0.3  # D_INTERPHASE_GAP_MS / 1000 — silence between D's loc and volley
+# ---- Single-sourced from shared/stim_constants.json (do not re-declare here) ---------
+from fakefish._constants import (
+    D_INTERPHASE_GAP_S,  # silence between program D's loc and volley
+    D_LOC_PLAYBACK_S,  # program D's short localization lead
+    LOC_AMPLITUDE,  # localization items
+    MARKER_AMPLITUDE,  # lead-in level, x full scale
+    MARKER_FREQ_HZ,  # the out-of-band anchor frequency
+    MARKER_LEADIN_S,  # the pre-stimulus lead-in tone
+    VOLLEY_AMPLITUDE,  # volley items, and program D's strike
+)
+
+#: This module is the galleries' single import point for both the level constants and the
+#: drawing helpers, so the names above are deliberately RE-EXPORTED (the plot_* modules
+#: import them from here, not from _constants). Declared explicitly so the re-export is
+#: intentional rather than an accident a linter would strip.
+__all__ = [
+    "D_INTERPHASE_GAP_S",
+    "D_LOC_PLAYBACK_S",
+    "LOC_AMPLITUDE",
+    "MARKER_AMPLITUDE",
+    "MARKER_COLOR",
+    "MARKER_FREQ_HZ",
+    "MARKER_LEADIN_S",
+    "MARKER_REL_AMP",
+    "VOLLEY_AMPLITUDE",
+    "draw_leadin",
+    "marker_cycles",
+]
 
 # Kept as an alias so callers that drew the marker band keep working; it IS the marker's
 # (relative-to-full-scale) amplitude.

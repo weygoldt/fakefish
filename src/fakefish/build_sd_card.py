@@ -24,8 +24,11 @@ Two fidelity rules make these WAVs a faithful migration of the on-device session
    per-press +/-1 sign flip so the eel EOD, which is net-DC/monophasic, never pits the
    electrodes by always-same-polarity electrolysis.
 
-The level constants and session structure here MIRROR the firmware, which stays the source
-of truth (see ``firmware/eel_fakefish/eel_control.h`` + ``eel_fakefish.ino``). Keep in sync.
+The level constants and session structure are NOT declared here: they come from
+``shared/stim_constants.json`` via the generated ``fakefish._constants``, which is also
+what generates the firmware's ``stim_levels.h``. One file feeds both languages, and a
+pytest guard fails if either generated file is stale — so the card, the galleries and the
+sketches cannot drift apart.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from typing import Optional
 import numpy as np
 import typer
 
+from fakefish import _constants as K
 from fakefish import _resources as _res
 from fakefish import export_teensy_stimuli as ex
 from fakefish.viz.loggers import configure_logging, get_logger
@@ -45,35 +49,42 @@ from fakefish.viz.loggers import configure_logging, get_logger
 log = get_logger(__name__)
 app = typer.Typer(add_completion=False, help="Render the stimulus library to SD-card WAVs.")
 
-# ===== Firmware mirror (source of truth: eel_control.h + eel_fakefish.ino) ============
-RATE_HZ = ex.PLAYBACK_RATE_HZ  # 50000
+# ===== Playback constants — SINGLE-SOURCED, do not edit here ==========================
+# Every value below comes from ``shared/stim_constants.json`` via the generated
+# ``fakefish._constants`` — the same file the firmware header ``stim_levels.h`` is
+# generated from. To change one, edit that JSON and re-run ``fakefish-gen-constants``;
+# a pytest guard fails if the generated files are stale. They are re-bound at module
+# level here so ``build_sd_card.RATE_HZ`` and friends keep working for callers/tests.
+RATE_HZ = K.RATE_HZ  # 50000
 
 # 10 kHz sine marker: one exact unit-sine cycle at 10 kHz / 50 kHz. Sums to 0 (zero net
-# charge). eel_control.h::MARKER_LUT.
-MARKER_LUT = np.array([0, 31163, 19260, -19260, -31163], dtype=np.float64)
-MARKER_RAMP_SAMPLES = 100  # ~2 ms raised-cosine on/off ramp (anti-click + spectral purity)
-MARKER_LEADIN_SAMPLES = 1 * RATE_HZ  # 50000  (1 s lead-in before B/C/D)
-MARKER_CAL_SAMPLES = 10 * RATE_HZ  # 500000 (10 s calibration tone, program A)
+# charge). Derived at codegen from round(32767 * sin(2*pi*k/n)).
+MARKER_LUT = K.MARKER_LUT
+MARKER_RAMP_SAMPLES = K.MARKER_RAMP_SAMPLES  # ~2 ms raised-cosine ramp (anti-click)
+MARKER_LEADIN_SAMPLES = K.MARKER_LEADIN_SAMPLES  # 50000  (1 s lead-in before B/C/D)
+MARKER_CAL_SAMPLES = K.MARKER_CAL_SAMPLES  # 500000 (10 s calibration tone, program A)
 
-LOC_PLAYBACK_SAMPLES = 20 * RATE_HZ  # 1_000_000  (B: 20 s localization window)
-D_LOC_PLAYBACK_SAMPLES = 5 * RATE_HZ  # 250_000   (D: 5 s localization lead)
-D_INTERPHASE_GAP_SAMPLES = 300 * RATE_HZ // 1000  # 15_000 (D: 300 ms loc->volley gap)
+LOC_PLAYBACK_SAMPLES = K.LOC_PLAYBACK_SAMPLES  # 1_000_000  (B: 20 s localization window)
+D_LOC_PLAYBACK_SAMPLES = K.D_LOC_PLAYBACK_SAMPLES  # 250_000   (D: 5 s localization lead)
+D_INTERPHASE_GAP_SAMPLES = K.D_INTERPHASE_GAP_SAMPLES  # 15_000 (D: 300 ms loc->volley gap)
 
-# Absolute output levels, as a fraction of full scale (eel_fakefish.ino knobs). These are
-# the DEFAULTS that reproduce today's stimuli exactly; the CLI accepts mV overrides.
-VOLLEY_AMPLITUDE = 0.90  # C, and D's strike
-LOC_AMPLITUDE = 0.45  # B, and D's lead-in localization
-MARKER_AMPLITUDE = 0.25  # 1 s lead-in tone (B/C/D)
-MARKER_CAL_AMPLITUDE = 0.25  # 10 s calibration tone (A)
+# Absolute output levels, as a fraction of full scale — baked into the WAVs rather than
+# peak-normalised, because the level RATIOS are the experiment. These are the DEFAULTS
+# that reproduce today's stimuli exactly; the CLI accepts mV overrides.
+VOLLEY_AMPLITUDE = K.VOLLEY_AMPLITUDE  # C, and D's strike
+LOC_AMPLITUDE = K.LOC_AMPLITUDE  # B, and D's lead-in localization
+MARKER_AMPLITUDE = K.MARKER_AMPLITUDE  # 1 s lead-in tone (B/C/D)
+MARKER_CAL_AMPLITUDE = K.MARKER_CAL_AMPLITUDE  # 10 s calibration tone (A)
 
 # ===== Nominal mV <-> amplitude map ===================================================
-# eel_fakefish.ino: V_peak ~= 3.3 V * amplitude * LUT_peak/32640. A pulse peaks at 32767,
-# so its open-circuit peak at full scale is ~3.3 * 32767/32640 ~= 3.313 V == 3313 mV.
+# V_peak ~= 3.3 V * amplitude * LUT_peak/32640. A pulse peaks at 32767, so its
+# open-circuit peak at full scale is ~3.3 * 32767/32640 ~= 3.313 V == 3313 mV.
 # NOTE: this is a NOMINAL, open-circuit source level, NOT a calibrated field strength — in
-# water the 440 ohm source impedance divides against the electrode/water load and the
-# delivered level is lower and conductivity-dependent. Treat mV as "operator-set nominal
-# source level", never as a measured field amplitude.
-FULLSCALE_PULSE_PEAK_MV = 3313.0
+# water the source impedance divides against the electrode/water load and the delivered
+# level is lower and conductivity-dependent. Treat mV as "operator-set nominal source
+# level", never as a measured field amplitude. (On the 36 V DRV8871 stage the absolute
+# volts differ; this map is the historical nominal used to author the card.)
+FULLSCALE_PULSE_PEAK_MV = K.FULLSCALE_PULSE_PEAK_MV
 
 
 def mv_to_amplitude(mv: float) -> float:
