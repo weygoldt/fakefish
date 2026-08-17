@@ -4,11 +4,12 @@ Programs B (localization) and C (volley) each play one library item; program **D
 the sense-then-strike motif the *firmware* assembles from two — there is no "loc+volley"
 item in the library, so this gallery reconstructs what a D press actually emits:
 
-    [10 kHz marker] -> [gap] -> [short localization, D_LOC_PLAYBACK_S] -> [interphase gap]
-                                                                         -> [volley]
+    [pulse marker] -> [gap] -> [short localization, D_LOC_PLAYBACK_S] -> [interphase gap]
+                                                                        -> [volley]
 
-under ONE marker, at absolute device output levels (localization at LOC_AMPLITUDE, the
-strike at the higher VOLLEY_AMPLITUDE — the amplitude step is D's whole point). The
+under ONE alternating-polarity pulse marker, at absolute device output levels
+(localization at LOC_AMPLITUDE, the strike at the higher VOLLEY_AMPLITUDE — the
+amplitude step is D's whole point). The
 firmware draws the loc and the volley at random per press; this gallery shows one
 representative pairing per volley (cycling through the localizations so every one appears)
 so you can see every volley in its striking context and confirm the sequence anatomy.
@@ -36,6 +37,7 @@ from fakefish._gallery_marker import (  # noqa: E402
     D_INTERPHASE_GAP_S,
     D_LOC_PLAYBACK_S,
     LOC_AMPLITUDE,
+    MARKER_N_PULSES,
     VOLLEY_AMPLITUDE,
     draw_leadin,
 )
@@ -56,12 +58,14 @@ def main(
     ),
     out: Path = typer.Option(_res.FIGS_DIR / "loc_volley_gallery.png", "--out", "-o"),
     marker_show_s: float = typer.Option(
-        0.15, "--marker-show-s", help="seconds of the 1 s lead-in tone to draw (>=1 = full)"
+        0.15, "--marker-show-s",
+        help="pre-onset seconds to draw (clamped to at least the full marker burst)",
     ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
-    """Draw every volley in loc->volley (program D) mode: one marker, a short localization
-    lead, an interphase gap, then the strike — at absolute device output levels."""
+    """Draw every volley in loc->volley (program D) mode: one alternating-polarity pulse
+    marker, a short localization lead, an interphase gap, then the strike — at absolute
+    device output levels."""
     configure_logging(verbose)
     parsed = ex.parse_firmware(firmware)
     gaps = parsed["lead_gap_samp"]
@@ -138,7 +142,8 @@ def main(
         axes[j // ncol][j % ncol].axis("off")
     fig.suptitle(
         f"Program D — localize ({D_LOC_PLAYBACK_S:.0f} s) → "
-        f"{D_INTERPHASE_GAP_S * 1000:.0f} ms gap → strike, one marker · {len(vol)}"
+        f"{D_INTERPHASE_GAP_S * 1000:.0f} ms gap → strike, one "
+        f"{MARKER_N_PULSES}-pulse marker · {len(vol)}"
     )
     fig.supxlabel("time relative to localization onset (s)", fontsize=8)
     fig.supylabel("output level (× full scale)", fontsize=8)

@@ -17,13 +17,19 @@
     "  * pins, thresholds, debounce, calibration. Those are per-surface (L3) or per-board (L1)",
     "    and live in firmware/eel_core/config.h or the sketch's own control header.",
     "",
-    "THE TWO MARKERS ARE DIFFERENT MECHANISMS AND ARE NOT UNIFIED.",
-    "  sd_path.sine_marker  = a 10 kHz SINE TONE baked into the WAVs by build_sd_card.py,",
-    "                         used by the 6-button SD device. Emitted as SD_MARKER_*.",
-    "  rc_path.pulse_marker = a coded EOD PULSE BURST synthesised live by the RC device,",
-    "                         tagged by pulse count (volley vs sham). Emitted as PULSE_MARKER_*.",
+    "BOTH DEVICES NOW MARK WITH EEL PULSES, BUT WITH DIFFERENT CODES. NOT UNIFIED.",
+    "  sd_path.pulse_marker = 6 EOD pulses at a fixed 10 Hz with ALTERNATING polarity,",
+    "                         baked into the WAVs by build_sd_card.py. Identifies a playback.",
+    "                         Emitted as SD_MARKER_*.",
+    "  rc_path.pulse_marker = 2 or 4 EOD pulses at a fixed 100 Hz, SAME polarity, synthesised",
+    "                         live by the RC device. The COUNT tags volley vs sham.",
+    "                         Emitted as PULSE_MARKER_*.",
     "The distinct prefixes are deliberate: a bare MARKER_* name in a repo with two marker",
-    "mechanisms is a trap."
+    "codes is a trap.",
+    "",
+    "(History: the SD device used a 10 kHz SINE tone until 2026-08-17. It was removed because",
+    "the per-channel 2-pole output filter attenuates 10 kHz by ~21.8 dB, and because everything",
+    "the device emits should be made of eel pulses. See TODO.md.)"
   ],
 
   "sd_path": {
@@ -35,24 +41,45 @@
       "_comment": "Absolute output levels as a fraction of full scale (baked into the WAVs, NOT peak-normalised).",
       "volley": 0.90,
       "loc": 0.45,
-      "sine_marker": 0.25,
-      "sine_marker_cal": 0.25
+      "calibration": 0.45,
+      "pulse_marker": 0.5
     },
-    "sine_marker": {
+    "pulse_marker": {
       "_comment": [
-        "The 10 kHz out-of-band anchor tone. Its LUT is DERIVED, never stored:",
-        "  lut[k] = round(32767 * sin(2*pi*k / (sample_rate_hz / freq_hz)))",
-        "At 50 kHz / 10 kHz that is 5 samples per cycle -> [0, 31163, 19260, -19260, -31163],",
-        "which sums to exactly 0 (zero net charge). The 32767 amplitude is load-bearing:",
-        "32640 and 32768 both produce a different LUT."
+        "The lead-in that identifies a playback: n_pulses EOD pulses at a FIXED rate with",
+        "ALTERNATING polarity, prepended to every B/C/D session.",
+        "",
+        "Why this is detectable, and why each parameter is what it is:",
+        "  * ALTERNATING polarity is the discriminator. No real eel alternates, and a",
+        "    localization train is single-polarity, so the pattern cannot be confused with",
+        "    biology or with the stimulus that follows it.",
+        "  * Alternation also SURVIVES the firmware's per-press random polarity flip: the flip",
+        "    negates the whole WAV, so the absolute sign is unpredictable but the alternation",
+        "    is invariant. Detect the pattern, never the sign.",
+        "  * n_pulses must be EVEN so the burst is CHARGE-BALANCED (equal numbers of each",
+        "    polarity of an identical waveform => net charge ~0). This replaces the zero-sum",
+        "    property the old sine LUT provided. The codegen asserts it.",
+        "  * rate_hz sits BELOW the volley range (which peaks at 300-400 Hz) and the IPI stays",
+        "    far longer than one EOD, so marker pulses never overlap.",
+        "",
+        "Provisional values, easy to retune here: 6 pulses at 10 Hz."
       ],
-      "freq_hz": 10000,
-      "ramp_samples": 100
+      "n_pulses": 6,
+      "rate_hz": 10.0
+    },
+    "calibration": {
+      "_comment": [
+        "Program A: a steady, single-polarity EOD train at a known rate and level — a plain",
+        "reference signal for setting gain and checking the rig. Single-polarity (unlike the",
+        "marker) so it is unambiguously a calibration signal and not a lead-in code; its net",
+        "charge is balanced across presses by the firmware's random polarity flip, exactly as",
+        "for the localization program."
+      ],
+      "rate_hz": 50.0,
+      "duration_s": 10
     },
     "session": {
       "_comment": "Session structure. Seconds/ms here; sample units are derived at codegen from the sample rate.",
-      "leadin_s": 1,
-      "cal_s": 10,
       "loc_s": 20,
       "d_loc_s": 5,
       "d_gap_ms": 300

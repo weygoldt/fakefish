@@ -22,8 +22,11 @@ plays back any species' EOD table.
 > and the absolute level must be **re-scoped** and trimmed (`MASTER_GAIN`) before it goes near
 > a fish. This firmware must not be run on the old direct-pin hardware.
 >
-> Full scale is **~72 Vpp differential**; a `0.90` volley pulse reaches roughly **30 V peak**
-> per electrode (open-circuit, nominal rail).
+> Full scale is the **rail**: because the eel EOD is monophasic, only one bridge ever drives while
+> the other is braked to 0 V, so a discharge reaches **at most ~36 V**. A `0.90` volley pulse is
+> roughly **32 V** and a `0.45` localization pulse roughly **16 V**, open-circuit at nominal rail.
+> (It is *not* ~72 Vpp — that would need a biphasic signal driving both bridges in opposite
+> directions at once, which never happens here.)
 >
 > **Every millivolt figure the toolchain prints is stale.** `FULLSCALE_PULSE_PEAK_MV` (3313.0)
 > was derived from the retired 3.3 V rail, so the renderer's mV CLI and a built card's
@@ -72,17 +75,20 @@ while it is stale.
 | **Who holds it** | the operator, in the hand, at the fish | a catamaran airboat; operator on the transmitter |
 | **Trigger** | 6 program buttons (pins 5–10), one press = one complete playback, uninterruptible | 4 RC channels via a PC817 opto-isolator (pins 4–7) **OR-ed** with 3 panel buttons (pins 9–11) for the bench |
 | **Stimulus source** | **pre-rendered SD WAVs** — mono `int16` @ 50 kHz, one directory per button, built by `fakefish-build-card` | **live synthesis** on-device — `locgen` for the localization train, `eel_player` for the volley, over the mean EOD |
-| **What it can play** | calibration tone · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot volley · one-shot **sham** |
-| **Marker** | **10 kHz sine tone**, baked into every WAV (`SD_MARKER_*`) | **coded pulse burst**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
+| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot volley · one-shot **sham** |
+| **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
 | **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at half (`PANEL_VOLLEY_AMP` on the bench) |
 | **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost |
 | **Needs an SD card** | **yes** | no |
 
-**The two markers are deliberately not unified.** The SD device's anchor is a pure out-of-band
-**sine tone** rendered into the WAV; the RC device's is a **coded EOD pulse burst** whose
-*pulse count* tags what follows. They are different mechanisms solving the same problem on
-different hardware paths, which is why the constants carry distinct `SD_MARKER_*` /
-`PULSE_MARKER_*` prefixes — a bare `MARKER_*` name in this repo would be a trap.
+**The two markers are deliberately not unified.** Both are made of eel pulses now — nothing either
+device emits is out of band — but they carry **different codes**, because they answer different
+questions. The SD device's is a 6-pulse, 10 Hz burst with **alternating polarity**: it says *this
+is a playback*, and the alternation is a pattern no eel produces and the firmware's random polarity
+flip cannot erase. The RC device's is a 2- or 4-pulse, 100 Hz burst at a **single polarity**, where
+the *count* tags volley vs sham. Same material, different codes — which is why the constants carry
+distinct `SD_MARKER_*` / `PULSE_MARKER_*` prefixes; a bare `MARKER_*` name in this repo would be a
+trap.
 
 ---
 
@@ -106,9 +112,11 @@ summed by the overlap-add engine.
 
 **Why any marker at all.** The same grids and lines that record wild fish also record whatever
 the fakefish plays at them, so downstream we must know which pulses were ours. The marker
-locates each playback in the recording and pins the recorder-vs-playback clock drift. The
-rationale for the 10 kHz sine, its exact zero-sum LUT, and the pulse-burst coding are in
-[`firmware/README.md`](firmware/README.md).
+locates each playback in the recording and pins the recorder-vs-playback clock drift. The SD
+device's marker used to be a 10 kHz sine tone; it was retired because the output filter is 21.8 dB
+down at 10 kHz, and because everything the device puts in the water should be made of eel pulses.
+The full rationale for both codes — why alternation, why an even pulse count, why the RC device
+counts instead — is in [`firmware/README.md`](firmware/README.md).
 
 **Polarity is randomised per playback.** The eel EOD is monophasic on purpose, so each pulse
 injects net charge; flipping the sign of a whole playback at random keeps the net near zero
@@ -209,7 +217,7 @@ otherwise a synthesised melody; `--song mytune.wav` overrides it.
 
 | Button | Pin | Directory | One press plays |
 |--------|-----|-----------|-----------------|
-| **A** | 5 | `/A` | a **calibration** tone (10 s, 10 kHz) |
+| **A** | 5 | `/A` | a **calibration** train (10 s of single-polarity eel pulses @ 50 Hz) |
 | **B** | 6 | `/B` | a random **localization** session |
 | **C** | 7 | `/C` | a random **volley** session |
 | **D** | 8 | `/D` | a random **localize → strike** session |

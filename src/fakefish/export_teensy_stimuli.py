@@ -72,12 +72,12 @@ app = typer.Typer(
 DEFAULT_SAMPLE_RATE_HZ = 48000.0
 PLAYBACK_RATE_HZ = 50000
 # v3 adds STIM_LEAD_GAP_SAMP[] — the per-item deterministic lead-in gap (samples of
-# silence between the sine marker and the item's first pulse). The EOD waveform
+# silence between the lead-in marker and the item's first pulse). The EOD waveform
 # and the StimItem table are byte-identical to v2; v3 is a strict superset.
 STIM_FORMAT_VERSION = 3
 
 # Per-item lead-in gap: each library item gets its OWN randomly-chosen-but-then-fixed
-# offset between the sine marker's end and its first pulse, drawn once here (deterministic,
+# offset between the lead-in marker's end and its first pulse, drawn once here (deterministic,
 # seeded off cfg.seed) and baked into the header + provenance. Downstream, the marker's
 # offset in the recording plus this known per-item gap synchronises and helps identify
 # which item played. A fixed substream keeps the gap draw independent of any other RNG use.
@@ -186,7 +186,7 @@ class Config:
     seed: int = 0
 
     # ---- Sine-marker lead-in gap (see LEAD_GAP_RNG_SUBSTREAM above) ----------
-    # Each VOLLEY/LOCALIZATION playback is preceded by a ~1 s sine marker; a short
+    # Each VOLLEY/LOCALIZATION playback is preceded by a lead-in marker; a short
     # silent gap then separates the marker from the item's first pulse. The gap is drawn
     # once PER ITEM in [lead_gap_ms_lo, lead_gap_ms_hi] (uniform, deterministic) and fixed —
     # never re-drawn per playback — so downstream can key off the marker offset + the item's
@@ -1280,7 +1280,7 @@ def lead_gaps_for_items(n_items: int, cfg: Config, playback_hz: int) -> np.ndarr
 
     One gap per item, drawn uniformly in ``[lead_gap_ms_lo, lead_gap_ms_hi]`` and rounded
     to a 50 kHz sample count. Fixed per item (baked into the header + provenance), NOT
-    re-drawn per playback: downstream, the sine marker's offset in the recording plus this
+    re-drawn per playback: downstream, the marker's offset in the recording plus this
     known gap locates the item's first pulse (and the per-item spread is a weak fingerprint).
     A dedicated RNG substream keeps this draw independent of any other seeded step.
     """
@@ -2076,17 +2076,25 @@ def _lead_in_marker_provenance(
 ) -> dict:
     """The frozen sine-marker + per-item lead-in-gap contract (see the detector handoff).
 
-    The values here are the FROZEN nominal contract a downstream marker detector keys off,
-    plus the deterministic per-item gaps generated at export. The tone is realised by
-    ``build_sd_card.py`` from ``shared/stim_constants.json``; this dict is what the shipped
-    library DECLARED, and ``tests/test_gen_constants.py`` asserts the two agree.
+    HISTORICAL. These values describe the **retired 10 kHz sine marker**, which the SD card
+    stopped carrying in 2026-08 (the 2-pole output filter attenuated it by ~21.8 dB; the
+    lead-in is now an alternating-polarity eel-pulse burst — see ``build_sd_card`` and
+    ``shared/stim_constants.json``). They are kept verbatim because they are part of the
+    BYTE-FROZEN provenance schema: changing them would stop the library regenerating
+    byte-identically, and they remain the contract for recordings already made.
+
+    What is still LIVE here is the per-item ``lead_gap_samp`` — the deterministic silence
+    between the marker and the item's first pulse. That gap is unchanged, and the new marker
+    sits in front of it exactly as the sine did.
+
+    ``tests/test_gen_constants.py`` pins this block as the retired contract (NOT as equal to
+    today's codegen) and checks the gaps against the frozen library.
     """
     return dict(
-        # Nominal marker contract. These values are part of the BYTE-FROZEN provenance
-        # schema, so they are restated literally here and must not be rewired to the
-        # codegen: shared/stim_constants.json owns what the card is BUILT with, this owns
-        # what the shipped library DECLARED. tests/test_gen_constants.py pins them equal.
-        nominal_freq_hz=10000,   # SD_MARKER_FREQ_HZ in firmware/eel_core/stim_levels.h
+        # RETIRED sine-marker contract, frozen. Do not rewire to shared/stim_constants.json:
+        # that file owns what the card is BUILT with today, this owns what the shipped
+        # library DECLARED. The two describe different markers and no longer agree.
+        nominal_freq_hz=10000,   # the retired 10 kHz sine
         leadin_s=1.0,
         calibration_s=10.0,
         note=(

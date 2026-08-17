@@ -27,7 +27,11 @@ from fakefish.viz.plotstyle import CATEGORICAL, full_page  # noqa: E402
 
 from fakefish import export_teensy_stimuli as ex  # noqa: E402
 from fakefish import _resources as _res  # noqa: E402
-from fakefish._gallery_marker import VOLLEY_AMPLITUDE, draw_leadin  # noqa: E402
+from fakefish._gallery_marker import (  # noqa: E402
+    MARKER_N_PULSES,
+    VOLLEY_AMPLITUDE,
+    draw_leadin,
+)
 
 log = get_logger(__name__)
 app = typer.Typer(add_completion=False)
@@ -48,14 +52,15 @@ def main(
     ),
     out: Path = typer.Option(_res.FIGS_DIR / "volley_gallery.png", "--out", "-o"),
     marker_show_s: float = typer.Option(
-        0.15, "--marker-show-s", help="seconds of the 1 s lead-in tone to draw (>=1 = full)"
+        0.15, "--marker-show-s",
+        help="pre-onset seconds to draw (clamped to at least the full marker burst)",
     ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Draw every volley-family item as an output-level-over-time gallery, each preceded by
-    its 10 kHz sine lead-in marker + fixed per-item gap (so you see where the tone lands
-    relative to the stimulus onset at t=0). Levels are absolute device output: the volley
-    plays at VOLLEY_AMPLITUDE and the marker at its own (lower) level."""
+    its alternating-polarity pulse marker + fixed per-item gap (so you see where the burst
+    lands relative to the stimulus onset at t=0). Levels are absolute device output: the
+    volley plays at VOLLEY_AMPLITUDE and the marker at its own (lower) level."""
     configure_logging(verbose)
     parsed = ex.parse_firmware(firmware)
     gaps = parsed["lead_gap_samp"]
@@ -89,7 +94,7 @@ def main(
         label, colour = KIND_STYLE[it["kind"]]
         trace = ex.reconstruct_item(eod, it["ipi_samp"], it["rel_amp"]) * VOLLEY_AMPLITUDE
         t = np.arange(trace.size) / hz  # stimulus onset at t = 0
-        # the 10 kHz lead-in marker + this item's fixed gap, to the left of onset
+        # the alternating pulse marker + this item's fixed gap, to the left of onset
         gap_ms = int(gaps[it["_idx"]]) / hz * 1000
         x_left = draw_leadin(ax, int(gaps[it["_idx"]]), hz, show_s=marker_show_s)
         ax.plot(t, trace, color=colour, lw=0.4, zorder=3)
@@ -104,7 +109,8 @@ def main(
     for j in range(len(vol), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
     fig.suptitle(
-        f"Every volley — 10 kHz marker → gap → onset (t=0) → volley · {len(vol)} items"
+        f"Every volley — {MARKER_N_PULSES}-pulse alternating marker → gap → onset (t=0) "
+        f"→ volley · {len(vol)} items"
     )
     fig.supxlabel("time relative to stimulus onset (s)", fontsize=8)
     fig.supylabel("output level (× full scale)", fontsize=8)

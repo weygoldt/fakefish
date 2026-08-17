@@ -7,11 +7,11 @@
 // (STIM_SAMPLE_RATE_HZ), so it is stated exactly once in the whole repo. Every
 // sample-unit figure below is derived from it by the preprocessor.
 //
-// TWO DIFFERENT MARKERS, deliberately NOT unified:
-//   SD_MARKER_*    a 10 kHz SINE TONE, baked into the WAV card by build_sd_card.py
-//                  and played by the 6-button SD device.
-//   PULSE_MARKER_* a coded EOD PULSE BURST, synthesised live by the RC device and
-//                  tagged by pulse count (volley vs sham).
+// BOTH DEVICES MARK WITH EEL PULSES, but with DIFFERENT codes — not unified:
+//   SD_MARKER_*    6 pulses at a fixed 10 Hz with ALTERNATING polarity, baked into
+//                  the WAV card by build_sd_card.py. Identifies a playback.
+//   PULSE_MARKER_* 2 or 4 pulses at a fixed 100 Hz, SAME polarity, synthesised live
+//                  by the RC device. The COUNT tags volley vs sham.
 #pragma once
 #include <stdint.h>
 #include "eel_stimuli.h"   // STIM_SAMPLE_RATE_HZ — the one place the rate is defined
@@ -19,29 +19,35 @@
 // ===== SD path — levels baked into the WAV card ============================
 // Absolute output levels as a fraction of full scale (NOT peak-normalised): the
 // loc/volley/marker ratios are the experiment, so they must survive rendering.
-#define SD_LEVEL_VOLLEY          0.9f
-#define SD_LEVEL_LOC             0.45f
-#define SD_LEVEL_SINE_MARKER     0.25f
-#define SD_LEVEL_SINE_MARKER_CAL 0.25f
+#define SD_LEVEL_VOLLEY       0.9f
+#define SD_LEVEL_LOC          0.45f
+#define SD_LEVEL_CALIBRATION  0.45f
+#define SD_LEVEL_MARKER       0.5f
 
-// ===== SD path — the 10 kHz sine marker ====================================
-// One exact cycle at SD_MARKER_FREQ_HZ. The LUT is DERIVED at codegen from
-// round(32767 * sin(2*pi*k/n)), n = rate/freq; it sums to exactly 0 so the
-// tone puts no net charge on the (DC-uncoupled) electrodes.
-#define SD_MARKER_FREQ_HZ        10000
-#define SD_MARKER_RAMP_SAMPLES   100   // raised-cosine on/off ramp (anti-click)
-#define SD_MARKER_LUT_LEN        (STIM_SAMPLE_RATE_HZ / SD_MARKER_FREQ_HZ)
-static const int16_t SD_MARKER_LUT[5] = { 0, 31163, 19260, -19260, -31163 };
+// ===== SD path — the alternating-polarity pulse marker =====================
+// The lead-in that identifies a playback: SD_MARKER_N_PULSES EOD pulses at a fixed
+// IPI, with the polarity ALTERNATING pulse to pulse. Alternation is the discriminator
+// (no eel alternates; a localization train is single-polarity) and it survives the
+// firmware's per-press random polarity flip, which negates the whole WAV. The pulse
+// count is EVEN so the burst carries no net charge.
+#define SD_MARKER_N_PULSES    6
+#define SD_MARKER_RATE_HZ     10.0f
+#define SD_MARKER_IPI_SAMP    5000u   // 100 ms
+#define SD_MARKER_SAMP        ((uint32_t)SD_MARKER_IPI_SAMP * (SD_MARKER_N_PULSES - 1) + EOD_HV_LEN)
+
+// ===== SD path — program A, the calibration train ==========================
+// A steady SINGLE-polarity EOD train at a known rate and level: a plain reference
+// signal, deliberately not a code.
+#define SD_CAL_RATE_HZ        50.0f
+#define SD_CAL_IPI_SAMP       1000u
+#define SD_CAL_S              10
+#define SD_CAL_SAMP           ((uint32_t)SD_CAL_S * STIM_SAMPLE_RATE_HZ)
 
 // ===== SD path — session structure =========================================
 // Seconds are the authored unit; sample units are derived from STIM_SAMPLE_RATE_HZ.
-#define SD_SESSION_LEADIN_S      1    // pre-stimulus lead-in tone (B/C/D)
-#define SD_SESSION_CAL_S         10   // calibration tone (program A)
 #define SD_SESSION_LOC_S         20   // localization window (program B)
 #define SD_SESSION_D_LOC_S       5    // localization lead (program D)
 #define SD_SESSION_D_GAP_MS      300  // loc -> volley gap (program D)
-#define SD_SESSION_LEADIN_SAMP   ((uint32_t)SD_SESSION_LEADIN_S * STIM_SAMPLE_RATE_HZ)
-#define SD_SESSION_CAL_SAMP      ((uint32_t)SD_SESSION_CAL_S    * STIM_SAMPLE_RATE_HZ)
 #define SD_SESSION_LOC_SAMP      ((uint32_t)SD_SESSION_LOC_S    * STIM_SAMPLE_RATE_HZ)
 #define SD_SESSION_D_LOC_SAMP    ((uint32_t)SD_SESSION_D_LOC_S  * STIM_SAMPLE_RATE_HZ)
 #define SD_SESSION_D_GAP_SAMP    ((uint32_t)SD_SESSION_D_GAP_MS * STIM_SAMPLE_RATE_HZ / 1000u)

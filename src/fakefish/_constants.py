@@ -11,32 +11,35 @@ is where it is defined once for the whole repo.
 
 from __future__ import annotations
 
-import numpy as np
-
 from fakefish.export_teensy_stimuli import PLAYBACK_RATE_HZ as RATE_HZ
 
 # ===== Absolute output levels (fraction of full scale) ==============================
 VOLLEY_AMPLITUDE = 0.9
 LOC_AMPLITUDE = 0.45
-MARKER_AMPLITUDE = 0.25
-MARKER_CAL_AMPLITUDE = 0.25
+CAL_AMPLITUDE = 0.45
+MARKER_AMPLITUDE = 0.5
 
-# ===== The 10 kHz sine marker =======================================================
-MARKER_FREQ_HZ = 10000
-MARKER_RAMP_SAMPLES = 100
-#: One exact cycle, derived at codegen from
-#: round(32767 * sin(2*pi*k/n)), n = RATE_HZ / MARKER_FREQ_HZ. Sums to exactly 0.
-MARKER_LUT = np.array([0, 31163, 19260, -19260, -31163], dtype=np.float64)
+# ===== The alternating-polarity pulse marker (the lead-in) ==========================
+#: EVEN by construction, so the burst is charge-balanced; alternation is what
+#: identifies it, and alternation survives the firmware's per-press polarity flip.
+MARKER_N_PULSES = 6
+MARKER_RATE_HZ = 10.0
+MARKER_IPI_SAMPLES = 5000
+#: First onset to last onset (the burst's span, excluding the final pulse's tail).
+MARKER_SPAN_SAMPLES = 25000
+MARKER_SPAN_S = 0.5
+
+# ===== Program A: the calibration train =============================================
+CAL_RATE_HZ = 50.0
+CAL_IPI_SAMPLES = 1000
+CAL_S = 10.0
+CAL_SAMPLES = 10 * RATE_HZ
 
 # ===== Session structure ============================================================
-MARKER_LEADIN_S = 1.0
-MARKER_CAL_S = 10.0
 LOC_PLAYBACK_S = 20.0
 D_LOC_PLAYBACK_S = 5.0
 D_INTERPHASE_GAP_S = 0.3
 
-MARKER_LEADIN_SAMPLES = 1 * RATE_HZ
-MARKER_CAL_SAMPLES = 10 * RATE_HZ
 LOC_PLAYBACK_SAMPLES = 20 * RATE_HZ
 D_LOC_PLAYBACK_SAMPLES = 5 * RATE_HZ
 D_INTERPHASE_GAP_SAMPLES = 300 * RATE_HZ // 1000

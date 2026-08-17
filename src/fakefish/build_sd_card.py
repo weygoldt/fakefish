@@ -8,19 +8,24 @@ random **polarity flip** (anti-pitting) and a single ``MASTER_GAIN``, and stream
 
 Card layout (one dir per button; ``E`` is left unused)::
 
-    /A/  calibration  : one 10 s 10 kHz sine tone
+    /A/  calibration  : one 10 s steady eel-pulse train @ 50 Hz              @ CAL
     /B/  localization : one WAV per loc item    = marker -> gap -> loc (20 s window)  @ LOC
     /C/  volley       : one WAV per volley item  = marker -> gap -> volley             @ VOLLEY
     /D/  loc->volley  : loc->volley sessions     = marker -> gap -> loc(5 s) -> gap -> volley
     /F/  song         : a supplied WAV (data/rickroll.wav, → mono/50 kHz) or a synth melody
+
+Every stimulus the device emits is made of EEL PULSES. The lead-in ``marker`` above is a
+short burst of EOD pulses at a fixed rate with ALTERNATING polarity (see
+``render_pulse_marker``) — it identifies the playback in the recording. It replaced a
+10 kHz sine tone, which the per-channel 2-pole output filter attenuated by ~21.8 dB.
 
 Two fidelity rules make these WAVs a faithful migration of the on-device sessions the
 flash-library firmware used to synthesise (now ``firmware/eel_core/eel_player.cpp`` +
 ``firmware/eel_fakefish_button/``):
 
 1. **Absolute levels are baked in, NOT peak-normalised.** The loc/volley/marker level
-   ratios (0.45 / 0.90 / 0.25 of full scale) must survive, so each item is scaled by its
-   level fraction and clamped to +/-32767 exactly as the firmware's ``clamp16`` does.
+   ratios must survive, so each item is scaled by its level fraction and clamped to
+   +/-32767 exactly as the firmware's ``clamp16`` does.
 2. **Polarity is NOT baked** (WAVs are rendered at polarity +1); the firmware applies the
    per-press +/-1 sign flip so the eel EOD, which is net-DC/monophasic, never pits the
    electrodes by always-same-polarity electrolysis.
@@ -58,12 +63,17 @@ app = typer.Typer(add_completion=False, help="Render the stimulus library to SD-
 # level here so ``build_sd_card.RATE_HZ`` and friends keep working for callers/tests.
 RATE_HZ = K.RATE_HZ  # 50000
 
-# 10 kHz sine marker: one exact unit-sine cycle at 10 kHz / 50 kHz. Sums to 0 (zero net
-# charge). Derived at codegen from round(32767 * sin(2*pi*k/n)).
-MARKER_LUT = K.MARKER_LUT
-MARKER_RAMP_SAMPLES = K.MARKER_RAMP_SAMPLES  # ~2 ms raised-cosine ramp (anti-click)
-MARKER_LEADIN_SAMPLES = K.MARKER_LEADIN_SAMPLES  # 50000  (1 s lead-in before B/C/D)
-MARKER_CAL_SAMPLES = K.MARKER_CAL_SAMPLES  # 500000 (10 s calibration tone, program A)
+# The lead-in marker: N eel pulses at a fixed rate with ALTERNATING polarity (B/C/D).
+# Even count => charge-balanced; alternation is the detection cue and survives the
+# firmware's per-press polarity flip.
+MARKER_N_PULSES = K.MARKER_N_PULSES  # 6
+MARKER_RATE_HZ = K.MARKER_RATE_HZ  # 10.0
+MARKER_IPI_SAMPLES = K.MARKER_IPI_SAMPLES  # 5000 (100 ms)
+
+# Program A: a steady single-polarity eel-pulse train (a plain reference signal).
+CAL_RATE_HZ = K.CAL_RATE_HZ  # 50.0
+CAL_IPI_SAMPLES = K.CAL_IPI_SAMPLES  # 1000 (20 ms)
+CAL_SAMPLES = K.CAL_SAMPLES  # 500000 (10 s)
 
 LOC_PLAYBACK_SAMPLES = K.LOC_PLAYBACK_SAMPLES  # 1_000_000  (B: 20 s localization window)
 D_LOC_PLAYBACK_SAMPLES = K.D_LOC_PLAYBACK_SAMPLES  # 250_000   (D: 5 s localization lead)
@@ -74,8 +84,8 @@ D_INTERPHASE_GAP_SAMPLES = K.D_INTERPHASE_GAP_SAMPLES  # 15_000 (D: 300 ms loc->
 # that reproduce today's stimuli exactly; the CLI accepts mV overrides.
 VOLLEY_AMPLITUDE = K.VOLLEY_AMPLITUDE  # C, and D's strike
 LOC_AMPLITUDE = K.LOC_AMPLITUDE  # B, and D's lead-in localization
-MARKER_AMPLITUDE = K.MARKER_AMPLITUDE  # 1 s lead-in tone (B/C/D)
-MARKER_CAL_AMPLITUDE = K.MARKER_CAL_AMPLITUDE  # 10 s calibration tone (A)
+MARKER_AMPLITUDE = K.MARKER_AMPLITUDE  # the pulse-burst lead-in (B/C/D)
+CAL_AMPLITUDE = K.CAL_AMPLITUDE  # the calibration train (A)
 
 # ===== Nominal mV <-> amplitude map ===================================================
 # V_peak ~= 3.3 V * amplitude * LUT_peak/32640. A pulse peaks at 32767, so its
@@ -98,25 +108,53 @@ def amplitude_to_mv(amp: float) -> float:
     return float(amp) * FULLSCALE_PULSE_PEAK_MV
 
 
-# ===== Marker synthesis (faithful port of eel_control.h::marker_sample) ================
-def _marker_envelope(t: np.ndarray, total: int, ramp: int) -> np.ndarray:
-    """Raised-cosine on/off envelope, vectorised twin of eel_control.h::marker_envelope."""
-    env = np.ones(t.shape, dtype=np.float64)
-    if ramp == 0 or total < 2 * ramp:
-        return env
-    rise = t < ramp
-    env[rise] = 0.5 * (1.0 - np.cos(np.pi * t[rise] / ramp))
-    fall = t >= (total - ramp)
-    u = (total - t[fall]).astype(np.float64)  # ramp (at the seam) .. 1 (last sample)
-    env[fall] = 0.5 * (1.0 - np.cos(np.pi * u / ramp))
-    return env
+# ===== Pulse trains (the marker lead-in, and the calibration train) ===================
+def _pulse_train(
+    eod_i16: np.ndarray,
+    n_pulses: int,
+    ipi_samp: int,
+    amplitude: float,
+    *,
+    alternate: bool,
+    total_samples: int = 0,
+) -> np.ndarray:
+    """``n_pulses`` copies of the EOD at a fixed interval, as clamped ``int16``.
+
+    ``alternate`` flips the polarity of every other pulse. Overlaps would SUM (as in the
+    firmware), but every caller here uses an interval far longer than one EOD, so in
+    practice each pulse stands alone. ``total_samples`` pads/truncates to a fixed length.
+    """
+    eod = np.asarray(eod_i16, dtype=np.float64) * float(amplitude)
+    span = ipi_samp * (n_pulses - 1) + eod.size if n_pulses > 0 else 0
+    total = int(total_samples) if total_samples > 0 else span
+    out = np.zeros(max(total, 0), dtype=np.float64)
+    for k in range(n_pulses):
+        s = k * ipi_samp
+        if s >= total:
+            break
+        e = min(s + eod.size, total)
+        sign = -1.0 if (alternate and k % 2) else 1.0
+        out[s:e] += eod[: e - s] * sign
+    return _to_i16_from_units(out)
 
 
-def render_marker(total: int, amplitude: float, ramp: int = MARKER_RAMP_SAMPLES) -> np.ndarray:
-    """One ``total``-sample 10 kHz marker tone as clamped ``int16`` (== marker_sample)."""
-    t = np.arange(total)
-    v = amplitude * _marker_envelope(t, total, ramp) * MARKER_LUT[t % MARKER_LUT.size]
-    return _to_i16_from_units(v)
+def render_pulse_marker(eod_i16: np.ndarray, levels: "Levels") -> np.ndarray:
+    """The lead-in marker: EOD pulses at a fixed rate with ALTERNATING polarity.
+
+    This is what identifies a playback in the recording. Three properties make it work:
+
+    * **Alternating polarity is the cue.** No real eel alternates, and a localization
+      train is single-polarity, so the pattern cannot be confused with biology or with
+      the stimulus it introduces.
+    * **It survives the polarity flip.** The firmware negates the whole WAV per press, so
+      the absolute sign is unpredictable — but the alternation is invariant. A detector
+      must key on the pattern, never on the sign.
+    * **It is charge-balanced**, because the pulse count is even (the codegen asserts it):
+      equal numbers of each polarity of an identical waveform sum to ~0 net charge.
+    """
+    return _pulse_train(
+        eod_i16, MARKER_N_PULSES, MARKER_IPI_SAMPLES, levels.marker, alternate=True
+    )
 
 
 # ===== Item reconstruction (faithful port of eel_player.cpp windowing/looping) =========
@@ -199,17 +237,30 @@ class Levels:
     volley: float = VOLLEY_AMPLITUDE
     loc: float = LOC_AMPLITUDE
     marker: float = MARKER_AMPLITUDE
-    marker_cal: float = MARKER_CAL_AMPLITUDE
+    calibration: float = CAL_AMPLITUDE
 
 
-def render_calibration(levels: Levels) -> np.ndarray:
-    """Program A: the bare 10 s 10 kHz calibration tone."""
-    return render_marker(MARKER_CAL_SAMPLES, levels.marker_cal)
+def render_calibration(eod, levels: Levels) -> np.ndarray:
+    """Program A: a steady single-polarity eel-pulse train at a known rate and level.
+
+    A plain reference signal for setting gain and checking the rig — deliberately NOT a
+    code: single-polarity, so it can never be mistaken for the alternating lead-in marker.
+    Its net charge is balanced across presses by the firmware's random polarity flip,
+    exactly as for the localization program.
+    """
+    return _pulse_train(
+        eod,
+        n_pulses=int(CAL_SAMPLES // CAL_IPI_SAMPLES),
+        ipi_samp=CAL_IPI_SAMPLES,
+        amplitude=levels.calibration,
+        alternate=False,
+        total_samples=CAL_SAMPLES,
+    )
 
 
 def render_localization(eod, loc_it, gap_samp: int, levels: Levels) -> np.ndarray:
     """Program B: marker -> per-item gap -> localization (20 s window @ LOC level)."""
-    marker = render_marker(MARKER_LEADIN_SAMPLES, levels.marker)
+    marker = render_pulse_marker(eod, levels)
     gap = np.zeros(int(gap_samp), dtype=np.int16)
     loc = _to_i16(
         render_item(
@@ -222,7 +273,7 @@ def render_localization(eod, loc_it, gap_samp: int, levels: Levels) -> np.ndarra
 
 def render_volley(eod, vol_it, gap_samp: int, levels: Levels) -> np.ndarray:
     """Program C: marker -> per-item gap -> volley (played once, @ VOLLEY level)."""
-    marker = render_marker(MARKER_LEADIN_SAMPLES, levels.marker)
+    marker = render_pulse_marker(eod, levels)
     gap = np.zeros(int(gap_samp), dtype=np.int16)
     vol = _to_i16(render_item(eod, vol_it["ipi_samp"], vol_it["rel_amp"], levels.volley))
     return np.concatenate([marker, gap, vol])
@@ -230,7 +281,7 @@ def render_volley(eod, vol_it, gap_samp: int, levels: Levels) -> np.ndarray:
 
 def render_loc_volley(eod, loc_it, vol_it, gap_samp: int, levels: Levels) -> np.ndarray:
     """Program D: marker -> gap -> loc(5 s) -> interphase gap -> volley (one polarity)."""
-    marker = render_marker(MARKER_LEADIN_SAMPLES, levels.marker)
+    marker = render_pulse_marker(eod, levels)
     gap = np.zeros(int(gap_samp), dtype=np.int16)
     loc = _to_i16(
         render_item(
@@ -351,7 +402,7 @@ def build_card(out_dir: Path, firmware: Path, cfg: CardConfig) -> dict:
         "rate_hz": RATE_HZ,
         "format": "mono int16 PCM, absolute levels baked, polarity +1 (firmware flips)",
         "levels": {"volley": cfg.levels.volley, "loc": cfg.levels.loc,
-                   "marker": cfg.levels.marker, "marker_cal": cfg.levels.marker_cal},
+                   "marker": cfg.levels.marker, "calibration": cfg.levels.calibration},
         "levels_nominal_mv": {k: round(amplitude_to_mv(v), 1) for k, v in
                               {"volley": cfg.levels.volley, "loc": cfg.levels.loc,
                                "marker": cfg.levels.marker}.items()},
@@ -371,7 +422,7 @@ def build_card(out_dir: Path, firmware: Path, cfg: CardConfig) -> dict:
         )
 
     # A: calibration
-    _emit("A", "calibration.wav", render_calibration(cfg.levels))
+    _emit("A", "calibration.wav", render_calibration(eod, cfg.levels))
 
     # B: one localization WAV per loc item
     for i in loc_idx:

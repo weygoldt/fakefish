@@ -25,7 +25,11 @@ from fakefish.viz.plotstyle import CATEGORICAL, full_page  # noqa: E402
 
 from fakefish import export_teensy_stimuli as ex  # noqa: E402
 from fakefish import _resources as _res  # noqa: E402
-from fakefish._gallery_marker import LOC_AMPLITUDE, draw_leadin  # noqa: E402
+from fakefish._gallery_marker import (  # noqa: E402
+    LOC_AMPLITUDE,
+    MARKER_N_PULSES,
+    draw_leadin,
+)
 
 log = get_logger(__name__)
 app = typer.Typer(add_completion=False)
@@ -39,13 +43,14 @@ def main(
     out: Path = typer.Option(_res.FIGS_DIR / "localization_gallery.png", "--out", "-o"),
     window_s: float = typer.Option(12.0, "--window-s", help="leading seconds to show"),
     marker_show_s: float = typer.Option(
-        0.15, "--marker-show-s", help="seconds of the 1 s lead-in tone to draw (>=1 = full)"
+        0.15, "--marker-show-s",
+        help="pre-onset seconds to draw (clamped to at least the full marker burst)",
     ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Draw every localization item as an output-level-over-time gallery, each preceded by
-    its 10 kHz sine lead-in marker + fixed per-item gap (so you see where the tone lands
-    relative to the stimulus onset at t=0). Levels are absolute device output: the
+    its alternating-polarity pulse marker + fixed per-item gap (so you see where the burst
+    lands relative to the stimulus onset at t=0). Levels are absolute device output: the
     localization plays at LOC_AMPLITUDE — below a volley's level, above the marker's."""
     configure_logging(verbose)
     parsed = ex.parse_firmware(firmware)
@@ -100,7 +105,7 @@ def main(
     for j in range(len(loc), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
     fig.suptitle(
-        f"Every localization — 10 kHz marker → gap → onset · "
+        f"Every localization — {MARKER_N_PULSES}-pulse alternating marker → gap → onset · "
         f"first {window_s:.0f} s · {len(loc)} items"
     )
     fig.supxlabel("time relative to stimulus onset (s)", fontsize=8)

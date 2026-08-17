@@ -10,11 +10,9 @@ library. The repo was extracted from the `eeltracker` analysis package (main `aa
 stand on its own — cloneable and flashable with no dependency on `eeltracker` or the field
 dataset.
 
-> **The two READMEs are STALE.** `README.md` and `firmware/README.md` still describe the
-> pre-merge single-sketch layout (`firmware/eel_fakefish/`, `eel_control.h`, the retired
-> flash-library player, the old ~5.7 Vpp direct-pin output stage). Neither mentions
-> `eel_core`, the RC surface, the DRV8871/36 V stage or `shared/stim_constants.json`. Read
-> the tree, not those files. Rewriting them is outstanding work.
+`README.md` (project overview, toolchain, card build) and `firmware/README.md` (hardware: output
+stage, filter, markers, per-surface design) were rewritten for the merged tree and are current.
+Open work is tracked in `TODO.md`.
 
 ## Three layers, two surfaces
 
@@ -85,12 +83,32 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    regenerated file matches the frozen schema. Only the value of the key (this repo's HEAD)
    changes. `fakefish-export` writes to `firmware/eel_core/` (`paths.firmware_dir` in
    `data/stimuli_config.yaml`) — **a re-export must be followed by `bash firmware/sync_core.sh`.**
-4. **TWO DIFFERENT MARKERS, deliberately not unified.** The button/SD device uses a **10 kHz
-   sine tone** baked into the WAVs by `build_sd_card.py` (`SD_MARKER_*` / `MARKER_*`; its LUT
-   is derived at codegen, sums to exactly 0, and the `32767` full-scale amplitude is
-   load-bearing). The RC device uses a **live coded pulse burst** tagged by pulse count —
-   volley = 2 pulses, sham = 4 (`PULSE_MARKER_*`). The distinct prefixes are the point: a bare
-   `MARKER_*` name in a repo with two marker mechanisms is a trap. Do not "unify" them.
+4. **TWO MARKER CODES, deliberately not unified.** Both devices mark with **eel pulses** —
+   nothing this project emits is out of band any more — but the *codes* differ.
+   - **Button/SD:** **6 pulses at a fixed 10 Hz (IPI 5000 samples = 100 ms) with ALTERNATING
+     polarity**, at level 0.5, baked into every `/B`/`/C`/`/D` WAV by
+     `build_sd_card.render_pulse_marker` (`SD_MARKER_*` in C, `MARKER_*` in `_constants.py`).
+     Three load-bearing properties: **alternation is the detection cue** (no eel alternates and a
+     localization train is single-polarity, so it cannot be confused with biology or with the
+     stimulus); it **survives the per-press random polarity flip**, which negates the whole WAV —
+     so **detect the pattern, never the sign**; and the count is **EVEN**, which makes the burst
+     charge-balanced (the codegen asserts evenness). The per-item lead gap is unchanged:
+     `[marker] → [STIM_LEAD_GAP_SAMP] → [stimulus]`.
+   - **RC:** a **live coded burst at 100 Hz, SINGLE polarity**, tagged by pulse count —
+     volley = 2, sham = 4 (`PULSE_MARKER_*`).
+
+   The distinct prefixes are the point: a bare `MARKER_*` name in a repo with two marker codes is
+   a trap. Do not "unify" them.
+
+   Program **A** on the card changed with the marker: it is a 10 s **single-polarity** eel-pulse
+   train at 50 Hz (`CAL_*`, level 0.45), not a tone — single-polarity on purpose, so it reads as a
+   plain reference signal and never as a code.
+
+   *(History: the SD marker was a 10 kHz sine tone until 2026-08-17. It was removed because the
+   2-pole output filter is −21.8 dB at 10 kHz and because everything the device emits should be
+   made of eel pulses. `MARKER_LUT`, `MARKER_FREQ_HZ`, `MARKER_RAMP_SAMPLES`, `MARKER_LEADIN_*`,
+   `MARKER_CAL_*`, `Levels.marker_cal`, `build_sd_card.render_marker` and `_marker_envelope` are
+   **gone** — do not reintroduce those names.)*
 5. **Flashing needs no Python; only the button device needs an SD card.** Both sketches compile
    and flash with no Python and no dataset. Button-device **playback** reads a WAV card (one
    directory per button) built by `fakefish-build-card`, which renders from the committed
@@ -103,7 +121,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    unproven on hardware.** It previously drove pins 2/3 directly at a 585.9 kHz carrier for an
    open-circuit full scale of ~5.7 Vpp; full-scale `int16` now means the ~36 V rail, so the
    baked-in levels (0.90 volley / 0.45 loc) mean roughly 32 V / 16 V — about a **six-fold**
-   output jump. That is the intended consequence of the 36 V decision, not a bug, but the
+   output jump. Note the ceiling is the **rail, ~36 V, not twice it**: the eel EOD is monophasic
+   and `out_write()` sign-splits, so one bridge drives while the other is braked to 0 V. A
+   "~72 Vpp differential" figure (which older revisions of the docs carried) would require a
+   *biphasic* signal driving both bridges in opposite directions at once, which never happens —
+   do not reintroduce it. That is the intended consequence of the 36 V decision, not a bug, but the
    button firmware **must not** run on the old direct-pin hardware: new 36 V hardware has to be
    built, then the level re-scoped and set with `MASTER_GAIN` before it goes near a fish.
 7. **Firmware is bench-owned.** Do not claim it was flashed or field-tested (the hardware

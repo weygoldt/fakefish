@@ -1,8 +1,22 @@
 """Tests for the SD-card WAV export (build_sd_card).
 
-Validate against the *committed firmware* reference: the rendered WAVs must reproduce
+Two things are checked here.
+
+**Parity with the committed firmware reference.** The rendered stimulus WAVs must reproduce
 ``export_teensy_stimuli.reconstruct_item`` byte-for-byte at the baked absolute levels, and
 the card must have the right one-directory-per-button structure and WAV format.
+
+**The two pulse trains the card synthesises itself** — the lead-in marker and program A's
+calibration train. Neither comes from the frozen library, so their properties are only ever
+enforced here. They are deliberately tested the way a *detector* would look at a recording:
+segment the trace into pulses, then assert on the onsets and on the SIGN of each pulse's
+peak. That is the level at which the marker's contract is actually written —
+
+* the marker ALTERNATES polarity (nothing biological does, and the localization train it
+  introduces does not), and
+* the calibration train does NOT (it is a plain reference signal, not a code),
+
+and asserting it on the rendered samples is what stops the two from converging.
 """
 
 from __future__ import annotations
@@ -11,11 +25,14 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 
+from fakefish import _constants as K
 from fakefish import _resources as _res
 from fakefish import build_sd_card as bc
 from fakefish import export_teensy_stimuli as ex
 
 FW = _res.DEFAULT_FIRMWARE
+
+FULL_SCALE = 32767  # the firmware's clamp16 bound; the EOD LUT peaks here
 
 
 @pytest.fixture(scope="module")
@@ -30,17 +47,125 @@ def _split(parsed):
     return vol, loc
 
 
-def test_marker_zero_start_zero_dc():
-    m = bc.render_marker(bc.MARKER_LEADIN_SAMPLES, bc.MARKER_AMPLITUDE)
+def _pulses(x: np.ndarray, eod_len: int) -> tuple[np.ndarray, np.ndarray]:
+    """Segment a pulse train into ``(onsets, signed peaks)`` the way a detector would.
+
+    Runs of |x| above 5% of the trace peak are grouped, splitting wherever the silence is
+    longer than one EOD — so this recovers the pulses without being told where they are.
+    The returned peak keeps its SIGN, which is the whole point: the marker's identity is a
+    sign pattern, not an amplitude.
+    """
+    x = np.asarray(x, dtype=np.int64)
+    peak = int(np.abs(x).max())
+    assert peak > 0, "silent trace — nothing to segment"
+    idx = np.flatnonzero(np.abs(x) > 0.05 * peak)
+    groups = np.split(idx, np.flatnonzero(np.diff(idx) > eod_len) + 1)
+    onsets = np.array([int(g[0]) for g in groups], dtype=np.int64)
+    peaks = np.array([int(x[g[np.argmax(np.abs(x[g]))]]) for g in groups], dtype=np.int64)
+    return onsets, peaks
+
+
+# ===== The lead-in marker (prepended to every B/C/D session) ==========================
+def test_marker_is_an_even_burst_at_the_fixed_ipi(parsed):
+    """MARKER_N_PULSES pulses, exactly MARKER_IPI_SAMPLES apart, spanning MARKER_SPAN."""
+    eod = parsed["EOD_HV"]
+    m = bc.render_pulse_marker(eod, bc.Levels())
     assert m.dtype == np.int16
-    assert m.size == bc.MARKER_LEADIN_SAMPLES
-    assert int(m[0]) == 0  # zero-start (LUT[0] == 0)
-    assert int(m.sum()) == 0  # zero net charge (odd-symmetric LUT)
-    assert int(np.abs(m).max()) == round(bc.MARKER_AMPLITUDE * 31163)
-    cal = bc.render_marker(bc.MARKER_CAL_SAMPLES, bc.MARKER_CAL_AMPLITUDE)
-    assert cal.size == 10 * bc.RATE_HZ
+
+    onsets, _ = _pulses(m, eod.size)
+    assert onsets.size == bc.MARKER_N_PULSES
+    assert np.array_equal(np.diff(onsets), np.full(bc.MARKER_N_PULSES - 1, bc.MARKER_IPI_SAMPLES))
+    assert onsets[0] < eod.size  # the burst starts at t=0 (peak is inside the first EOD)
+
+    # the rate is exact in whole samples, and the WAV holds the onset-to-onset span plus
+    # the final pulse's tail — the layout the session assembly then prepends.
+    assert bc.MARKER_IPI_SAMPLES * bc.MARKER_RATE_HZ == bc.RATE_HZ
+    assert int(onsets[-1] - onsets[0]) == K.MARKER_SPAN_SAMPLES
+    assert m.size == K.MARKER_SPAN_SAMPLES + eod.size
+    assert K.MARKER_SPAN_S == pytest.approx(K.MARKER_SPAN_SAMPLES / bc.RATE_HZ)
+
+    # baked at the marker level, not peak-normalised (+/-1 LSB of rounding)
+    assert abs(int(np.abs(m).max()) - round(bc.MARKER_AMPLITUDE * FULL_SCALE)) <= 1
 
 
+def test_marker_polarity_alternates(parsed):
+    """The DETECTION CUE: successive pulses have opposite sign.
+
+    No eel alternates, and a localization train is single-polarity, so this pattern cannot
+    be confused with biology or with the stimulus the marker introduces.
+    """
+    eod = parsed["EOD_HV"]
+    _, peaks = _pulses(bc.render_pulse_marker(eod, bc.Levels()), eod.size)
+    signs = np.sign(peaks)
+    assert np.all(signs != 0)
+    assert np.array_equal(signs[1:], -signs[:-1]), f"not alternating: {signs.tolist()}"
+
+
+def test_marker_alternation_survives_a_global_polarity_flip(parsed):
+    """The property the firmware relies on: the per-press flip negates the WHOLE WAV.
+
+    So the absolute sign of any pulse is unpredictable, but the alternation is invariant.
+    A detector must key on the PATTERN, never on the sign.
+    """
+    eod = parsed["EOD_HV"]
+    m = bc.render_pulse_marker(eod, bc.Levels())
+    on_a, pk_a = _pulses(m, eod.size)
+    on_b, pk_b = _pulses(-m.astype(np.int64), eod.size)
+
+    assert np.array_equal(on_b, on_a)  # timing untouched
+    assert np.array_equal(np.sign(pk_b), -np.sign(pk_a))  # every sign flipped, and yet:
+    assert np.array_equal(np.sign(pk_b)[1:], -np.sign(pk_b)[:-1])  # still alternating
+
+
+def test_marker_is_exactly_charge_balanced(parsed):
+    """Even pulse count => the burst carries no net charge (the electrodes have no cap).
+
+    The cancellation is EXACT, not approximate: the pulses are identical up to sign (one
+    IPI is far longer than one EOD, so none overlap and none is truncated), int16 rounding
+    is symmetric about zero, and the count is even. This replaces the zero-sum property the
+    retired sine LUT provided.
+    """
+    eod = parsed["EOD_HV"]
+    assert bc.MARKER_IPI_SAMPLES > eod.size  # no overlap => pulses really are identical
+    assert bc.MARKER_N_PULSES % 2 == 0
+
+    m = bc.render_pulse_marker(eod, bc.Levels())
+    assert int(m.astype(np.int64).sum()) == 0
+
+    # ...and it is the EVEN count doing the work, not luck: an odd burst leaves one whole
+    # EOD of net charge behind. This is what gen_constants' evenness check protects.
+    odd = bc._pulse_train(eod, bc.MARKER_N_PULSES - 1, bc.MARKER_IPI_SAMPLES,
+                          bc.MARKER_AMPLITUDE, alternate=True)
+    assert int(odd.astype(np.int64).sum()) != 0
+
+
+# ===== Program A: the calibration train ==============================================
+def test_calibration_train_is_single_polarity(parsed):
+    """Program A is a plain reference signal — deliberately NOT a code.
+
+    Right length, right pulse count, one polarity throughout. Single-polarity is exactly
+    what stops it being read as the alternating lead-in marker.
+    """
+    eod = parsed["EOD_HV"]
+    cal = bc.render_calibration(eod, bc.Levels())
+    assert cal.dtype == np.int16
+    assert cal.size == bc.CAL_SAMPLES == round(K.CAL_S * bc.RATE_HZ)
+
+    onsets, peaks = _pulses(cal, eod.size)
+    assert onsets.size == bc.CAL_SAMPLES // bc.CAL_IPI_SAMPLES
+    assert np.array_equal(np.diff(onsets), np.full(onsets.size - 1, bc.CAL_IPI_SAMPLES))
+    assert bc.CAL_IPI_SAMPLES * bc.CAL_RATE_HZ == bc.RATE_HZ
+
+    signs = np.sign(peaks)
+    assert np.all(signs == signs[0]), "calibration must NOT alternate — that is the marker"
+    assert abs(int(np.abs(cal).max()) - round(bc.CAL_AMPLITUDE * FULL_SCALE)) <= 1
+
+    # Consequence of single polarity: unlike the marker it does NOT self-balance. Its net
+    # charge is cancelled ACROSS presses by the firmware's random flip, as for localization.
+    assert int(cal.astype(np.int64).sum()) != 0
+
+
+# ===== Parity with the frozen library ================================================
 def test_volley_parity_vs_reconstruct(parsed):
     """Every volley WAV item body must be byte-identical to reconstruct_item at 0.90."""
     eod = parsed["EOD_HV"]
@@ -98,15 +223,29 @@ def test_build_card_structure_and_levels(tmp_path, parsed):
         assert data.dtype == np.int16
         assert data.ndim == 1
 
-    # a volley WAV carries the baked VOLLEY level (peak == 0.90 * 32767), not peak-normalised
+    # a volley WAV is [marker burst][per-item gap][volley], with the baked VOLLEY level
+    # (peak == 0.90 * 32767), not peak-normalised.
+    eod = parsed["EOD_HV"]
+    marker = bc.render_pulse_marker(eod, bc.CardConfig().levels)
+    assert marker.size == K.MARKER_SPAN_SAMPLES + eod.size  # the layout offset, spelled out
     vi = vol[0]
     rate, data = wavfile.read(out / "C" / f"volley_{vi:02d}.wav")
-    start = bc.MARKER_LEADIN_SAMPLES + int(parsed["lead_gap_samp"][vi])
-    ref = bc._to_i16(ex.reconstruct_item(parsed["EOD_HV"], parsed["items"][vi]["ipi_samp"],
+    start = marker.size + int(parsed["lead_gap_samp"][vi])
+    ref = bc._to_i16(ex.reconstruct_item(eod, parsed["items"][vi]["ipi_samp"],
                                          parsed["items"][vi]["rel_amp"],
                                          amplitude=bc.VOLLEY_AMPLITUDE, polarity=1, pad_samp=0))
-    assert np.array_equal(data[start:start + ref.size], ref)
-    assert int(np.abs(data).max()) == round(bc.VOLLEY_AMPLITUDE * 32767)
+    assert np.array_equal(data[:marker.size], marker)          # marker first, unmodified
+    assert not np.any(data[marker.size:start])                 # then the silent lead gap
+    assert np.array_equal(data[start:start + ref.size], ref)   # then the stimulus
+    assert int(np.abs(data).max()) == round(bc.VOLLEY_AMPLITUDE * FULL_SCALE)
+
+    # program A is a BARE train: no marker in front of it (a calibration signal is not a
+    # playback to be identified), and the full authored duration.
+    rate, cal = wavfile.read(out / "A" / "calibration.wav")
+    assert cal.size == bc.CAL_SAMPLES
+    onsets, peaks = _pulses(cal, eod.size)
+    assert onsets[0] < eod.size and onsets.size == bc.CAL_SAMPLES // bc.CAL_IPI_SAMPLES
+    assert np.all(np.sign(peaks) == np.sign(peaks[0]))
 
 
 def test_song_zero_mean(tmp_path):

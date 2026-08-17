@@ -12,35 +12,54 @@ The hand-held SD player **migrated off** its old direct-pin ~5.7 Vpp stage onto 
 
 - [ ] Build the 36 V DRV8871 output stage for the hand-held unit (2× DRV8871, IN1 on pins 2/3
       held high, IN2 on pins 0/1, plus the per-channel 2-pole RC).
-- [ ] **Do not flash `eel_fakefish_button` onto the old direct-pin hardware.** Full scale is now
-      ~72 Vpp differential instead of ~5.7 Vpp.
+- [ ] **Do not flash `eel_fakefish_button` onto the old direct-pin hardware.** A discharge now
+      reaches the **36 V rail** instead of the old stage's ~5.7 Vpp — still roughly a six-fold jump.
 - [ ] Re-scope the absolute output and set `MASTER_GAIN` before the device goes near an animal.
-      A `0.90` volley pulse is ~30 V peak per electrode at nominal rail, open-circuit.
+      A discharge reaches **at most ~36 V**, the rail, because the eel EOD is monophasic: only one
+      bridge ever drives while the other is braked to 0 V. (It is **not** ~72 Vpp — earlier
+      revisions of these docs said so; that would need a biphasic signal driving both bridges in
+      opposite directions at once, which never happens.) A `0.90` volley pulse is ~**32 V**, a
+      `0.45` localization pulse ~**16 V**, open-circuit at nominal rail.
 
-## 2. The 10 kHz marker level budget — the one genuinely open question
+## 2. The 10 kHz marker — question closed, one bench check left
 
-The output filter (2× 220 Ω / 220 nF per channel, composite −3 dB ≈ 1.23 kHz) attenuates the
-SD device's 10 kHz sine anchor by **−21.8 dB**, against −1.4 dB under the 1-pole ~16 kHz filter
-the docs used to describe. Whether that still closes depends on the detector, and the two
-framings genuinely disagree:
+**Decided (2026-08-17): the SD device's 10 kHz sine marker was removed.** The level-budget
+question that used to fill this section is closed *by construction*, not by measurement. Two
+reasons: the output filter (2× 220 Ω / 220 nF per channel, composite −3 dB ≈ 1.23 kHz) attenuates
+10 kHz by **−21.8 dB**, and everything the device puts in the water should be made of eel pulses.
 
-- by **energy** (the narrowband spectral-peak detector this design assumes) it closes
-  comfortably — a 1 s lead-in is only 4.1 dB below a *single* volley EOD pulse, and the 10 s
-  calibration tone is 5.9 dB above one, before ~44–54 dB of processing gain;
-- by **peak amplitude** (a threshold detector) the marker-to-pulse ratio degrades by 21.3 dB.
+**What replaced it.** A lead-in of **6 EOD pulses at a fixed 10 Hz** (IPI 5000 samples = 100 ms)
+with **alternating polarity**, at level **0.5** — first onset to last onset 0.5 s — prepended to
+every `/B`, `/C` and `/D` session. Its three properties:
 
-- [ ] **Bench check: does the marker still show up in a real recording at usable SNR?** This is
-      the deciding measurement; the analysis cannot settle it.
-- [ ] It should get *relatively* better in water — 10 kHz is nearly load-invariant while the EOD
-      band is divided down by the load. Confirm in situ rather than open-circuit.
-- [ ] If it does need fixing, note the constraints:
-      - raising the marker **level** means editing `shared/stim_constants.json` and re-running
-        `make gen` — the card and the galleries then move together, by construction;
-      - changing the **frequency** additionally breaks the detector contract frozen in
-        `data/stimuli_provenance.json` (`lead_in_marker.nominal_freq_hz = 10000`) against every
-        recording already made;
-      - the only alternative anchor satisfying the existing whole-cycles rule is **6250 Hz**
-        (50000/8), worth ~5.9 dB. 8333 Hz does *not* qualify — 50000/6 is not an integer.
+- **alternation is the detection cue** — no eel alternates, and a localization train is
+  single-polarity, so the pattern cannot be confused with biology or with the stimulus;
+- **it survives the per-press random polarity flip**, which negates the whole WAV: the sign is
+  unpredictable, the alternation is not. A detector must key on the *pattern*, never the sign;
+- **the even pulse count makes it charge-balanced**, replacing the zero-sum property the sine LUT
+  provided. The codegen asserts evenness.
+
+Program **A** changed with it: a 10 s **single-polarity** eel-pulse train at 50 Hz, level 0.45 — a
+plain reference signal, deliberately not a code. The playback structure is unchanged:
+**[marker] → [per-item gap, 50–200 ms] → [stimulus]**. The new marker is barely touched by the
+filter (eel pulses are sub-kHz; 99 % of `EOD_HV`'s energy is below 904 Hz), and because it now sits
+in the same band as the stimulus, the marker-to-pulse **ratio** survives the water load exactly.
+
+What is left:
+
+- [ ] **Bench/field check: is the alternating burst actually detectable in a real recording?**
+      Confirm the six pulses resolve individually at the grid and that the alternation is
+      unambiguous against real fish. This is a *detection* question now rather than a level-budget
+      one, and only a recording settles it.
+- [ ] The code is **provisional and cheap to retune.** 6 pulses at 10 Hz are authored in
+      `shared/stim_constants.json` (`sd_path.pulse_marker`); changing them is `make gen` +
+      `fakefish-build-card`, and the card, the firmware header and the galleries then move
+      together by construction. Keep the count **even** or the burst stops being charge-balanced.
+- [ ] Cosmetic leftovers of the sine, in **byte-frozen** artifacts: `eel_stimuli.h` still calls the
+      per-item gap a "sine-marker lead-in gap", and `data/stimuli_provenance.json` still carries a
+      `lead_in_marker` block describing the 10 kHz anchor. The *gap itself* (50–200 ms, fixed per
+      item at export) is unchanged and still live — only the wording is historical. Rewording
+      either is a deliberate edit to a frozen contract; decide it, don't drift into it.
 
 ## 3. `FULLSCALE_PULSE_PEAK_MV` is a 3.3 V-era constant
 

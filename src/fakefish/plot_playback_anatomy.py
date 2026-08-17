@@ -1,10 +1,17 @@
-"""Show the anatomy of one fakefish playback: the 10 kHz sine lead-in marker, the fixed
-per-item gap, and the stimulus onset — for a representative volley and a representative
-localization item. Answers "where does the 10 kHz tone land relative to stimulus onset?".
+"""Show the anatomy of one fakefish playback: the alternating-polarity pulse marker, the
+fixed per-item gap, and the stimulus onset — for a representative volley and a
+representative localization item. Answers "where does the marker land relative to
+stimulus onset, and how do I recognise it in a recording?".
 
-Left column: the FULL session (full 1 s tone band -> gap -> item), onset at t = 0.
-Right column: a real-waveform SEAM zoom — the actual 10 kHz sine cycles ending (with the
-raised-cosine offset ramp), the silent gap, and the first stimulus pulses.
+Left column: the FULL session (marker burst -> gap -> item), onset at t = 0, with the
+marker drawn as stems so its alternation reads at session scale.
+Right column: a real-waveform zoom on the lead-in — the actual EOD pulses of the burst,
+alternating +/-, then the silent gap, then the first stimulus pulses.
+
+The marker is MARKER_N_PULSES EOD pulses at MARKER_RATE_HZ with ALTERNATING polarity: no
+eel alternates and a localization train is single-polarity, so the pattern is the cue. It
+also survives the firmware's per-press polarity flip (which negates the whole WAV), so the
+absolute sign in these panels is arbitrary — only the alternation is meaningful.
 
 Levels are absolute device output (marker / localization / volley each at their own
 firmware amplitude), so the panels show the real height relationships between them.
@@ -32,10 +39,12 @@ from fakefish._gallery_marker import (  # noqa: E402
     LOC_AMPLITUDE,
     MARKER_AMPLITUDE,
     MARKER_COLOR,
-    MARKER_LEADIN_S,
+    MARKER_N_PULSES,
+    MARKER_SPAN_S,
+    MARKER_TAG_LONG,
     VOLLEY_AMPLITUDE,
     draw_leadin,
-    marker_cycles,
+    marker_pulses,
 )
 
 log = get_logger(__name__)
@@ -53,7 +62,9 @@ def main(
         _res.DEFAULT_FIRMWARE, "--firmware", "-f"
     ),
     out: Path = typer.Option(_res.FIGS_DIR / "playback_anatomy.png", "--out", "-o"),
-    seam_tone_ms: float = typer.Option(3.0, "--seam-tone-ms", help="ms of real tone in the tail zoom"),
+    zoom_post_ms: float = typer.Option(
+        120.0, "--zoom-post-ms", help="ms of stimulus drawn after onset in the lead-in zoom"
+    ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Draw the marker -> gap -> onset anatomy for a representative volley + localization."""
@@ -82,6 +93,9 @@ def main(
          f"{loc['n'] / loc['_dur']:.1f} Hz avg"),
     ]
 
+    marker = marker_pulses(eod)          # the REAL burst, in full-scale units
+    zoom_post_s = zoom_post_ms / 1000.0
+
     fig, axes = full_page(height_cm=9.5, nrows=2, ncols=2)
     for r, (it, amp, colour, name, rate) in enumerate(rows):
         gap_samp = int(gaps[it["_idx"]])
@@ -89,9 +103,10 @@ def main(
         trace = ex.reconstruct_item(eod, it["ipi_samp"], it["rel_amp"]) * amp
         t = np.arange(trace.size) / hz  # onset at t = 0
 
-        # --- left: full session (full 1 s tone band -> gap -> item), onset at t=0 ---
+        # --- left: full session (marker burst -> gap -> item), onset at t=0 ---
         axL = axes[r, 0]
-        x_left = draw_leadin(axL, gap_samp, hz, show_s=MARKER_LEADIN_S)  # full tone
+        # no in-panel tag: this figure spells the marker out in the row-0 annotation below
+        x_left = draw_leadin(axL, gap_samp, hz, label=False)
         show = t <= min(t[-1], 1.6)
         axL.plot(t[show], trace[show], color=colour, lw=0.5, zorder=3)
         axL.set_xlim(x_left, min(t[-1], 1.6))
@@ -101,42 +116,53 @@ def main(
         axL.tick_params(labelsize=6)
         axL.axhline(0, color="0.7", lw=0.4, zorder=0)
         if r == 0:
-            axL.annotate("10 kHz lead-in (1 s)", (-MARKER_LEADIN_S / 2 - gap_s, MARKER_AMPLITUDE),
-                         fontsize=6, color=MARKER_COLOR, ha="center", va="bottom")
+            axL.annotate(
+                f"{MARKER_TAG_LONG} ({MARKER_SPAN_S:g} s)",
+                (-MARKER_SPAN_S / 2 - gap_s, MARKER_AMPLITUDE + 0.05),
+                fontsize=6, color=MARKER_COLOR, ha="center", va="bottom",
+            )
             axL.annotate("onset", (0, 1.12), fontsize=6, color="0.35", ha="center", va="top")
         axL.set_xlabel("time relative to onset (s)", fontsize=7)
 
-        # --- right: micro-zoom on the tone TAIL — the real 10 kHz cycles + clean offset
-        #     ramp to 0 (the ~200 ms gap dwarfs this, so it is a separate zoom; the left
-        #     panel carries the gap->onset relationship). x in ms before onset. ---
+        # --- right: the lead-in as the REAL waveform — every marker pulse is one EOD, and
+        #     consecutive ones are mirror images. This is the panel that shows what to look
+        #     for in a recording; the left panel carries the session-scale relationship. ---
         axR = axes[r, 1]
-        n_tone = int(seam_tone_ms / 1000 * hz)
-        tone = marker_cycles(n_tone, hz)
-        ramp = min(int(0.002 * hz), n_tone)  # 2 ms raised-cosine offset ramp
-        env = np.ones(n_tone)
-        k = np.arange(ramp)
-        env[n_tone - ramp:] = 0.5 * (1 + np.cos(np.pi * (k + 1) / ramp))  # 1 -> 0
-        tone = tone * env
-        # place the tone end at 0 on this axis (ms before it), so cycles are resolvable
-        t_tone_ms = np.linspace(-seam_tone_ms, 0.0, n_tone)
-        axR.plot(t_tone_ms, tone, color=MARKER_COLOR, lw=1.0, zorder=3)
+        t_marker = -gap_s - (marker.size - np.arange(marker.size)) / hz  # ends at gap start
+        axR.axvspan(-gap_s, 0.0, color="0.85", alpha=0.8, lw=0, zorder=0)  # the gap
+        axR.axvline(0.0, color="0.35", lw=0.7, ls="--", zorder=4)          # stimulus onset
+        axR.plot(t_marker, marker, color=MARKER_COLOR, lw=0.7, zorder=3)
+        post = t <= zoom_post_s
+        axR.plot(t[post], trace[post], color=colour, lw=0.5, zorder=3)
         axR.axhline(0, color="0.7", lw=0.4, zorder=0)
-        axR.set_xlim(-seam_tone_ms, 0.6)
-        # zoom the y-axis to the marker's real (low) amplitude so the cycles + offset ramp
-        # are legible — this detail panel is about tone SHAPE, not the level comparison.
-        axR.set_ylim(-MARKER_AMPLITUDE * 1.45, MARKER_AMPLITUDE * 1.6)
+        axR.set_xlim(t_marker[0] - 0.03, zoom_post_s)
+        axR.set_ylim(-1.0, 1.15)
         axR.set_title(
-            f"10 kHz tone tail (real cycles) → {gap_s * 1000:.0f} ms gap → onset",
-            fontsize=8,
+            f"the real burst → {gap_s * 1000:.0f} ms gap → onset", fontsize=8
         )
         axR.tick_params(labelsize=6)
-        axR.set_xlabel("time before tone end (ms)", fontsize=7)
-        axR.annotate(
-            f"tone ends,\nthen {gap_s * 1000:.0f} ms silence\nbefore onset",
-            (0, -MARKER_AMPLITUDE * 0.8), fontsize=6, color="0.4", ha="right", va="center",
-        )
+        axR.set_xlabel("time relative to onset (s)", fontsize=7)
+        if r == 0:
+            for k in range(MARKER_N_PULSES):
+                # pulse k's true onset: the trace starts at pulse 0 and steps by one IPI,
+                # which is the span (first onset -> last onset) over the N-1 intervals
+                x = t_marker[0] + k * MARKER_SPAN_S / (MARKER_N_PULSES - 1)
+                up = k % 2 == 0
+                axR.annotate(
+                    "+" if up else "−",
+                    (x, MARKER_AMPLITUDE + 0.06 if up else -MARKER_AMPLITUDE - 0.06),
+                    fontsize=6, color=MARKER_COLOR, ha="center",
+                    va="bottom" if up else "top",
+                )
+            axR.annotate(
+                "the SIGN is random per press —\nthe ALTERNATION is the cue",
+                (-gap_s - 0.015, 1.12), fontsize=5.5, color="0.4", ha="right", va="top",
+            )
 
-    fig.suptitle("Anatomy of a fakefish playback — 10 kHz lead-in marker → gap → stimulus onset")
+    fig.suptitle(
+        f"Anatomy of a fakefish playback — {MARKER_N_PULSES}-pulse alternating marker "
+        "→ gap → stimulus onset"
+    )
     saved = save_figure(fig, out)
     log.info("wrote %s (volley gap %d samp, loc gap %d samp)", saved,
              int(gaps[volley["_idx"]]), int(gaps[loc["_idx"]]))

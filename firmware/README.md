@@ -6,9 +6,12 @@ project overview is in the [top-level README](../README.md).
 
 > ### ⚠ Read this before powering anything
 >
-> Both devices drive a **36 V** output stage. Full scale is **~72 Vpp differential** at the
-> electrodes, and a `0.90`-level volley pulse reaches roughly **30 V peak** per electrode
-> (open-circuit, nominal rail). Earlier revisions of this device ran a ~5.7 Vpp direct-pin
+> Both devices drive a **36 V** output stage. Because the eel EOD is monophasic, only **one**
+> bridge ever drives while the other is braked hard to 0 V — so a discharge reaches **at most
+> ~36 V**, the rail. (It is *not* ~72 Vpp: that would need a biphasic signal driving both
+> bridges in opposite directions at the same instant, which this device never produces.) A
+> `0.90`-level volley pulse is roughly **32 V** and a `0.45` localization pulse roughly **16 V**,
+> open-circuit at nominal rail. Earlier revisions of this device ran a ~5.7 Vpp direct-pin
 > stage — that stage is **retired**, and firmware built from this tree must **not** be flashed
 > onto that old hardware. Set the absolute level on a scope, with `MASTER_GAIN`, before
 > anything goes in water near an animal. Flashing and scoping are bench steps and are the
@@ -183,9 +186,11 @@ real committed waveform through the real network:
 shaper noise at the 25 kHz sample-Nyquist. (That is the measured *effect*; the design intent is
 not recorded anywhere, so this file does not claim it was the reason.)
 
-**The 10 kHz sine marker is the one real casualty:** −21.80 dB, a factor of 12.3, against
-−1.4 dB under the old filter. See the marker section below — that loss is quantified but its
-*consequences* are not settled from the bench.
+**This filter is why the 10 kHz sine marker was retired.** At 10 kHz the network is −21.80 dB
+down — a factor of 12.3, against −1.4 dB under the 1-pole design the docs used to describe. Rather
+than fight it, the SD device's marker was rebuilt out of **eel pulses** (see the marker section
+below), which sit in the same sub-kHz band as the stimulus and therefore lose the same ~0.5 dB.
+Nothing either device emits is out of band any more.
 
 ### Caveats on these numbers
 
@@ -195,9 +200,11 @@ not recorded anywhere, so this file does not claim it was the reason.)
   2.1 kHz. That division is larger than everything the filter does to the EOD, and it dominates
   the delivered field. *(Watch the convention: a single-ended-to-ground load of `R` is the same
   case as a differential load of `2R`.)*
-- **10 kHz is nearly load-invariant** (−21.8 → −22.7 dB from open circuit to a 440 Ω
-  differential load) while the EOD band is divided down hard — so the marker-to-pulse ratio
-  actually *improves* in water. Do not quote the open-circuit marker fraction as the in-water one.
+- **High frequencies are nearly load-invariant** — 10 kHz moves only −21.8 → −22.7 dB from open
+  circuit to a 440 Ω differential load — while the EOD band is divided down hard. That asymmetry
+  used to matter for the out-of-band sine marker. Now that every emitted signal is an eel pulse the
+  useful consequence is the opposite one: **marker, localization and volley all sit in the same
+  band, so their level *ratios* survive the load exactly** and only the absolute level moves.
 - **Capacitor DC-bias derating is unmodelled and is the most likely reason a bench measurement
   will disagree.** Each shunt cap sits at a large mean DC voltage on a single-ended 36 V rail;
   class-2 ceramics (X7R/X5R, and far worse Y5V) can lose a large fraction of their nominal
@@ -227,16 +234,24 @@ The firmware keeps exactly one knob:
 | `MASTER_GAIN` (button `.ino`) | every streamed sample | `1.0` (levels exactly as rendered) |
 | CH6 pot / `PANEL_VOLLEY_AMP` (RC) | the volley level; localization is derived at half | `1.00` on the bench |
 
-**Level → volts.** Amplitude `1.0` means the **full rail**. On a nominal 36 V stage:
+**Level → volts.** Amplitude `1.0` means the **full rail** — and on this device that is the whole
+story, because the eel EOD is monophasic. `out_write()` **sign-splits** each sample: one bridge
+drives at `|s|` while the other is braked hard to 0 V, so at any instant exactly one electrode is
+above ground. A discharge therefore reaches **at most the rail, ~36 V**, never twice it. The
+~72 Vpp figure earlier revisions of this file quoted would require a *biphasic* signal driving both
+bridges in opposite directions at the same instant, which never happens here.
 
 ```
-V_peak(per electrode) ≈ 36 V × amplitude          full scale ≈ 72 Vpp differential
-0.90 volley  →  ~30 V peak per electrode (after the filter, open-circuit)
-0.45 loc     →  ~15 V peak
+V_peak(differential) ≈ 36 V × amplitude          max ≈ 36 V per discharge
+0.90 volley  →  ~32 V
+0.50 marker  →  ~18 V
+0.45 loc     →  ~16 V
 ```
 
-These are **open-circuit, nominal-rail** figures — in water the load divides them down (see
-above), and battery sag and the driver's drop make them a few per cent optimistic. **Scope it.**
+These are **open-circuit, nominal-rail** figures — the output filter costs a further ~0.5 dB on the
+pulse peak, in water the load divides them down (see above), and battery sag and the driver's drop
+make them a few per cent optimistic. This is still a large step up from the retired ~5.7 Vpp
+direct-pin stage and still has to be **scoped** before it goes near an animal.
 
 > **`FULLSCALE_PULSE_PEAK_MV` is stale.** `shared/stim_constants.json` still carries `3313.0`, a
 > constant derived from the retired 3.3 V rail (`3.3 V × 32767/32640`). The renderer's mV
@@ -267,46 +282,57 @@ links out.
 
 ---
 
-## The two markers — different mechanisms, deliberately not unified
+## The two markers — different codes, deliberately not unified
 
-Both devices tag their trials so the recording can tell playback from wild fish, but they do it
-in completely different ways. The constants carry distinct prefixes (`SD_MARKER_*` vs
-`PULSE_MARKER_*`) precisely because a bare `MARKER_*` name in this repo would be a trap.
+Both devices tag their trials so the recording can tell playback from wild fish, and both now do it
+with **eel pulses**. What differs is the **code**, because the two markers answer different
+questions: the SD marker says *this is a playback*, the RC marker says *what comes next is a volley
+/ a sham*. The constants carry distinct prefixes (`SD_MARKER_*` vs `PULSE_MARKER_*`) precisely
+because a bare `MARKER_*` name in this repo would be a trap.
 
-### SD device: a 10 kHz sine tone (baked into the WAVs)
+### SD device: 6 pulses at 10 Hz, alternating polarity (baked into the WAVs)
 
-A pure out-of-band tone **locates** each playback in the recording, and its apparent frequency
-pins recorder-vs-playback clock drift. One exact cycle is 5 samples at 50 kHz; the LUT
-`[0, 31163, 19260, −19260, −31163]` is derived at codegen from `round(32767·sin(2πk/5))` and
-sums to **exactly zero**, so the tone puts no net charge on the electrodes. A 1 s lead-in
-precedes each stimulus; program A is a 10 s calibration tone.
+`build_sd_card.render_pulse_marker` prepends `SD_MARKER_N_PULSES` (**6**) EOD pulses at a fixed
+`SD_MARKER_IPI_SAMP` (**5000 samples = 100 ms = 10 Hz**) at level `SD_LEVEL_MARKER` (**0.5**) to
+every `/B`, `/C` and `/D` session. First onset to last onset is **0.5 s**; the rendered burst is
+25 131 samples (0.503 s) counting the last pulse's tail. The playback structure is unchanged —
+**[marker] → [per-item gap] → [stimulus]**, where the gap is the byte-frozen `STIM_LEAD_GAP_SAMP`
+(50–200 ms, fixed per item at export).
 
-**The filter attenuates it by 21.8 dB** (to ~1.9 % of full scale differential, open-circuit,
-rather than the ~21 % the old filter would have passed). Whether that still closes the detection
-budget depends on the detector, and the two framings disagree:
+Three properties make it work:
 
-- **By energy** — the framing that fits the narrowband spectral-peak detector this design
-  assumes — it closes comfortably: a 1 s lead-in carries only 4.1 dB less energy than a *single*
-  volley EOD pulse, and the 10 s calibration tone carries 5.9 dB *more*, before ~44–54 dB of
-  narrowband processing gain.
-- **By peak amplitude** — the framing that fits a threshold detector — the marker-to-pulse peak
-  ratio degrades by 21.3 dB, which bites hard.
+- **Alternating polarity is the detection cue.** No real eel alternates, and a localization train
+  is single-polarity, so the pattern cannot be confused with biology or with the stimulus it
+  introduces. 10 Hz on its own would sit inside the localization range — it is the *alternation*,
+  not the rate, that identifies the burst.
+- **It survives the per-press polarity flip.** The firmware negates the whole WAV at random, so the
+  absolute sign is unpredictable — but the alternation is invariant under negation. A detector must
+  key on the **pattern**, never on the sign.
+- **It is charge-balanced**, because the pulse count is **even**: three pulses of each polarity of
+  an identical waveform sum to ~0 net charge (the rendered burst's differential mean is 0 to
+  floating-point precision). That replaces the zero-sum property the old sine LUT provided, and the
+  codegen asserts the count stays even.
 
-It also gets *relatively* stronger in water, since 10 kHz is load-invariant while the EOD band
-is divided down. **This has not been checked on the bench**; it is on the TODO list. If it does
-need addressing, note that raising the marker level touches `shared/stim_constants.json` (and so
-both the card and the galleries, together), while changing the *frequency* additionally breaks
-the detector contract frozen in `data/stimuli_provenance.json` against every recording already
-made. The one alternative anchor that satisfies the existing whole-cycles rule is **6250 Hz**
-(50000/8), worth ~5.9 dB — 8333 Hz does *not* qualify, as 50000/6 is not an integer.
+The 100 ms IPI is ~38× one `EOD_HV` (131 samples), so marker pulses can never overlap.
 
-### RC device: a coded pulse burst (synthesised live)
+**Why it replaced the 10 kHz sine.** Two reasons, both plain: the 2-pole output filter attenuates
+10 kHz by **−21.8 dB** (see above), and everything this device puts in the water should be made of
+eel pulses. The pulse marker is **barely touched by the filter** — eel pulses are sub-kHz (99 % of
+`EOD_HV`'s energy lies below 904 Hz), so it loses the same ~0.5 dB the stimulus does, in water as
+well as open-circuit.
+
+**Program A is a calibration *train*, not a tone.** 10 s of a **single-polarity** EOD train at
+`SD_CAL_RATE_HZ` (**50 Hz**, `SD_CAL_IPI_SAMP` = 1000 samples) at level `SD_LEVEL_CALIBRATION`
+(**0.45**) — a plain reference signal for setting gain and checking the rig. Single-polarity is
+deliberate: it is not a code, and it can never be mistaken for the alternating lead-in.
+
+### RC device: 2 or 4 pulses at 100 Hz, same polarity (synthesised live)
 
 A short EOD burst at a fixed 100 Hz IPI, tagged by **pulse count**: `PULSE_MARKER_PULSES_VOLLEY`
 (2) then the discharge, or `PULSE_MARKER_PULSES_SHAM` (4) then silence. 100 Hz sits clearly above
-localization (≤ 20 Hz) and below the volley peak (~300–400 Hz). It shares the randomised polarity
-of the playback it precedes. Being made of EOD pulses, it passes the filter as well as the EOD
-does — this marker is unaffected by the filter change.
+localization (≤ 20 Hz) and below the volley peak (~300–400 Hz). Polarity is **not** alternated —
+the burst shares the single randomised polarity of the playback it precedes, so here it is the
+*count*, not a pattern, that carries the information.
 
 ---
 
@@ -320,7 +346,7 @@ during playback are ignored. Polarity is randomised per press.
 
 | Button | Pin | Dir | Plays |
 |---|---|---|---|
-| A | 5 | `/A` | calibration tone (10 s) |
+| A | 5 | `/A` | calibration train (10 s of single-polarity pulses @ 50 Hz) |
 | B | 6 | `/B` | localization session |
 | C | 7 | `/C` | volley session |
 | D | 8 | `/D` | localize → strike |
@@ -377,11 +403,19 @@ capacitor** anywhere in the output network (the filter is DC-coupled, gain 1 at 
 balanced instead by **randomising polarity per playback**, which keeps the net near zero across a
 session and stops the electrodes pitting. Use V4A stainless.
 
-One consequence worth knowing: because the drive is single-ended against a star ground, a
-rectified-drive signal leaves a **common-mode DC pedestal** — about 2.8 V on *both* electrodes
-during a marker tone at level 0.25. It produces no field (it is common-mode, on a floating
-battery) but it is a real single-ended signal if the rig ever shares a ground with the recording
-grid.
+One consequence worth knowing: because the drive is single-ended against a star ground, any signal
+that *alternates* polarity leaves a **common-mode DC pedestal** — both electrodes sit at the same
+positive mean, since neither is ever driven below ground. The retired 10 kHz sine, a continuous
+bipolar tone, produced a large one (~2.8 V on *both* electrodes at level 0.25). The alternating
+pulse marker produces the same kind of pedestal but a tiny one: six ~2.6 ms pulses in 0.5 s is a
+low duty cycle, so at level 0.5 the mean is only **~0.09 V per electrode**, with the differential
+mean exactly zero — that zero *is* the charge balance.
+
+Single-polarity playbacks (localization, volley, and the program-A calibration train) have no
+common-mode pedestal at all; instead they carry a **differential** DC, e.g. ~0.68 V mean on the one
+driven electrode across the 10 s calibration train. That is precisely the net charge the per-press
+polarity flip exists to cancel. None of this makes a field problem on a floating battery, but it is
+a real single-ended signal if the rig ever shares a ground with the recording grid.
 
 ---
 
@@ -437,7 +471,9 @@ Hardware is bench-owned; none of this is ever claimed done by an agent.
    re-flash, and read the Serial sweep against the scope. This replaces normal operation with a
    self-contained calibration routine and never starts the sample ISR.
 3. **Measure the filter**, don't trust the marking — see the DC-bias caveat above.
-4. **Set `MASTER_GAIN` on the scope** before going near an animal. Full scale is ~72 Vpp.
-5. **Check the 10 kHz marker** survives into your recorder at a usable SNR (the open question
-   above).
+4. **Set `MASTER_GAIN` on the scope** before going near an animal. A discharge reaches at most
+   ~36 V — the rail — so a `0.90` volley pulse is ~32 V and a `0.45` localization pulse ~16 V.
+5. **Check the pulse marker** survives into your recorder: that the six alternating pulses at 10 Hz
+   resolve individually and that the alternation is unambiguous against real fish. That is a
+   *detection* question, not a level-budget one, and only a recording settles it (`TODO.md` §2).
 6. **RC device:** flash `rc_input_test` first, confirm all four channels, and redo `RC_CAL_*`.

@@ -41,6 +41,7 @@ from fakefish.viz.loggers import configure_logging, get_logger  # noqa: E402
 from fakefish.viz.plotstyle import CATEGORICAL, full_page  # noqa: E402
 
 from fakefish import export_teensy_stimuli as ex  # noqa: E402
+from fakefish import build_sd_card as sd  # noqa: E402
 from fakefish import _constants as K  # noqa: E402
 from fakefish import _resources as _res  # noqa: E402
 import typer  # noqa: E402
@@ -818,152 +819,282 @@ def _carrier_plots(t_old, y_old, t_new, y_new, pulse_i16, ideal, old_hz, new_hz,
 
 
 # ==========================================================================
-# marker — the out-of-band 10 kHz sine anchor through the RC + 48 kHz recorder
+# marker — the alternating-polarity eel-pulse lead-in through the whole chain
 # ==========================================================================
+# The lead-in prepended to every B/C/D session used to be a 10 kHz sine tone. It is now a
+# short burst of EOD pulses at a fixed rate with ALTERNATING polarity (build_sd_card.
+# render_pulse_marker). Two things had to be checked, and this command checks both:
+#
+#   1. Does the burst survive the output chain? The retired sine sat at 10 kHz, where the
+#      2-pole output filter costs -21.8 dB. An eel pulse is sub-kHz, so it should barely
+#      be touched — that is the whole point of marking with pulses instead of a tone.
+#   2. Is the ALTERNATION still unambiguous in the recording? Alternation, not sign, is
+#      the detection cue (the firmware negates the whole WAV per press), so what matters
+#      is that the recorded per-pulse peaks still flip sign pulse by pulse, far above the
+#      inter-pulse floor.
+#
+# Scope: like `analyze`, this models the DUTY quantizer at FS (8-bit, noise-shaped), the
+# 2-pole output filter and the 48 kHz recorder. The 100 kHz PWM carrier itself is out of
+# scope here — `carrier` models the switching edges and reports what is left of them.
 
-# Single-sourced from shared/stim_constants.json (see fakefish.gen_constants) rather than
-# re-derived here, so the simulation models the SAME marker the card actually carries.
-MARKER_FREQ_HZ = K.MARKER_FREQ_HZ
-MARKER_LUT = K.MARKER_LUT.astype(np.int64)  # one exact unit-sine cycle at 10 kHz / 50 kHz
+# Single-sourced from shared/stim_constants.json (see fakefish.gen_constants) and rendered
+# by the SAME function that bakes the marker into the WAVs, so this simulates the marker
+# the card actually carries rather than a re-derived look-alike.
+MARKER_N_PULSES = K.MARKER_N_PULSES  # 6, EVEN -> charge-balanced
+MARKER_IPI_SAMPLES = K.MARKER_IPI_SAMPLES  # 5000 @ 50 kHz == 100 ms == 10 Hz
 
 
-def marker_i16(total: int, ramp: int, amplitude: float) -> np.ndarray:
-    """The signed-int16 sine marker: LUT[t%n] * amplitude * raised-cosine on/off ramp,
-    clamped. The twin of build_sd_card.render_marker, which bakes it into the WAVs."""
-    per = MARKER_LUT.size
-    t = np.arange(total)
-    env = np.ones(total, dtype=np.float64)
-    if ramp > 0 and total >= 2 * ramp:
-        on = t < ramp
-        env[on] = 0.5 * (1.0 - np.cos(np.pi * t[on] / ramp))
-        off = t >= total - ramp
-        env[off] = 0.5 * (1.0 - np.cos(np.pi * (total - t[off]) / ramp))
-    s = amplitude * env * MARKER_LUT[t % per].astype(np.float64)
-    return np.clip(np.round(s), -32767, 32767).astype(np.int64)
+def _burst_onsets(fs: float) -> np.ndarray:
+    """Sample index of each marker pulse onset for a signal sampled at ``fs``."""
+    return np.rint(np.arange(MARKER_N_PULSES) * MARKER_IPI_SAMPLES * (fs / FS)).astype(np.int64)
+
+
+def _pulse_windows(fs: float, eod_len: int, guard_s: float) -> list[tuple[int, int]]:
+    """[start, stop) around each marker pulse: the EOD plus ``guard_s`` of slack for the
+    filter's group delay (~160 us) and the resampler's ringing."""
+    win = int(round(eod_len * fs / FS)) + int(round(guard_s * fs))
+    return [(int(s), int(s) + win) for s in _burst_onsets(fs)]
+
+
+def _pulse_peaks(sig: np.ndarray, fs: float, eod_len: int, guard_s: float = 4e-3) -> np.ndarray:
+    """SIGNED peak of each marker pulse — the sequence whose sign pattern IS the marker."""
+    out = np.empty(MARKER_N_PULSES)
+    for k, (s, e) in enumerate(_pulse_windows(fs, eod_len, guard_s)):
+        seg = sig[s : min(e, sig.size)]
+        out[k] = seg[int(np.argmax(np.abs(seg)))]
+    return out
+
+
+def _inter_pulse_floor(sig: np.ndarray, fs: float, eod_len: int, guard_s: float = 6e-3) -> float:
+    """Largest |sample| BETWEEN the pulses — the floor a detector must clear."""
+    mask = np.ones(sig.size, dtype=bool)
+    for s, e in _pulse_windows(fs, eod_len, guard_s):
+        mask[s : min(e, sig.size)] = False
+    return float(np.max(np.abs(sig[mask]))) if mask.any() else 0.0
+
+
+def _fwhm_ms(sig: np.ndarray, fs: float) -> float:
+    """Full width at half maximum of |sig| (one isolated pulse), in ms."""
+    a = np.abs(sig)
+    idx = np.flatnonzero(a >= 0.5 * a.max())
+    return float((idx[-1] - idx[0] + 1) / fs * 1e3)
+
+
+def _eod_spectrum(eod: np.ndarray, nfft: int = 8192) -> tuple[np.ndarray, np.ndarray]:
+    """Zero-padded magnitude spectrum of one EOD pulse (freq Hz, power, un-normalised)."""
+    f = np.fft.rfftfreq(nfft, 1.0 / FS)
+    p = np.abs(np.fft.rfft(np.asarray(eod, dtype=np.float64), nfft)) ** 2
+    return f, p
+
+
+def _energy_quantile(f: np.ndarray, p: np.ndarray, q: float) -> float:
+    """Frequency below which fraction ``q`` of the pulse's energy sits."""
+    return float(f[int(np.searchsorted(np.cumsum(p) / p.sum(), q))])
 
 
 @app.command()
 def marker(
-    amplitude: float = typer.Option(0.90, "--amplitude", "-a", help="marker level (0..1)"),
-    ramp: int = typer.Option(100, "--ramp", help="raised-cosine ramp samples"),
+    firmware: Path = typer.Option(_res.DEFAULT_FIRMWARE, "--firmware", "-f"),
+    amplitude: float = typer.Option(
+        K.MARKER_AMPLITUDE, "--amplitude", "-a", help="marker level (0..1); default = the card's"
+    ),
     verbose: int = typer.Option(2, "--verbose", "-v", count=True),
 ) -> None:
-    """Push the 10 kHz sine ANCHOR through the real output chain (8-bit noise-shaped PWM ->
-    1-pole 16 kHz RC -> 48 kHz recorder) and confirm it survives as a clean out-of-band
-    line. The tone (not a pulse) is what locates each playback and pins the clock drift."""
+    """Push the ALTERNATING-POLARITY pulse marker through the real output chain (8-bit
+    noise-shaped PWM -> 2-pole output filter -> 48 kHz recorder) and check that the
+    alternation — the detection cue — is still unambiguous in the recording."""
     configure_logging(verbose)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1 s of the lead-in marker (== MARKER_FREQ_HZ exact cycles) is enough for a tight spectrum.
-    total = FS  # 1 s
-    m_i16 = marker_i16(total, ramp, amplitude)
-    diff = render_channels(m_i16, shaped=True)          # 8-bit noise-shaped, differential
-    rc = rc_lowpass(diff, FS)                            # the 2-pole per-channel output filter
-    rec = record_48k(rc)                                  # what the 48 kHz ADC captures
-    ideal = _ideal(m_i16)                                # the un-quantised target
+    eod = ex.parse_firmware(firmware)["EOD_HV"]
+    # The exact burst build_sd_card bakes into every B/C/D WAV (int16, polarity +1).
+    m_i16 = sd.render_pulse_marker(eod, sd.Levels(marker=float(amplitude))).astype(np.float64)
+    ideal = _ideal(m_i16)  # == m_i16 / (STEP*DUTY_MAX): the un-quantised target
+    diff = render_channels(m_i16, shaped=True)  # 8-bit noise-shaped duty, differential
+    rc = rc_lowpass(diff, FS)  # the 2-pole per-channel output filter
+    rec = record_48k(rc)  # what the 48 kHz ADC captures
+    sc = STEP * DUTY_MAX  # int16-equivalent full scale
 
-    # exact gain of the real 2-pole output network, and the recorded line.
-    for fq in (5e3, 10e3, 15e3):
-        log.info("output-filter gain @ %.0f kHz: %.2f dB (%d samples/cycle)",
-                 fq / 1e3, out_filter_gain_db(fq), int(round(FS / fq)))
-    f, p = welch(rec, REC_FS, nperseg=8192)
-    k = int(np.argmin(np.abs(f - MARKER_FREQ_HZ)))
-    band = (f > 1.0) & (np.abs(f - MARKER_FREQ_HZ) > 300)  # everything off the marker line
-    peak_to_floor_db = 10 * np.log10(p[k] / np.median(p[band]))
-    log.info("recorded marker line: %.0f dB above the off-line median (clean anchor)",
-             peak_to_floor_db)
-    log.info("net DC of the emitted marker (int16 units): %d (odd-symmetric -> ~0)",
-             int(m_i16.sum()))
+    # ---- (1) per-pulse peaks: emitted vs after the filter vs after the recorder ----
+    pk_pre = _pulse_peaks(ideal * sc, FS, eod.size)
+    pk_rc = _pulse_peaks(rc * sc, FS, eod.size)
+    pk_rec = _pulse_peaks(rec * sc, REC_FS, eod.size)
+    keep = float(np.mean(np.abs(pk_rec) / np.abs(pk_pre)))
+    log.info("emitted per-pulse peak (int16): %s", np.array2string(pk_pre, precision=0))
+    log.info("after the 2-pole filter:        %s", np.array2string(pk_rc, precision=0))
+    log.info(
+        "after the 48 kHz recorder:      %s  (%.1f%% of emitted, %+.2f dB)",
+        np.array2string(pk_rec, precision=0), keep * 100, 20 * np.log10(keep),
+    )
 
-    _marker_plots(m_i16, ideal, rec, f, p, amplitude, ramp, peak_to_floor_db)
+    # ---- (2) is the alternation unambiguous after recording? ----
+    floor = _inter_pulse_floor(rec * sc, REC_FS, eod.size)
+    margin_db = 20 * np.log10(np.min(np.abs(pk_rec)) / max(floor, 1e-12))
+    alternates = bool(np.all(np.sign(pk_rec[1:]) == -np.sign(pk_rec[:-1])))
+    log.info(
+        "recorded sign pattern %s -> strictly alternating: %s; inter-pulse floor %.3f int16 "
+        "(weakest pulse is %.0f dB above it)",
+        "".join("+" if v > 0 else "-" for v in pk_rec), alternates, floor, margin_db,
+    )
+
+    # ---- (3) the per-press polarity flip must not touch the PATTERN ----
+    # The driver splits sign across two identical channels, so negating the WAV just swaps
+    # them: the chain is exactly antisymmetric and the flip cannot break the alternation.
+    antisym = bool(np.array_equal(render_channels(-m_i16, shaped=True), -diff))
+    log.info("polarity-flip antisymmetry through the quantizer: %s (sign flips, pattern does not)",
+             antisym)
+
+    # ---- (4) why it survives: the pulse's energy is sub-kHz, where the filter is flat ----
+    f_e, p_e = _eod_spectrum(eod)
+    quant = {q: _energy_quantile(f_e, p_e, q) for q in (0.5, 0.9, 0.99)}
+    for q, fq in quant.items():
+        log.info("  %2.0f%% of the pulse's energy below %4.0f Hz: filter %+.2f dB",
+                 q * 100, fq, out_filter_gain_db(fq))
+    log.info("  (the retired 10 kHz sine marker sat at %+.1f dB)", out_filter_gain_db(10e3))
+
+    stats = {
+        "amplitude": float(amplitude),
+        "keep": keep,
+        "floor": floor,
+        "margin_db": margin_db,
+        "alternates": alternates,
+        "antisym": antisym,
+        "quant": quant,
+        "fwhm_pre": _fwhm_ms(m_i16[: MARKER_IPI_SAMPLES], FS),
+        "fwhm_rec": _fwhm_ms(rec[: int(MARKER_IPI_SAMPLES * REC_FS / FS)], REC_FS),
+        "delay_us": (int(np.argmax(np.abs(rc[:MARKER_IPI_SAMPLES])))
+                     - int(np.argmax(np.abs(m_i16[:MARKER_IPI_SAMPLES])))) / FS * 1e6,
+        "net_charge_frac": float(abs(rec.sum() * sc * FS / REC_FS)
+                                 / np.abs(m_i16).sum()),
+    }
+    _marker_plots(m_i16, ideal, rc, rec, eod.size, pk_pre, pk_rec, f_e, p_e, stats)
 
 
-def _marker_plots(m_i16, ideal, rec, f, p, amplitude, ramp, peak_to_floor_db):
-    sc = 32767.0
-    fig, axes = full_page(height_cm=15.0, nrows=2, ncols=2)
+def _marker_plots(m_i16, ideal, rc, rec, eod_len, pk_pre, pk_rec, f_e, p_e, st):
+    sc = STEP * DUTY_MAX
+    t_fs = np.arange(m_i16.size) / FS * 1e3
+    t_rec = np.arange(rec.size) / REC_FS * 1e3
+    fig, axes = full_page(height_cm=17.0, nrows=3, ncols=2)
 
-    # A: a few cycles — ideal marker vs what the 48 kHz recorder captures (a clean sine).
-    # Index each signal by its OWN sample rate over the SAME absolute steady-state window
-    # (both the RC and the resampler are zero-phase, so aligned in time they overlay).
+    # A: the whole burst — emitted vs recorded. Six pulses, sign flipping every 100 ms.
     ax = axes[0, 0]
-    t0, span = 0.010, 800e-6  # start 10 ms in (steady), show 0.8 ms (~4 cycles)
-    i0, i1 = int(t0 * FS), int((t0 + span) * FS)
-    r0, r1 = int(t0 * REC_FS), int((t0 + span) * REC_FS)
-    ax.plot((np.arange(i0, i1) - i0) / FS * 1e6, ideal[i0:i1] * sc, color="0.5", lw=2.4,
-            label="ideal (LUT)")
-    ax.plot((np.arange(r0, r1) - r0) / REC_FS * 1e6, rec[r0:r1] * sc, color=CATEGORICAL[1],
-            lw=1.2, marker="o", ms=2.5, label="recorded @48 kHz")
-    ax.axhline(0, color="grey", lw=0.5)
-    ax.set_xlabel("time (µs)")
-    ax.set_ylabel("int16-equiv")
-    ax.legend(fontsize=6)
-    ax.set_title("A · 10 kHz tone: LUT vs recorded (steady state)", fontsize=8)
-
-    # B: onset — the raised-cosine ramp (click-free zero-start into the tone).
-    ax = axes[0, 1]
-    win = int(2.5 * ramp)
-    t_ms = np.arange(win) / FS * 1e3
-    ax.plot(t_ms, m_i16[:win], color=CATEGORICAL[0], lw=0.9)
-    ax.plot(t_ms, amplitude * sc * _cos_ramp(np.arange(win), ramp), color=CATEGORICAL[3],
-            lw=1.4, ls="--", label="raised-cosine envelope")
-    ax.plot(t_ms, -amplitude * sc * _cos_ramp(np.arange(win), ramp), color=CATEGORICAL[3],
-            lw=1.4, ls="--")
+    ax.plot(t_fs, ideal * sc, color="0.5", lw=1.6, label="emitted (WAV)")
+    ax.plot(t_rec, rec * sc, color=CATEGORICAL[1], lw=0.8, label="recorded @48 kHz")
     ax.axhline(0, color="grey", lw=0.5)
     ax.set_xlabel("time (ms)")
-    ax.set_ylabel("emitted int16")
+    ax.set_ylabel("int16-equiv")
     ax.legend(fontsize=6)
-    ax.set_title("B · onset ramp (zero-start, anti-click + no splatter)", fontsize=8)
+    ax.set_title(
+        f"A · the burst: {MARKER_N_PULSES} pulses @ {K.MARKER_RATE_HZ:g} Hz, alternating",
+        fontsize=8,
+    )
 
-    # C: recorded spectrum — a single 10 kHz line, well off the biological band.
+    # B: one pulse, zoomed — the filter costs a little peak, a little width, 0.16 ms delay.
+    ax = axes[0, 1]
+    span = eod_len + int(1.5e-3 * FS)
+    r_span = int(span * REC_FS / FS)
+    ax.plot(t_fs[:span], ideal[:span] * sc, color="0.5", lw=2.2, label="emitted")
+    ax.plot(t_fs[:span], rc[:span] * sc, color=CATEGORICAL[0], lw=1.0, label="after 2-pole filter")
+    ax.plot(t_rec[:r_span], rec[:r_span] * sc, color=CATEGORICAL[1], lw=0.9, marker="o", ms=2.0,
+            label="recorded @48 kHz")
+    ax.axhline(0, color="grey", lw=0.5)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("int16-equiv")
+    ax.legend(fontsize=6)
+    ax.set_title("B · first pulse (shape through the chain)", fontsize=8)
+
+    # C: the sequence a detector keys on — signed peak per pulse, emitted vs recorded.
     ax = axes[1, 0]
-    ax.semilogy(f / 1e3, p / p.max(), color=CATEGORICAL[1], lw=0.9)
-    ax.axvline(MARKER_FREQ_HZ / 1e3, color=CATEGORICAL[0], lw=1.0, ls=":", label="10 kHz marker")
-    ax.axvspan(0, 1.8, color="0.8", alpha=0.5, label="wave-fish EOD band ≤1.8 kHz")
-    ax.set_xlim(0, 24)
-    ax.set_ylim(1e-9, 2)
-    ax.set_xlabel("frequency (kHz)")
-    ax.set_ylabel("recorded PSD (norm.)")
+    idx = np.arange(1, MARKER_N_PULSES + 1)
+    ax.bar(idx - 0.19, pk_pre, width=0.36, color="0.7", label="emitted")
+    ax.bar(idx + 0.19, pk_rec, width=0.36, color=CATEGORICAL[1],
+           label=f"recorded ({st['keep'] * 100:.1f}%)")
+    ax.axhline(0, color="grey", lw=0.7)
+    ax.set_xticks(idx)
+    ax.set_xlabel("marker pulse #")
+    ax.set_ylabel("signed peak (int16-equiv)")
     ax.legend(fontsize=6)
-    ax.set_title("C · recorded spectrum — one line", fontsize=8)
+    ax.set_title("C · signed peak per pulse (the alternation)", fontsize=8)
 
-    # D: the facts.
+    # D: the pulse's own spectrum against the output filter — the reason a pulse marker
+    # survives where the 10 kHz sine did not.
     ax = axes[1, 1]
+    fplot = f_e[1:]
+    ax.semilogx(fplot, 10 * np.log10(p_e[1:] / p_e[1:].max()), color=CATEGORICAL[1], lw=1.0,
+                label="EOD pulse energy")
+    ax.semilogx(fplot, [out_filter_gain_db(f) for f in fplot], color=CATEGORICAL[0], lw=1.4,
+                label="output filter |H|")
+    ax.axvline(RC_FC, color="0.4", ls="--", lw=1, label=f"-3 dB {RC_FC:.0f} Hz")
+    ax.axvline(10e3, color=CATEGORICAL[3], ls=":", lw=1.2,
+               label=f"retired sine 10 kHz ({out_filter_gain_db(10e3):.1f} dB)")
+    ax.set_xlim(50, REC_FS / 2)
+    ax.set_ylim(-45, 5)
+    ax.set_xlabel("frequency (Hz)")
+    ax.set_ylabel("dB")
+    ax.legend(fontsize=5.5, loc="lower left")
+    ax.set_title("D · pulse energy is sub-kHz, where the filter is flat", fontsize=8)
+
+    # E: the margin, on a log axis — one whole inter-pulse interval of the RECORDED trace.
+    # The emitted signal between pulses is exactly zero and the shaped quantizer holds 0
+    # codes there, so everything above the clamp is the filter tail of the previous pulse
+    # and the resampler's pre-ringing on the next: ~5 orders of magnitude down.
+    ax = axes[2, 0]
+    (s0, _), (s1, _) = _pulse_windows(REC_FS, eod_len, 0.0)[1:3]
+    clamp = 1e-3
+    ax.semilogy(np.arange(s0, s1) / REC_FS * 1e3, np.maximum(np.abs(rec[s0:s1]) * sc, clamp),
+                color=CATEGORICAL[1], lw=0.8)
+    ax.axhline(abs(pk_rec[1]), color="0.4", ls="--", lw=1,
+               label=f"pulse peak {abs(pk_rec[1]):.0f}")
+    ax.axhline(st["floor"], color=CATEGORICAL[0], ls=":", lw=1.2,
+               label=f"floor {st['floor']:.3f} ({st['margin_db']:.0f} dB down)")
+    ax.set_ylim(clamp / 2, 4e4)  # the clamped stretch sits just above the axis floor
+    ax.text(0.5, 0.03, "flat run = exactly 0 (clamped for the log axis)", fontsize=5.5,
+            color="0.35", ha="center", transform=ax.transAxes)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("|recorded| (int16-equiv)")
+    ax.legend(fontsize=6, loc="upper center")
+    ax.set_title("E · pulse 2 -> pulse 3: the detection margin", fontsize=8)
+
+    # F: the numbers.
+    ax = axes[2, 1]
     ax.axis("off")
     g = out_filter_gain_db
     lines = [
-        "Out-of-band 10 kHz sine ANCHOR",
+        f"{MARKER_N_PULSES} pulses @ {K.MARKER_RATE_HZ:g} Hz (IPI"
+        f" {MARKER_IPI_SAMPLES / FS * 1e3:.0f} ms), span {K.MARKER_SPAN_S:g} s,",
+        f"level {st['amplitude']:.2f} FS -> +/-{abs(pk_pre[0]):.0f} int16 per pulse",
         "",
-        f"1-pole {RC_FC / 1e3:.0f} kHz diff. RC (22 nF/440 Ω):",
-        f"   4 kHz  {g(4e3):+.2f} dB  (12.5 samp/cyc)",
-        f"   5 kHz  {g(5e3):+.2f} dB  (10 samp/cyc, LUT)",
-        f"   6 kHz  {g(6e3):+.2f} dB  (8.33 samp/cyc)",
+        "8-bit shaped PWM + 2-pole RC + 48 kHz:",
+        f"  peak {abs(pk_pre[0]):.0f} -> {abs(pk_rec).mean():.0f} int16"
+        f"  ({st['keep'] * 100:.1f}%, {20 * np.log10(st['keep']):+.2f} dB)",
+        f"  FWHM {st['fwhm_pre']:.2f} -> {st['fwhm_rec']:.2f} ms,"
+        f" delay {st['delay_us']:.0f} us",
+        f"  floor between pulses {st['floor']:.3f} int16",
+        f"  alternation margin {st['margin_db']:.0f} dB:"
+        f" {'unambiguous' if st['alternates'] else 'BROKEN'}",
         "",
-        f"recorded 5 kHz line: {peak_to_floor_db:.0f} dB above",
-        "   the off-line PSD median (48 kHz ADC)",
+        "the pulse's energy is sub-kHz, where the",
+        f"filter is flat: 50% < {st['quant'][0.5]:.0f} Hz ({g(st['quant'][0.5]):+.2f} dB),",
+        f"90% < {st['quant'][0.9]:.0f} Hz, 99% < {st['quant'][0.99]:.0f} Hz"
+        f" ({g(st['quant'][0.99]):+.2f} dB).",
+        f"The retired 10 kHz sine sat at {g(10e3):+.1f} dB.",
         "",
-        "above the electrosensory band and off the",
-        "whole local biological band -> narrowband",
-        "detector flags it with ~0 false positives.",
-        "The continuous known tone also pins the",
-        "recorder-vs-playback clock-drift factor.",
+        f"chain antisymmetric: {st['antisym']} -> the per-press",
+        "flip negates the burst, never the PATTERN.",
+        f"even count -> net charge {st['net_charge_frac'] * 100:.2f}% of the",
+        "burst's own |charge|.",
     ]
     ax.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", family="monospace",
-            fontsize=7.5, transform=ax.transAxes)
-    ax.set_title("D · why 5 kHz", fontsize=8, loc="left")
+            fontsize=6.6, transform=ax.transAxes)
+    ax.set_title("F · why this marker is detectable", fontsize=8, loc="left")
 
-    fig.suptitle("Fakefish 5 kHz sine marker through the PWM+RC+48 kHz recorder chain")
+    fig.suptitle(
+        "Fakefish pulse marker (alternating polarity) through the PWM + 2-pole RC + 48 kHz chain"
+    )
     out = FIG_DIR / "firmware_marker.png"
     fig.savefig(out)
     plt.close(fig)
     log.info("wrote %s", out)
-
-
-def _cos_ramp(t: np.ndarray, ramp: int) -> np.ndarray:
-    """The raised-cosine onset envelope (0->1 over [0,ramp), then flat) for the B panel."""
-    env = np.ones(t.size, dtype=np.float64)
-    on = t < ramp
-    env[on] = 0.5 * (1.0 - np.cos(np.pi * t[on] / ramp))
-    return env
 
 
 if __name__ == "__main__":
