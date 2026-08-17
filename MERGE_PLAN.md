@@ -319,8 +319,11 @@ Update export/render/build-card default firmware paths accordingly. `make check`
 - Top `README.md`: the 3-layer architecture (L1 HAL / L2 producers / L3 surfaces), the two devices,
   how to add a future surface, the toolchain.
 - `firmware/README.md`: the CORRECTED shared hardware — 2× DRV8871 / 36 V / 100 kHz / complementary
-  brake, and **two per-channel 2nd-order single-ended lowpasses** (2× 22 nF + 220 Ω in series PER
-  channel) replacing the stale single 22 nF (A↔B) differential cap; recompute the carrier-rejection
+  brake, and **two per-channel 2nd-order single-ended lowpasses** replacing the stale single 22 nF
+  (A↔B) differential cap. **CORRECTION (owner-confirmed during execution): the caps are
+  220 nF, not 22 nF** — two cascaded 220 Ω + 220 nF sections per channel to a star ground.
+  The 10× error matters: at 22 nF the composite corner would be ~12.3 kHz and the 10 kHz
+  marker only −2.2 dB, which hides the real finding (corner ~1.23 kHz, marker −21.8 dB); recompute the carrier-rejection
   figures for a 2nd-order per-channel RC; per-surface wiring (button 6-btn + SD; RC PC817 + panel).
 - Per-surface `README`s if useful. Merge `CLAUDE.md` (both repos' invariants: byte-frozen library,
   bench-owned firmware, figure convention; drop the rc-only stale bits).

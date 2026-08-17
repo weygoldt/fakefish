@@ -12,7 +12,8 @@ it); polarity is a firmware concern too.
 
 This tool reads the source recording NIX outputs (production workspace) and writes:
 
-* ``firmware/eel_core/eel_stimuli.h`` / ``.cpp`` — the generated arrays (into the sketch).
+* ``firmware/eel_core/eel_stimuli.h`` / ``.cpp`` — the generated arrays (into the CANONICAL
+  shared core; run ``make sync`` afterwards to propagate them into each sketch's src/eel_core).
 * ``data/stimuli_qc.pdf``       — a multi-panel QC figure (see ``qc.py``-style panels here).
 * ``data/stimuli_provenance.json`` — full provenance of every selected scene.
 * ``data/multifish_volley_candidates.csv`` — rejected overlapping-volley scenes.

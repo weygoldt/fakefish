@@ -36,15 +36,19 @@
 // The DRV8871's internal dead-time makes IN1/IN2 transitions shoot-through-safe, so NO software
 // dead-time is needed (we only ever toggle IN2 with IN1 held high).
 // PWM carrier: 100 kHz (raised from 50 kHz with the DRV8871 upgrade; the DRV8871 switches cleanly
-// to ~100 kHz). Why 100 kHz specifically -- the recording grid is now SINGLE-ENDED (no common-mode
-// rejection downstream), so put the carrier where our own output RC rejects it best and where it
-// aliases least:
-//   * Rejection: 100 kHz is ~6x the RC corner (~16 kHz) vs ~3x at 50 kHz -- better suppression AT
-//     THE SOURCE, which matters because the single-ended grid can't clean up residual carrier.
-//     (The filter is now a 2nd-order per-channel single-ended lowpass -- see firmware/README.md --
-//     so the real rejection at 100 kHz is steeper than the 1-pole figure this note started from.)
+// to ~100 kHz). Why 100 kHz specifically -- the recording grid is SINGLE-ENDED (no common-mode
+// rejection downstream), so put the carrier where our own output filter rejects it best and where
+// it aliases least:
+//   * Rejection: the per-channel output filter is a 2-pole passive RC (2x 220 ohm / 220 nF, see
+//     firmware/README.md) with a composite -3 dB at ~1.23 kHz, so 100 kHz sits ~81x above the
+//     corner and lands at -59.4 dB. At 50 kHz it would be -47.4 dB. Suppression AT THE SOURCE
+//     matters because the single-ended grid cannot clean up residual carrier.
 //   * Aliasing into the 48 kHz grid: 50 kHz folds to ~2 kHz (in-band, bad); 100 kHz folds to
-//     ~4 kHz -- higher, and the RC has already attenuated it more before it gets there.
+//     ~4 kHz -- higher, and the filter has already attenuated it far more before it gets there.
+// (Historical note: this constant was chosen when the output filter was a 1-pole ~16 kHz
+// differential RC, on the reasoning that 100 kHz was "~6x the corner" for ~16 dB of rejection.
+// The filter has since been rebuilt as the 2-pole network above, which makes the SAME choice
+// better justified, not worse -- but do not repeat the old ~6x/~16 kHz arithmetic, it is wrong.)
 // This is the PWM CARRIER, independent of the 50 kHz waveform SAMPLE_RATE_HZ below.
 #define PWM_CARRIER_HZ   100000.0f         // (do NOT revert to the 585937.5 Hz Teensy default)
 #define PWM_BITS         8                 // DRV8871 holds duty fine at 100 kHz / 8-bit (see static_assert below)

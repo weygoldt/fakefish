@@ -1,7 +1,7 @@
 """Reference player: reconstruct any exported stimulus item as a 50 kHz numpy trace.
 
 Parses the *generated firmware* (``firmware/eel_core/eel_stimuli.cpp``, format
-v2) — so it validates the actual arrays the Teensy compiles — and reconstructs any
+v3) — so it validates the actual arrays the Teensy compiles — and reconstructs any
 item (real/synthetic volley or localization) as the full-rate
 signed trace the device emits, at a chosen amplitude and polarity, using the
 shared additive-mixer engine (:func:`export_teensy_stimuli.reconstruct_item`).

@@ -7,8 +7,9 @@ touches water. Panels:
 * waveform triptych — global template vs resampled vs int16-quantised, overlaid,
   with a quantisation-residual trace; FWHM / duration / peak-to-peak / net-charge
   annotated;
-* a reconstructed DAC_A / DAC_B trace for the first pulses of one volley — exactly
-  what the two Teensy DACs output;
+* a reconstructed channel A / channel B trace for the first pulses of one volley —
+  the sign-split magnitudes handed to ``out_write()`` (pre-quantiser targets; the
+  hardware drives two DRV8871 bridges via PWM, it has no DACs);
 * per volley exemplar — instantaneous rate vs pulse index; IPI histogram with the
   10 ms (>100 Hz peak) requirement marked; and the three single-fish panels (CV2
   over pulse index with p95/max marked, the detrended-IPI lag-1 scatter, and the

@@ -1,11 +1,13 @@
 """Simulate the Teensy 4.1 PWM+RC output chain to evaluate duty-quantizer options.
 
 The 4.1 renders the EOD as 8-bit PWM duty updated at STIM_SAMPLE_RATE_HZ (50 kHz),
-smoothed by a hardware RC low-pass (~16 kHz), then recorded at ~48 kHz. Low-voltage
+which drives two DRV8871 half-bridges on a 36 V rail at a 100 kHz complementary
+carrier, is smoothed by the per-channel 2-pole output RC (composite -3 dB ~1.23 kHz;
+see ``firmware/README.md``), and is then recorded at ~48 kHz. Low-voltage
 (localization) pulses sit ~50x below volley peak, so they land on ~5 duty codes.
 
-This models that chain for two quantizers — plain truncation (the current driver,
-`s>>7`) and first-order error-feedback noise shaping — and quantifies what shaping
+This models that chain for two quantizers — plain truncation and first-order
+error-feedback noise shaping (the shipped driver; see ``out_hal.h::shape``) — and quantifies what shaping
 buys: in-band effective bits, the rendered LV pulse after the RC, where the shaped
 noise lands, and whether the RC + 48 kHz recording remove it. It also checks the
 two failure modes: idle tones at zero, and the accumulator interacting with
@@ -25,7 +27,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
-from scipy.signal import butter, resample_poly, sosfiltfilt, welch  # noqa: E402
+import math  # noqa: E402
+from scipy.signal import (  # noqa: E402
+    bilinear,
+    butter,
+    lfilter,
+    resample_poly,
+    sosfiltfilt,
+    welch,
+)
 
 from fakefish.viz.loggers import configure_logging, get_logger  # noqa: E402
 from fakefish.viz.plotstyle import CATEGORICAL, full_page  # noqa: E402
@@ -48,7 +58,13 @@ def _main() -> None:
 
 FS = 50_000  # duty update rate (STIM_SAMPLE_RATE_HZ)
 REC_FS = 48_000  # recording sampler
-RC_FC = 16_000  # hardware RC low-pass cutoff (1-pole; see `dac` command)
+# Output filter: two cascaded UNBUFFERED RC sections per channel, single-ended to a star
+# ground (firmware/README.md). Unbuffered => H(s) = 1/(1 + 3sRC + (sRC)^2), so the composite
+# -3 dB (~1.23 kHz) sits well BELOW the 3.29 kHz per-section corner. RC_FC is the -3 dB point,
+# derived rather than hardcoded so changing a component value updates every figure.
+OUT_R = 220.0  # ohm, per section
+OUT_C = 220e-9  # farad, per section
+RC_FC = math.sqrt((math.sqrt(53.0) - 7.0) / 2.0) / (2.0 * math.pi * OUT_R * OUT_C)  # ~1230.6 Hz
 SIGNAL_BAND = 5_000  # EOD energy band (FWHM 0.8 ms -> a few kHz)
 DUTY_MAX = 255  # 8-bit PWM
 STEP = 128  # int16 units per duty code (32767 >> 7 == 255)
@@ -61,7 +77,11 @@ FIG_DIR = _res.FIGS_DIR / "firmware_sim"
 
 
 def quantize_truncate(mag: np.ndarray) -> np.ndarray:
-    """Current driver: duty = mag >> 7 (floor), clamped 0..255."""
+    """Baseline (REJECTED) quantizer: duty = mag >> 7 (floor), clamped 0..255.
+
+    Kept as the comparison arm. The shipped driver uses first-order error-feedback
+    noise shaping instead — ``shape()`` in firmware/eel_core/out_hal.h.
+    """
     q = np.floor(np.asarray(mag, dtype=np.float64) / STEP).astype(np.int64)
     return np.clip(q, 0, DUTY_MAX)
 
@@ -106,12 +126,48 @@ def render_channels(signed_i16: np.ndarray, shaped: bool):
 # ==========================================================================
 
 
-def rc_lowpass(x: np.ndarray, fc: float = RC_FC, fs: int = FS, order: int = 1) -> np.ndarray:
-    """1-pole RC low-pass at the DIFFERENTIAL corner the electrodes see. The board
-    uses one 220 Ohm per channel + a single cap BRIDGING the two nodes; the two R
-    add (440 Ohm) in series with the bridging cap -> fc = 1/(2*pi*440*C) (= the same
-    corner a per-node cap-to-GND would give). ``order`` is exposed for a steeper
-    anti-alias when isolating in-band residuals; the hardware itself is 1-pole."""
+def rc_lowpass(x: np.ndarray, fs: int = FS, r: float = OUT_R, c: float = OUT_C) -> np.ndarray:
+    """The real per-channel output filter: TWO cascaded, UNBUFFERED RC sections to GND.
+
+    Each electrode sees ``[R]--+--[R]--+--`` with a cap from each node to the star
+    ground (see ``firmware/README.md``). Because the second section LOADS the first,
+    the sections do not multiply::
+
+        H(s) = 1 / (1 + 3*s*R*C + (s*R*C)^2)      <- note the 3, not 2
+
+    so this is NOT ``(1 + sRC)^2``, and NOT a 2nd-order Butterworth either: it is
+    overdamped with Q = 1/3 and two REAL poles (1.26 kHz and 8.61 kHz at 220R/220nF).
+    The composite -3 dB lands at ~1.23 kHz — well BELOW the 3.29 kHz per-section
+    corner, which is the detail this model previously got wrong in two ways at once.
+
+    Applied as a SINGLE CAUSAL PASS. The earlier implementation used ``sosfiltfilt``
+    (forward-backward), which squares the magnitude response — exactly double the dB
+    at every frequency — and forces zero phase. An analog RC does neither.
+    """
+    tau = r * c
+    b, a = bilinear([1.0], [tau * tau, 3.0 * tau, 1.0], fs=fs)
+    return lfilter(b, a, x)
+
+
+def out_filter_gain_db(f: float, r: float = OUT_R, c: float = OUT_C) -> float:
+    """Exact |H| in dB of the real 2-pole output network at frequency ``f``.
+
+    |H| = 1/|1 - (wRC)^2 + j*3wRC|. Use this for every reported gain — a 1-pole
+    formula understates the roll-off badly (e.g. -18.3 dB vs the true -21.8 dB at
+    10 kHz) and a buffered (1+sRC)^2 form is wrong near the corner.
+    """
+    x = 2.0 * math.pi * f * r * c
+    return float(20.0 * math.log10(1.0 / abs(complex(1.0 - x * x, 3.0 * x))))
+
+
+def band_limit(x: np.ndarray, fc: float, fs: int, order: int = 4) -> np.ndarray:
+    """A pure ANALYSIS band-limiter — not a model of any hardware.
+
+    Used to isolate in-band residuals before taking an RMS. Zero-phase (``sosfiltfilt``)
+    is the right choice HERE, precisely because it is not pretending to be an analog
+    filter: it must not shift the residual in time relative to the signal it is compared
+    against. Do not use it to model the output network — that is ``rc_lowpass``.
+    """
     sos = butter(order, fc / (fs / 2), btype="low", output="sos")
     return sosfiltfilt(sos, x)
 
@@ -489,7 +545,7 @@ def dac(verbose: int = typer.Option(2, "--verbose", "-v", count=True)) -> None:
 
     def to_common(norm_signal: np.ndarray, rate: int, rc: bool) -> np.ndarray:
         z = np.repeat(norm_signal, UP // rate)          # ZOH to the common rate
-        return rc_lowpass(z, RC_FC, UP, order=1) if rc else z
+        return rc_lowpass(z, UP) if rc else z
 
     o35 = to_common(render_35(eod50, 12), 50_000, rc=False)      # 3.5: 12-bit DAC, no RC
     o41_50 = to_common(render_41(eod50, 8, True), 50_000, rc=True)
@@ -510,7 +566,7 @@ def dac(verbose: int = typer.Option(2, "--verbose", "-v", count=True)) -> None:
     # metrics: RMS error vs source, in the signal band
     def rmse(x):
         n = min(x.size, src.size)
-        return float(np.std(rc_lowpass((x[:n] - src[:n]), SIGNAL_BAND, UP, order=4)) * 32767)
+        return float(np.std(band_limit((x[:n] - src[:n]), SIGNAL_BAND, UP, order=4)) * 32767)
 
     log.info("RMS error vs source (int16): 3.5/12-bit=%.1f  4.1@50k=%.1f  4.1@100k=%.1f",
              rmse(o35), rmse(o41_50), rmse(o41_100))
@@ -518,11 +574,10 @@ def dac(verbose: int = typer.Option(2, "--verbose", "-v", count=True)) -> None:
     # carrier residual: 8-bit/586 kHz vs 7-bit/1.17 MHz, worst-case duty 0.5
     r8 = carrier_ripple_pp(0.5, 150e6 / 256) * 100
     r7 = carrier_ripple_pp(0.5, 150e6 / 128) * 100
-    log.info("586 kHz carrier residual after 1-pole 16 kHz RC: %.1f%% pp; 1.17 MHz: %.1f%% pp", r8, r7)
-    # exact 1-pole RC magnitude |H| = 1/sqrt(1+(f/fc)^2), valid at any frequency
+    log.info("586 kHz carrier residual after the output filter: %.1f%% pp; 1.17 MHz: %.1f%% pp", r8, r7)
+    # exact magnitude of the real 2-pole output network
     for fq in (5e3, 16e3, 50e3, 586e3, 1170e3):
-        log.info("  1-pole RC gain @ %6.0f kHz: %.1f dB", fq / 1e3,
-                 20 * np.log10(1.0 / np.sqrt(1.0 + (fq / RC_FC) ** 2)))
+        log.info("  output-filter gain @ %6.0f kHz: %.1f dB", fq / 1e3, out_filter_gain_db(fq))
 
     _dac_plots(t, src, o35, o41_50, o41_100, r8, r7)
 
@@ -803,15 +858,14 @@ def marker(
     total = FS  # 1 s
     m_i16 = marker_i16(total, ramp, amplitude)
     diff = render_channels(m_i16, shaped=True)          # 8-bit noise-shaped, differential
-    rc = rc_lowpass(diff, RC_FC, FS, order=1)            # the electrodes' 16 kHz corner
+    rc = rc_lowpass(diff, FS)                            # the 2-pole per-channel output filter
     rec = record_48k(rc)                                  # what the 48 kHz ADC captures
     ideal = _ideal(m_i16)                                # the un-quantised target
 
-    # RC gain (exact 1-pole |H| = 1/sqrt(1+(f/fc)^2)) at 4/5/6 kHz, and the recorded line.
+    # exact gain of the real 2-pole output network, and the recorded line.
     for fq in (5e3, 10e3, 15e3):
-        log.info("1-pole RC gain @ %.0f kHz: %.2f dB (%d samples/cycle)",
-                 fq / 1e3, 20 * np.log10(1 / np.sqrt(1 + (fq / RC_FC) ** 2)),
-                 int(round(FS / fq)))
+        log.info("output-filter gain @ %.0f kHz: %.2f dB (%d samples/cycle)",
+                 fq / 1e3, out_filter_gain_db(fq), int(round(FS / fq)))
     f, p = welch(rec, REC_FS, nperseg=8192)
     k = int(np.argmin(np.abs(f - MARKER_FREQ_HZ)))
     band = (f > 1.0) & (np.abs(f - MARKER_FREQ_HZ) > 300)  # everything off the marker line
@@ -875,9 +929,9 @@ def _marker_plots(m_i16, ideal, rec, f, p, amplitude, ramp, peak_to_floor_db):
     # D: the facts.
     ax = axes[1, 1]
     ax.axis("off")
-    g = lambda fq: 20 * np.log10(1 / np.sqrt(1 + (fq / RC_FC) ** 2))  # noqa: E731
+    g = out_filter_gain_db
     lines = [
-        "Out-of-band 5 kHz sine ANCHOR",
+        "Out-of-band 10 kHz sine ANCHOR",
         "",
         f"1-pole {RC_FC / 1e3:.0f} kHz diff. RC (22 nF/440 Ω):",
         f"   4 kHz  {g(4e3):+.2f} dB  (12.5 samp/cyc)",

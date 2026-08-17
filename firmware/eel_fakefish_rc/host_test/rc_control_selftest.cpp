@@ -3,8 +3,8 @@
 // re-arm, no boot-time fire), the CH5 jitter + CH6 amplitude maps, the lognormal IPI draw
 // (jitter=0 => exactly periodic; mean preserved; refractory + tail clamps), and the localization
 // scheduler. Compile + run on a PC (needs EOD_HV from eel_stimuli):
-//   g++ -std=c++17 -I firmware/eel_fakefish firmware/eel_fakefish/eel_stimuli.cpp
-//       firmware/eel_fakefish/host_test/rc_control_selftest.cpp -lm -o /tmp/rc   (then run /tmp/rc)
+//   g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
+//       firmware/eel_fakefish_rc/host_test/rc_control_selftest.cpp -lm -o /tmp/rc   (then run /tmp/rc)
 #include <cstdio>
 #include <cmath>
 #include "../rc_control.h"

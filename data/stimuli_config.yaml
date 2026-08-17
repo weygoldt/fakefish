@@ -73,7 +73,7 @@ selection:
   localization_low_ipi_ms: 50.0
   seed: 0
   # include the synthetic volley/localization population (needs synthetic_population.npz
-  # from `python tools/synthetic_volleys.py synthesize`)
+  # from `uv run fakefish-synth-volleys synthesize`)
   include_synthetic: true
   # localization exemplars are trimmed to their longest gap-free run; a silence
   # beyond this can't fit the uint16 sample-IPI (1.31 s ceiling) and isn't steady
@@ -84,7 +84,7 @@ selection:
   localization_picks: []
 
 marker:
-  # Out-of-band 5 kHz sine marker (the ANCHOR): a ~1 s sine lead-in precedes every
+  # Out-of-band sine marker (the ANCHOR): a ~1 s sine lead-in precedes every
   # volley/localization playback, and CALIBRATION mode is a 10 s sine. The tone itself
   # (frequency/durations/amplitude) is owned by shared/stim_constants.json;
   # only the per-item lead-in GAP is generated here. Each item gets its own gap, drawn

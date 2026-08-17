@@ -46,5 +46,5 @@ testpaths = ["tests"]
 
 [tool.ruff]
 target-version = "py311"
-# `firmware/` holds the Arduino sketch (C/C++); nothing for ruff there.
+# `firmware/` holds the shared core + the Arduino sketches (C/C++); nothing for ruff there.
 extend-exclude = ["firmware"]
