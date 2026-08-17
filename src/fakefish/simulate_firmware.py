@@ -31,6 +31,7 @@ from fakefish.viz.loggers import configure_logging, get_logger  # noqa: E402
 from fakefish.viz.plotstyle import CATEGORICAL, full_page  # noqa: E402
 
 from fakefish import export_teensy_stimuli as ex  # noqa: E402
+from fakefish import _constants as K  # noqa: E402
 from fakefish import _resources as _res  # noqa: E402
 import typer  # noqa: E402
 
@@ -585,18 +586,195 @@ def _dac_plots(t, src, o35, o41_50, o41_100, r8, r7):
 
 
 # ==========================================================================
+# carrier — residual PWM carrier on an LV pulse after the RC, 50 kHz vs 100 kHz
+# ==========================================================================
+# The output stage moved from a DRV8833 at 9 V / 50 kHz to two DRV8871 single-bridge drivers at
+# 36 V / 100 kHz (firmware config.h PWM_CARRIER_HZ). This command models the ACTUAL carrier
+# switching (unlike `analyze`/`render_channels`, which model only the duty quantizer at FS) so the
+# residual carrier can be compared 50 kHz vs 100 kHz after the 1-pole 16 kHz output RC.
+
+
+def render_carrier_analog(
+    signed_i16: np.ndarray, carrier_hz: float, sim_fs: float = 30_000_000.0
+) -> tuple[np.ndarray, np.ndarray]:
+    """The analog differential the electrodes see: 8-bit noise-shaped duty per FS sample -> REAL
+    PWM edges at ``carrier_hz`` -> 1-pole 16 kHz RC. Returns (t_s, y) with y in [-1, 1] (fraction
+    of full scale). sim_fs (30 MHz) is ~1.2x 256*carrier at 100 kHz (~300 sim-samples/carrier
+    period, ~1.2 per 8-bit duty LSB) -- enough to render the RC-filtered ripple for the plot; raise
+    it if the carrier ever approaches the 8-bit resolution ceiling (~586 kHz)."""
+    from scipy.signal import butter, lfilter
+
+    da = _quant_shaped(np.maximum(signed_i16, 0.0), STEP, DUTY_MAX, True) / DUTY_MAX
+    db = _quant_shaped(np.maximum(-signed_i16, 0.0), STEP, DUTY_MAX, True) / DUTY_MAX
+    dur = signed_i16.size / FS
+    n = int(round(sim_fs * dur))
+    t = np.arange(n) / sim_fs
+    idx = np.minimum((t * FS).astype(np.int64), signed_i16.size - 1)
+    phase = (t * carrier_hz) % 1.0  # 0..1 within each carrier period
+    diff = (phase < da[idx]).astype(np.float64) - (phase < db[idx]).astype(np.float64)
+    b, a = butter(1, RC_FC / (sim_fs / 2), btype="low")
+    return t, lfilter(b, a, diff)
+
+
+def _rc_gain_db(f: float, fc: float = RC_FC) -> float:
+    """Exact 1-pole RC magnitude in dB (|H| = 1/sqrt(1+(f/fc)^2))."""
+    return float(20.0 * np.log10(1.0 / np.sqrt(1.0 + (f / fc) ** 2)))
+
+
+def _alias_48k(f: float, rec_fs: int = REC_FS) -> float:
+    """Where a tone at ``f`` folds when sampled at ``rec_fs`` (into 0..rec_fs/2)."""
+    return float(abs(f - round(f / rec_fs) * rec_fs))
+
+
+@app.command()
+def carrier(
+    firmware: Path = typer.Option(_res.DEFAULT_FIRMWARE, "--firmware", "-f"),
+    lv_ratio: float = typer.Option(1 / 50, "--lv-ratio", help="LV peak / volley peak"),
+    old_hz: float = typer.Option(50_000.0, "--old-carrier", help="previous DRV8833 carrier"),
+    new_hz: float = typer.Option(
+        100_000.0, "--new-carrier", help="new DRV8871 carrier (config.h PWM_CARRIER_HZ)"
+    ),
+    verbose: int = typer.Option(2, "--verbose", "-v", count=True),
+) -> None:
+    """Residual PWM carrier on a low-voltage localization pulse after the 1-pole 16 kHz RC, at the
+    old 50 kHz (DRV8833/9 V) vs the new 100 kHz (DRV8871/36 V) carrier. Doubling the carrier moves
+    it from ~3x to ~6x the RC corner (~10 dB -> ~16 dB rejection) and folds the 48 kHz-grid alias
+    from ~2 kHz (in-band) up to ~4 kHz. Writes firmware_carrier.png."""
+    configure_logging(verbose)
+    FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # One low-voltage EOD pulse (localization sits ~50x below the volley peak), padded with silence
+    # so the pulse (where duty > 0, hence where the carrier rides) is bracketed by a clean baseline.
+    eod = ex.parse_firmware(firmware)["EOD_HV"].astype(np.float64)
+    lv_peak = 32767.0 * lv_ratio
+    lv_eod = eod / np.max(np.abs(eod)) * lv_peak
+    pad = int(round(FS * 1.0e-3))  # 1 ms of silence each side
+    pulse = np.zeros(lv_eod.size + 2 * pad)
+    pulse[pad : pad + lv_eod.size] = lv_eod
+    pulse_i16 = np.round(pulse).astype(np.int64)
+
+    t_old, y_old = render_carrier_analog(pulse_i16, old_hz)
+    t_new, y_new = render_carrier_analog(pulse_i16, new_hz)
+    # Reference: the infinite-carrier / infinite-resolution limit (un-quantised fractional duty,
+    # no PWM) through the SAME causal 1-pole 16 kHz RC as y_old/y_new -- so panel A is apples-to-
+    # apples (a single causal |H|, not the zero-phase |H|^2 of rc_lowpass).
+    from scipy.signal import lfilter as _lfilter
+
+    _b, _a = butter(1, RC_FC / (FS / 2), btype="low")
+    ideal = _lfilter(_b, _a, _ideal(pulse_i16))
+
+    # Worst-case (duty 0.5) residual carrier after the RC, pp % of full scale, and the RC gain +
+    # 48 kHz-grid alias fold at each carrier — the headline numbers behind the config.h comment.
+    r_old = carrier_ripple_pp(0.5, old_hz) * 100
+    r_new = carrier_ripple_pp(0.5, new_hz) * 100
+    log.info(
+        "worst-case (duty 0.5) carrier ripple after 16 kHz RC: %.2f%% pp @ %.0f kHz, "
+        "%.2f%% pp @ %.0f kHz  (%.1f dB better)",
+        r_old, old_hz / 1e3, r_new, new_hz / 1e3, 20 * np.log10(r_old / r_new),
+    )
+    for f in (old_hz, new_hz):
+        log.info(
+            "  RC gain @ %3.0f kHz: %+.1f dB (%.1fx corner); 48 kHz-grid alias -> %.1f kHz",
+            f / 1e3, _rc_gain_db(f), f / RC_FC, _alias_48k(f) / 1e3,
+        )
+
+    _carrier_plots(t_old, y_old, t_new, y_new, pulse_i16, ideal, old_hz, new_hz, r_old, r_new)
+
+
+def _carrier_plots(t_old, y_old, t_new, y_new, pulse_i16, ideal, old_hz, new_hz, r_old, r_new):
+    sc = STEP * DUTY_MAX  # int16-equiv full scale
+    t_ms_old, t_ms_new = t_old * 1e3, t_new * 1e3
+    t_fs = np.arange(pulse_i16.size) / FS * 1e3
+    lbl_old, lbl_new = f"{old_hz / 1e3:.0f} kHz", f"{new_hz / 1e3:.0f} kHz"
+    fig, axes = full_page(height_cm=15.0, nrows=2, ncols=2)
+
+    # A: the whole LV pulse after RC — old vs new carrier over the ideal-after-RC reference.
+    ax = axes[0, 0]
+    ax.plot(t_fs, ideal * sc, color="0.5", lw=2.2, label="ideal (after RC)")
+    ax.plot(t_ms_old, y_old * sc, color=CATEGORICAL[1], lw=0.8, label=f"{lbl_old} carrier")
+    ax.plot(t_ms_new, y_new * sc, color=CATEGORICAL[0], lw=0.8, label=f"{lbl_new} carrier")
+    ax.axhline(0, color="grey", lw=0.5)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("post-RC (int16-equiv)")
+    ax.legend(fontsize=6)
+    ax.set_title("A · LV pulse after 16 kHz RC", fontsize=8)
+
+    # B: zoom on the pulse PEAK (where duty is highest, so the residual carrier ripple is largest) —
+    # the 100 kHz sawtooth ripple is about half the 50 kHz one.
+    ax = axes[0, 1]
+    pk_ms = int(np.argmax(np.abs(pulse_i16))) / FS * 1e3  # pulse_i16 is already padded; do NOT re-add pad
+    lo, hi = pk_ms - 0.30, pk_ms + 0.30
+    for t_ms, y, c, lbl in [
+        (t_ms_old, y_old, CATEGORICAL[1], lbl_old),
+        (t_ms_new, y_new, CATEGORICAL[0], lbl_new),
+    ]:
+        w = (t_ms >= lo) & (t_ms <= hi)
+        ax.plot(t_ms[w], y[w] * sc, color=c, lw=0.8, label=lbl)
+    ax.set_xlabel("time (ms)")
+    ax.set_ylabel("post-RC (int16-equiv)")
+    ax.legend(fontsize=6)
+    ax.set_title("B · residual carrier ripple (pulse-peak zoom)", fontsize=8)
+
+    # C: constant-duty carrier ripple pp vs duty — the general suppression (worst near duty 0.5).
+    ax = axes[1, 0]
+    duties = np.linspace(0.02, 0.98, 25)
+    rp_old = np.array([carrier_ripple_pp(d, old_hz) for d in duties]) * 100
+    rp_new = np.array([carrier_ripple_pp(d, new_hz) for d in duties]) * 100
+    ax.plot(duties, rp_old, color=CATEGORICAL[1], lw=1.2, label=lbl_old)
+    ax.plot(duties, rp_new, color=CATEGORICAL[0], lw=1.2, label=lbl_new)
+    ax.set_xlabel("PWM duty (fraction)")
+    ax.set_ylabel("carrier ripple after RC (% FS, pp)")
+    ax.legend(fontsize=6)
+    ax.set_title("C · residual carrier vs duty (worst-case near 0.5)", fontsize=8)
+
+    # D: the numbers behind the config.h comment.
+    ax = axes[1, 1]
+    ax.axis("off")
+    lines = [
+        "PWM carrier 50 -> 100 kHz",
+        "(DRV8871 upgrade; single-ended grid)",
+        "",
+        f"1-pole {RC_FC / 1e3:.0f} kHz RC (2x220 Ohm + 22 nF):",
+        f"   50 kHz  {_rc_gain_db(old_hz):+.1f} dB  ({old_hz / RC_FC:.1f}x corner)",
+        f"  100 kHz  {_rc_gain_db(new_hz):+.1f} dB  ({new_hz / RC_FC:.1f}x corner)",
+        "",
+        "worst-case (duty 0.5) ripple after RC:",
+        f"   50 kHz  {r_old:.2f}% pp",
+        f"  100 kHz  {r_new:.2f}% pp  ({20 * np.log10(r_old / r_new):.1f} dB better)",
+        "",
+        "48 kHz-grid alias fold:",
+        f"   50 kHz -> {_alias_48k(old_hz) / 1e3:.0f} kHz (in-band, bad)",
+        f"  100 kHz -> {_alias_48k(new_hz) / 1e3:.0f} kHz (higher, RC-cut first)",
+        "",
+        "single-ended grid has no common-mode",
+        "rejection -> suppress the carrier at source.",
+    ]
+    ax.text(0.0, 1.0, "\n".join(lines), va="top", ha="left", family="monospace",
+            fontsize=7.5, transform=ax.transAxes)
+    ax.set_title("D · why 100 kHz", fontsize=8, loc="left")
+
+    fig.suptitle(
+        "Fakefish PWM carrier 50 vs 100 kHz — residual carrier on an LV pulse after the 16 kHz RC"
+    )
+    out = FIG_DIR / "firmware_carrier.png"
+    fig.savefig(out)
+    plt.close(fig)
+    log.info("wrote %s", out)
+
+
+# ==========================================================================
 # marker — the out-of-band 10 kHz sine anchor through the RC + 48 kHz recorder
 # ==========================================================================
 
-MARKER_FREQ_HZ = 10_000
-MARKER_LUT = np.round(
-    32767.0 * np.sin(2.0 * np.pi * np.arange(FS // MARKER_FREQ_HZ) / (FS // MARKER_FREQ_HZ))
-).astype(np.int64)  # one exact unit-sine cycle at 10 kHz / 50 kHz — matches eel_control.h
+# Single-sourced from shared/stim_constants.json (see fakefish.gen_constants) rather than
+# re-derived here, so the simulation models the SAME marker the card actually carries.
+MARKER_FREQ_HZ = K.MARKER_FREQ_HZ
+MARKER_LUT = K.MARKER_LUT.astype(np.int64)  # one exact unit-sine cycle at 10 kHz / 50 kHz
 
 
 def marker_i16(total: int, ramp: int, amplitude: float) -> np.ndarray:
-    """The firmware's signed-int16 sine marker: LUT[t%10] * amplitude * raised-cosine
-    on/off ramp, clamped. Byte-for-byte the twin of eel_control.h::marker_sample."""
+    """The signed-int16 sine marker: LUT[t%n] * amplitude * raised-cosine on/off ramp,
+    clamped. The twin of build_sd_card.render_marker, which bakes it into the WAVs."""
     per = MARKER_LUT.size
     t = np.arange(total)
     env = np.ones(total, dtype=np.float64)
