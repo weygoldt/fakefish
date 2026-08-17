@@ -6,14 +6,21 @@
 // Both input sources are OR-ed. It LIVE-GENERATES its stimuli over the mean-EOD waveform (EOD_HV):
 //
 //   CH3 throttle  -> localization ON/OFF (dead-band) + RATE 0..20 Hz (a continuous train)
-//   CH4 trigger   -> one-shot: throw high = VOLLEY, throw low = SHAM (marker, no water output)
+//   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws volley
+//                    or sham); throw low does NOTHING
 //   CH5 pot       -> localization JITTER          CH6 pot -> AMPLITUDE (sets volley/max; loc = half)
 //
 // A VOLLEY and a SHAM both begin with a coded PULSE MARKER preamble (a short EOD burst, tagged by
 // pulse count) so the recording can tell them apart; the volley then plays the discharge, the
-// sham stays silent (the no-stimulus control) while the LED shows a distinct pattern. NOTE this
-// is the PULSE-burst marker, a different mechanism from the SD device's 10 kHz sine tone — see
-// shared/stim_constants.json.
+// sham stays silent (the no-stimulus control) while the LED shows a distinct pattern.
+//
+// BLINDING. The operator throws "fire a trial" and the FIRMWARE decides which it is (see
+// begin_marker + TRIAL_P_VOLLEY), so when and where they trigger cannot correlate with the trial
+// type. The marker's pulse count still records the truth for analysis.
+//
+// NOTE this is the RC device's COUNT-CODED marker (2 pulses = volley, 4 = sham, at 100 Hz, same
+// polarity). The SD device uses a different code — 6 pulses at 10 Hz with ALTERNATING polarity,
+// for identification rather than trial type. See shared/stim_constants.json; do not unify them.
 //
 // LAYERING. This sketch is a CONTROL SURFACE (L3) only. It owns the input decode, the session
 // state machine and the ISR that wires them together; it does NOT own the output stage or the
@@ -52,8 +59,9 @@ IntervalTimer sampleClock;
 
 // ===== published targets (loop() writes, ISR latches) =====================
 static volatile bool     g_loc_enabled = false;    // CH3 throttle above dead-band OR panel loc toggle
-static volatile uint32_t g_trig_seq    = 0;        // bumped once per trigger throw (volley/sham)
-static volatile int      g_trig_kind   = RC_TRIG_NONE;  // which throw: RC_TRIG_VOLLEY / RC_TRIG_SHAM
+static volatile uint32_t g_trig_seq    = 0;        // bumped once per trigger throw (one trial)
+static volatile int      g_trig_kind   = RC_TRIG_NONE;  // RC_TRIG_RANDOM (lever) or an explicit
+                                                        // RC_TRIG_VOLLEY / _SHAM (panel buttons)
 static volatile float    g_rate_ipi_samp = 0.0f;   // mean localization IPI (samples) for the set rate
 static volatile float    g_cv          = 0.0f;     // localization jitter (coefficient of variation)
 static volatile float    g_volley_amp  = 0.0f;     // volley (max) amplitude 0..1 — the amplitude control sets THIS
@@ -104,8 +112,17 @@ static inline void begin_loc() {
 }
 // A trigger (volley or sham) always starts with the coded marker; g_post_marker records what
 // follows. One polarity is chosen here and shared by the marker + the volley it precedes.
+//
+// THE BLINDED DRAW HAPPENS HERE. The RC lever requests RC_TRIG_RANDOM ("run a trial") and this
+// is where it becomes a volley or a sham — in the ISR, at the moment of playback. Two reasons
+// it lives here rather than in loop(): random() is called from the ISR elsewhere (polarity,
+// localization jitter) and must stay single-caller, and drawing at playback time means a
+// request that is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM
+// buttons pass through unchanged, so the bench stays deterministic.
 static inline void begin_marker(int kind) {
   out_silence();
+  if (kind == RC_TRIG_RANDOM)
+    kind = (random(TRIAL_DRAW_RANGE) < TRIAL_VOLLEY_CUTOFF) ? RC_TRIG_VOLLEY : RC_TRIG_SHAM;
   g_playback_pol = rand_polarity();
   g_playback_volley_amp = g_volley_amp;   // latch volley amplitude at the throw, held for the volley
   g_marker_item.n = (uint16_t)((kind == RC_TRIG_VOLLEY) ? PULSE_MARKER_PULSES_VOLLEY : PULSE_MARKER_PULSES_SHAM);
@@ -242,6 +259,8 @@ void setup() {
 
 // A trigger request from RC or panel. Set the kind BEFORE bumping the seq so the ISR sees a
 // consistent (kind, seq) pair. A held/bouncing stick can't re-fire (loop() edge-detects it).
+// `kind` is RC_TRIG_RANDOM from the lever (resolved in the ISR) or an explicit kind from a
+// panel button.
 static inline void request_trigger(int kind) { g_trig_kind = kind; g_trig_seq = g_trig_seq + 1; }
 
 // Distinct "no RC signal" LED pattern (two quick blinks per second), shown only after RC was
@@ -347,11 +366,13 @@ void loop() {
       float amp = rc_master_amp(amp_level, RC_AMP_STEPS);
       g_volley_amp = amp;
       g_loc_amp    = rc_loc_amp(amp);
-      // CH4: bidirectional one-shot trigger (only on a live channel)
+      // CH4: one-shot trigger (only on a live channel). Throwing HIGH requests a BLINDED
+      // trial — the ISR draws volley-vs-sham. Throwing low does nothing at all: the
+      // operator cannot pick the trial type, so their timing and position cannot correlate
+      // with it. The bench panel keeps explicit volley/sham buttons for testing.
       if (trig_present) {
-        int fire = rc_trigger_step(&trig, u_trig, CH4_VOLLEY_THRESH, CH4_SHAM_THRESH,
-                                   CH4_CENTER_LO, CH4_CENTER_HI);
-        if (fire != RC_TRIG_NONE) request_trigger(fire);
+        if (rc_trigger_step(&trig, u_trig, CH4_VOLLEY_THRESH, CH4_CENTER_LO, CH4_CENTER_HI))
+          request_trigger(RC_TRIG_RANDOM);
       }
     } else {
       // CH3 (throttle) signal loss -> throttle zero -> localization OFF. The trigger never fires

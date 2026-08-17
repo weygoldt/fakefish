@@ -143,7 +143,12 @@ def validate(c: dict, rate_hz: int, eod_len: int | None = None) -> None:
     if c["rc_path"]["amp"]["volley_amp_ratio"] <= 0.0:
         raise ValueError("rc_path.amp.volley_amp_ratio must be > 0 (localization = volley / ratio)")
 
-    # (7) The RC marker IPI table is sized by max_pulses; both tags must fit.
+    # (7) The blinded draw is a probability.
+    p = c["rc_path"]["trial"]["p_volley"]
+    if not 0.0 <= p <= 1.0:
+        raise ValueError(f"rc_path.trial.p_volley = {p} is not a probability in 0..1")
+
+    # (8) The RC marker IPI table is sized by max_pulses; both tags must fit.
     rcm = c["rc_path"]["pulse_marker"]
     if max(rcm["pulses_volley"], rcm["pulses_sham"]) > rcm["max_pulses"]:
         raise ValueError("rc_path.pulse_marker.max_pulses is smaller than a tag it must hold")
@@ -159,7 +164,7 @@ def render_header(c: dict) -> str:
     sd, rc = c["sd_path"], c["rc_path"]
     lvl, ses = sd["levels"], sd["session"]
     sdm, cal = sd["pulse_marker"], sd["calibration"]
-    pm, amp, loc = rc["pulse_marker"], rc["amp"], rc["loc_rate"]
+    pm, amp, loc, trial = rc["pulse_marker"], rc["amp"], rc["loc_rate"], rc["trial"]
 
     L = []
     a = L.append
@@ -228,6 +233,15 @@ def render_header(c: dict) -> str:
     a(f"#define PULSE_MARKER_PULSES_SHAM   {pm['pulses_sham']}u")
     a(f"#define PULSE_MARKER_MAX_PULSES    {pm['max_pulses']}u   // sizes the static marker IPI table")
     a(f"#define PULSE_MARKER_AMP           {_f(pm['amp'])} // fixed, independent of the amplitude control")
+    a("")
+    a("// ===== RC path — blinded trial draw ========================================")
+    a("// The RC trigger fires in ONE direction and does not say WHICH trial to run; the")
+    a("// firmware draws volley-vs-sham at playback time, so the operator cannot choose and")
+    a("// their timing cannot correlate with the trial type. The draw happens in the sample-")
+    a("// clock ISR, never in loop(), because random() must stay single-caller.")
+    a(f"#define TRIAL_P_VOLLEY      {_f(trial['p_volley'])} // P(volley); the rest are shams")
+    a("#define TRIAL_DRAW_RANGE    10000   // draw random(TRIAL_DRAW_RANGE)...")
+    a("#define TRIAL_VOLLEY_CUTOFF ((long)(TRIAL_P_VOLLEY * (float)TRIAL_DRAW_RANGE))  // ...< this = volley")
     a("")
     a("// ===== RC path — amplitude =================================================")
     a("// The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.")

@@ -366,7 +366,7 @@ same binary runs on the bench with no transmitter.
 | Control | Pin | Does |
 |---|---|---|
 | CH3 throttle | 4 | localization on/off (debounced, hysteretic) + rate 1–20 Hz |
-| CH4 stick | 5 | one-shot: throw high = volley, low = sham; re-arms at centre |
+| CH4 stick | 5 | one-shot: throw high = run one **blinded trial**; throw low does **nothing**; re-arms at centre |
 | CH5 pot | 6 | localization jitter (CV) |
 | CH6 pot | 7 | amplitude → volley level; localization derived at half |
 | panel LOC / VOLLEY / SHAM | 9 / 10 / 11 | the same three actions |
@@ -380,6 +380,20 @@ Teensy 3.3 V. If widths jitter, add an external 1–2 kΩ pull-up per `Vx`.
 **Calibration must be redone on any new rig.** The opto offsets every width ~300 µs low of
 nominal. Flash `rc_input_test`, hold each control at both extremes, and paste the measured
 values into `RC_CAL_*` in `rc_control.h`.
+
+**Blinded trials.** The CH4 lever says *"run a trial"*, not *which* trial. The firmware draws
+volley-vs-sham itself (`TRIAL_P_VOLLEY`, default 0.5) inside the sample-clock ISR at the moment
+of playback, so the operator cannot choose the trial type and their timing and position cannot
+correlate with it. Throwing the lever the other way is completely inert — it cannot fire, and it
+does not even consume the arm. The three-button bench panel keeps **explicit** volley and sham
+buttons, because bench testing needs determinism; blinding is a property of the field instrument.
+
+The draw lives in the ISR rather than in `loop()` for a concrete reason: `random()` is already
+called from the ISR (polarity, localization jitter) and must stay single-caller. Drawing at
+playback time also means a request that is later discarded never consumes a draw.
+
+This blinds the *choice*, not the *record*: the LED still shows its distinct sham pattern
+afterwards, and the marker's pulse count still tags which trial fired — analysis needs that.
 
 **Failsafe:** losing CH3 turns localization off; the trigger cannot fire without a live throw, so
 signal loss can never *start* a trial. A volley already playing always runs to completion.

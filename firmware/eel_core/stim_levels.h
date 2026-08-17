@@ -64,6 +64,15 @@
 #define PULSE_MARKER_MAX_PULSES    8u   // sizes the static marker IPI table
 #define PULSE_MARKER_AMP           0.5f // fixed, independent of the amplitude control
 
+// ===== RC path — blinded trial draw ========================================
+// The RC trigger fires in ONE direction and does not say WHICH trial to run; the
+// firmware draws volley-vs-sham at playback time, so the operator cannot choose and
+// their timing cannot correlate with the trial type. The draw happens in the sample-
+// clock ISR, never in loop(), because random() must stay single-caller.
+#define TRIAL_P_VOLLEY      0.5f // P(volley); the rest are shams
+#define TRIAL_DRAW_RANGE    10000   // draw random(TRIAL_DRAW_RANGE)...
+#define TRIAL_VOLLEY_CUTOFF ((long)(TRIAL_P_VOLLEY * (float)TRIAL_DRAW_RANGE))  // ...< this = volley
+
 // ===== RC path — amplitude =================================================
 // The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.
 #define VOLLEY_AMP_RATIO   2.0f

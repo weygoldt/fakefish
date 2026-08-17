@@ -3,7 +3,7 @@
 // re-arm, no boot-time fire), the CH5 jitter + CH6 amplitude maps, the lognormal IPI draw
 // (jitter=0 => exactly periodic; mean preserved; refractory + tail clamps), and the localization
 // scheduler. Compile + run on a PC (needs EOD_HV from eel_stimuli):
-//   g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
+//   g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp
 //       firmware/eel_fakefish_rc/host_test/rc_control_selftest.cpp -lm -o /tmp/rc   (then run /tmp/rc)
 #include <cstdio>
 #include <cmath>
@@ -17,7 +17,7 @@ static float uni() { s_lcg = s_lcg * 1664525u + 1013904223u; return ((s_lcg >> 8
 
 // shorthand for the configured CH4 thresholds
 static int trig(RcTrigger* t, float u) {
-  return rc_trigger_step(t, u, CH4_VOLLEY_THRESH, CH4_SHAM_THRESH, CH4_CENTER_LO, CH4_CENTER_HI);
+  return rc_trigger_step(t, u, CH4_VOLLEY_THRESH, CH4_CENTER_LO, CH4_CENTER_HI);
 }
 
 static void test_unit() {
@@ -73,25 +73,38 @@ static void test_throttle_gate() {
 
 static void test_trigger() {
   RcTrigger t = {};
-  CHECK(trig(&t, 0.5f) == RC_TRIG_NONE, "trig: init centre, no fire");
-  CHECK(trig(&t, 0.90f) == RC_TRIG_VOLLEY, "trig: throw high -> VOLLEY");
-  CHECK(trig(&t, 0.90f) == RC_TRIG_NONE, "trig: hold high, no refire");
-  CHECK(trig(&t, 0.65f) == RC_TRIG_NONE, "trig: partial release (dead space), no fire");
-  CHECK(trig(&t, 0.90f) == RC_TRIG_NONE, "trig: re-throw without centring, no fire");
-  CHECK(trig(&t, 0.50f) == RC_TRIG_NONE, "trig: return to centre re-arms");
-  CHECK(trig(&t, 0.10f) == RC_TRIG_SHAM, "trig: throw low -> SHAM");
-  CHECK(trig(&t, 0.10f) == RC_TRIG_NONE, "trig: hold low, no refire");
-  trig(&t, 0.50f);
-  CHECK(trig(&t, 0.95f) == RC_TRIG_VOLLEY, "trig: centre then high -> VOLLEY");
+  CHECK(trig(&t, 0.5f) == 0, "trig: init centre, no fire");
+  CHECK(trig(&t, 0.90f) == 1, "trig: throw high -> fire one trial");
+  CHECK(trig(&t, 0.90f) == 0, "trig: hold high, no refire");
+  CHECK(trig(&t, 0.65f) == 0, "trig: partial release (dead space), no fire");
+  CHECK(trig(&t, 0.90f) == 0, "trig: re-throw without centring, no fire");
+  CHECK(trig(&t, 0.50f) == 0, "trig: return to centre re-arms");
+  CHECK(trig(&t, 0.95f) == 1, "trig: centre then high -> fires again");
+}
+
+// The LOW half of the axis is inert by design: the operator must not be able to choose the
+// trial type (the firmware draws it), so throwing left can neither fire NOR disturb the arm.
+static void test_trigger_low_throw_is_inert() {
+  RcTrigger t = {};
+  CHECK(trig(&t, 0.5f) == 0, "trig low: init centre");
+  CHECK(trig(&t, 0.10f) == 0, "trig low: throw low -> NOTHING");
+  CHECK(trig(&t, 0.10f) == 0, "trig low: hold low -> still nothing");
+  CHECK(trig(&t, 0.00f) == 0, "trig low: full low -> still nothing");
+  // ...and the arm survives it, so a high throw straight from low still fires without
+  // needing to pass through centre first.
+  CHECK(trig(&t, 0.90f) == 1, "trig low: low throw did not consume the arm");
+  CHECK(trig(&t, 0.50f) == 0, "trig low: centre re-arms");
+  CHECK(trig(&t, 0.10f) == 0, "trig low: low again -> nothing");
+  CHECK(trig(&t, 0.90f) == 1, "trig low: still armed after another low throw");
 }
 
 static void test_trigger_boot() {
   // Cold boot with the CH4 axis ALREADY thrown must NOT fire until it returns to centre.
   RcTrigger t = {};
-  CHECK(trig(&t, 1.0f) == RC_TRIG_NONE, "trig boot: thrown at boot -> no fire");
-  CHECK(trig(&t, 1.0f) == RC_TRIG_NONE, "trig boot: held thrown -> no fire");
-  CHECK(trig(&t, 0.5f) == RC_TRIG_NONE, "trig boot: return to centre re-arms");
-  CHECK(trig(&t, 1.0f) == RC_TRIG_VOLLEY, "trig boot: throw after centring -> fires");
+  CHECK(trig(&t, 1.0f) == 0, "trig boot: thrown at boot -> no fire");
+  CHECK(trig(&t, 1.0f) == 0, "trig boot: held thrown -> no fire");
+  CHECK(trig(&t, 0.5f) == 0, "trig boot: return to centre re-arms");
+  CHECK(trig(&t, 1.0f) == 1, "trig boot: throw after centring -> fires");
 }
 
 static void test_amp_jitter() {
@@ -154,6 +167,7 @@ int main() {
   test_throttle();
   test_throttle_gate();
   test_trigger();
+  test_trigger_low_throw_is_inert();
   test_trigger_boot();
   test_amp_jitter();
   test_ipi();

@@ -105,6 +105,25 @@
       "max_pulses": 8,
       "amp": 0.5
     },
+    "trial": {
+      "_comment": [
+        "BLINDED TRIALS. The RC trigger fires in ONE direction only, and the firmware draws",
+        "volley-vs-sham itself at the moment of playback. The operator throws 'fire a trial'",
+        "and cannot choose which they deliver, so when and where they fire cannot correlate",
+        "with the trial type — that correlation is the bias this removes.",
+        "",
+        "p_volley is the probability the draw yields a VOLLEY (the rest are shams). 0.5 is a",
+        "balanced design; raise it to spend fewer trials on controls.",
+        "",
+        "The draw happens in the sample-clock ISR, NOT in loop(), because random() is called",
+        "from the ISR elsewhere (polarity, localization jitter) and must stay single-caller.",
+        "",
+        "Note this blinds the CHOICE, not the outcome: the LED still shows a distinct sham",
+        "pattern afterwards, and the recording still tells the two apart by marker pulse",
+        "count (which analysis needs)."
+      ],
+      "p_volley": 0.5
+    },
     "amp": {
       "_comment": [
         "The amplitude control sets the VOLLEY (max); localization is DERIVED as volley /",

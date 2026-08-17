@@ -75,7 +75,7 @@ while it is stale.
 | **Who holds it** | the operator, in the hand, at the fish | a catamaran airboat; operator on the transmitter |
 | **Trigger** | 6 program buttons (pins 5–10), one press = one complete playback, uninterruptible | 4 RC channels via a PC817 opto-isolator (pins 4–7) **OR-ed** with 3 panel buttons (pins 9–11) for the bench |
 | **Stimulus source** | **pre-rendered SD WAVs** — mono `int16` @ 50 kHz, one directory per button, built by `fakefish-build-card` | **live synthesis** on-device — `locgen` for the localization train, `eel_player` for the volley, over the mean EOD |
-| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot volley · one-shot **sham** |
+| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
 | **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
 | **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at half (`PANEL_VOLLEY_AMP` on the bench) |
 | **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost |
@@ -237,7 +237,8 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   from that button's directory and a random polarity. LED solid while playing; a **~1 Hz blink
   means no SD card** (reseat it — it re-mounts automatically).
 - **RC:** CH3 throttle = localization on/off + rate (up to 20 Hz); CH4 right stick = throw high
-  → **volley**, throw low → **sham** (one-shot, re-arms at centre); CH5 pot = jitter; CH6 pot =
+  → run one **blinded trial**, which the firmware resolves to a volley or a sham (throwing low
+  does nothing at all; one-shot, re-arms at centre); CH5 pot = jitter; CH6 pot =
   amplitude. Losing the link turns localization off and can never start a trial. On the bench
   with no transmitter, the three panel buttons drive the same state machine: pin 9 toggles
   localization, pin 10 fires a volley, pin 11 fires a sham.

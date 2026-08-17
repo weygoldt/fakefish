@@ -87,11 +87,16 @@
 #define RC_RATE_STEPS     20               // quantise rate (avoid Hz wander) ~1 Hz/step
                                            // (LOC_RATE_MIN_HZ / LOC_RATE_MAX_HZ come from stim_levels.h)
 
-// ===== CH4 trigger: bidirectional one-shot (volley high / sham low) =========
-// Unit thresholds (1000us=0.0, 1500us=0.5, 2000us=1.0). Throw high = volley, low = sham; the
-// axis must return to CENTER_LO..CENTER_HI to re-arm. Generous margins vs RC jitter.
-#define CH4_VOLLEY_THRESH 0.70f            // ~1700 us
-#define CH4_SHAM_THRESH   0.30f            // ~1300 us
+// ===== CH4 trigger: ONE-DIRECTIONAL one-shot (throw high = fire a BLINDED trial) =====
+// Unit thresholds (1000us=0.0, 1500us=0.5, 2000us=1.0). Throw HIGH fires one trial; the axis
+// must return to CENTER_LO..CENTER_HI to re-arm. Generous margins vs RC jitter.
+//
+// A LOW throw does NOTHING — deliberately. The trigger used to be bidirectional (high =
+// volley, low = sham), which let the operator choose the trial type and therefore let their
+// timing and position correlate with it. Now one throw means "run a trial" and the FIRMWARE
+// draws volley-vs-sham (see TRIAL_P_VOLLEY, drawn in the ISR). The low half of the axis is
+// inert: it cannot fire, and it does not even consume the arm.
+#define CH4_VOLLEY_THRESH 0.70f            // ~1700 us — the fire threshold
 #define CH4_CENTER_LO     0.40f            // re-arm zone (~1400 us)
 #define CH4_CENTER_HI     0.60f            // re-arm zone (~1600 us)
 
@@ -204,21 +209,32 @@ static inline float rc_rate_to_ipi_samp(int rate_level, int rate_steps) {
   return (float)SAMPLE_RATE_HZ / hz;
 }
 
-// ===== CH4 trigger: bidirectional one-shot edge-detect =====================
-// A self-centring axis. Throw high (>= volley_thr) fires a VOLLEY; throw low (<= sham_thr) fires
-// a SHAM; the axis must return to the centre band (center_lo..center_hi) to RE-ARM. It fires at
-// most once per throw, never on a held/bouncing stick, and NEVER on the first read with the stick
-// already thrown (armed starts true only if the first read is centred) -> no boot-time fire.
-typedef enum { RC_TRIG_NONE = 0, RC_TRIG_VOLLEY = 1, RC_TRIG_SHAM = 2 } RcTrigKind;
+// ===== CH4 trigger: one-directional one-shot edge-detect ===================
+// A self-centring axis. Throwing HIGH (>= fire_thr) fires exactly one trial; the axis must
+// return to the centre band (center_lo..center_hi) to RE-ARM. It fires at most once per throw,
+// never on a held/bouncing stick, and NEVER on the first read with the stick already thrown
+// (armed starts true only if the first read is centred) -> no boot-time fire.
+//
+// The LOW half of the axis is completely inert: it cannot fire, and it does not consume the
+// arm either, so throwing the wrong way costs nothing. The trial TYPE is not chosen here at
+// all — the caller requests RC_TRIG_RANDOM and the firmware draws volley-vs-sham at playback
+// time, which is what blinds the operator.
+typedef enum {
+  RC_TRIG_NONE   = 0,
+  RC_TRIG_VOLLEY = 1,   // an explicit volley (the bench panel button)
+  RC_TRIG_SHAM   = 2,   // an explicit sham   (the bench panel button)
+  RC_TRIG_RANDOM = 3,   // "run a trial" — the ISR draws volley or sham (the RC lever)
+} RcTrigKind;
 typedef struct { uint8_t armed; uint8_t init; } RcTrigger;
+
+// Returns 1 on a fresh high throw, else 0.
 static inline int rc_trigger_step(RcTrigger* t, float unit,
-                                  float volley_thr, float sham_thr, float center_lo, float center_hi) {
-  int throw_dir = (unit >= volley_thr) ? 1 : (unit <= sham_thr) ? -1 : 0;
+                                  float fire_thr, float center_lo, float center_hi) {
+  int thrown    = (unit >= fire_thr) ? 1 : 0;
   int at_center = (unit >= center_lo && unit <= center_hi) ? 1 : 0;
-  if (!t->init) { t->init = 1; t->armed = at_center ? 1 : 0; return RC_TRIG_NONE; }
-  int fire = RC_TRIG_NONE;
-  if (t->armed && throw_dir == 1)       { fire = RC_TRIG_VOLLEY; t->armed = 0; }
-  else if (t->armed && throw_dir == -1) { fire = RC_TRIG_SHAM;   t->armed = 0; }
+  if (!t->init) { t->init = 1; t->armed = at_center ? 1 : 0; return 0; }
+  int fire = 0;
+  if (t->armed && thrown) { fire = 1; t->armed = 0; }
   if (at_center) t->armed = 1;   // returned to centre -> re-arm for the next throw
   return fire;
 }
