@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# check.sh — the full acceptance gate for this repo. `make check` runs this.
+#
+# Four groups, in order of how fast they fail:
+#   1. codegen + core-sync are idempotent   (a stale generated file or an unsynced core)
+#   2. host self-tests                      (pure logic, PC g++)
+#   3. Teensy syntax compile per sketch     (the ISR/HAL/include paths a host test can't reach)
+#   4. python                               (pytest + ruff)
+#
+# What this gate does NOT cover: flashing a real Teensy 4.1 and scoping the output. That is the
+# owner's bench step and is never claimed done here. arduino-cli is not installed, so group 3 is
+# an -fsyntax-only compile with the real arm-none-eabi-g++ rather than a full link.
+set -uo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+TEENSY_ROOT="${TEENSY_ROOT:-$HOME/.arduino15/packages/teensy/hardware/avr/1.60.0}"
+TEENSY_GXX="${TEENSY_GXX:-$HOME/.arduino15/packages/teensy/tools/teensy-compile/11.3.1/arm/bin/arm-none-eabi-g++}"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+fail=0
+pass() { printf '  \033[32mok\033[0m   %s\n' "$1"; }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); }
+step() { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+# Run a command, reporting pass/fail; show its output only when it fails.
+try() {
+  local label="$1"; shift
+  local out
+  if out="$("$@" 2>&1)"; then pass "$label"; else bad "$label"; printf '%s\n' "$out" | sed 's/^/       /'; fi
+}
+
+# Compile a host self-test and require it to print exactly OK.
+run_selftest() {
+  local label="$1" bin="$TMP/$2"; shift 2
+  local out
+  if ! out="$(g++ -std=c++17 -Wall -Wextra "$@" -o "$bin" 2>&1)"; then
+    bad "$label (compile)"; printf '%s\n' "$out" | sed 's/^/       /'; return
+  fi
+  if ! out="$("$bin" 2>&1)"; then
+    bad "$label (run)"; printf '%s\n' "$out" | sed 's/^/       /'; return
+  fi
+  if [ "$out" != "OK" ]; then
+    bad "$label (expected OK, got: $out)"; return
+  fi
+  pass "$label"
+}
+
+# -fsyntax-only compile of one sketch through its host_test/_amalgam.cpp. The Teensy headers go
+# in with -isystem so -Wall -Wextra reports OUR code, not the vendored libraries.
+syntax_check_sketch() {
+  local sketch="$1"
+  local out
+  if out="$("$TEENSY_GXX" -fsyntax-only -std=gnu++17 -Wall -Wextra \
+        -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16 \
+        -D__IMXRT1062__ -DARDUINO_TEENSY41 -DF_CPU=600000000 \
+        -DUSB_SERIAL -DLAYOUT_US_ENGLISH -DARDUINO=10819 -DTEENSYDUINO=160 \
+        -isystem"$TEENSY_ROOT/cores/teensy4" \
+        -isystem"$TEENSY_ROOT/libraries/SD/src" \
+        -isystem"$TEENSY_ROOT/libraries/SdFat/src" \
+        -isystem"$TEENSY_ROOT/libraries/SPI" \
+        -I"firmware/$sketch" \
+        "firmware/$sketch/host_test/_amalgam.cpp" 2>&1)" && [ -z "$out" ]; then
+    pass "$sketch compiles (-fsyntax-only, -Wall -Wextra clean)"
+  else
+    bad "$sketch compiles"; printf '%s\n' "$out" | sed 's/^/       /'
+  fi
+}
+
+# ===== 1. codegen + core-sync are idempotent ===============================
+step "1. generated files are in sync with their sources"
+
+try "shared/stim_constants.json -> stim_levels.h + _constants.py" \
+    uv run fakefish-gen-constants --check
+
+if bash firmware/sync_core.sh >/dev/null 2>&1; then
+  if git diff --quiet -- 'firmware/*/src/eel_core'; then
+    pass "firmware/eel_core -> each sketch's src/eel_core (sync_core.sh leaves no diff)"
+  else
+    bad "sync_core.sh produced a diff — a sketch's src/eel_core was hand-edited, or the core changed without a re-sync. Run 'bash firmware/sync_core.sh' and commit."
+    git --no-pager diff --stat -- 'firmware/*/src/eel_core' | sed 's/^/       /'
+  fi
+else
+  bad "sync_core.sh failed to run"
+fi
+
+# ===== 2. host self-tests ==================================================
+step "2. host self-tests (pure logic, PC g++)"
+
+run_selftest "eel_core     sd_player_selftest"     sdp \
+    firmware/eel_core/host_test/sd_player_selftest.cpp
+run_selftest "rc surface   rc_control_selftest"    rc \
+    firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
+    firmware/eel_fakefish_rc/host_test/rc_control_selftest.cpp -lm
+run_selftest "rc surface   panel_control_selftest" panel \
+    firmware/eel_fakefish_rc/host_test/panel_control_selftest.cpp
+run_selftest "btn surface  button_control_selftest" btn \
+    firmware/eel_fakefish_button/host_test/button_control_selftest.cpp
+
+# eel_player_selftest is a sample DUMPER, not an assertion suite — it streams one item's
+# samples for diffing against the Python reference. Require a clean build, exit 0, and output.
+if out="$(g++ -std=c++17 -Wall -Wextra -I firmware/eel_core \
+        firmware/eel_core/eel_player.cpp firmware/eel_core/eel_stimuli.cpp \
+        firmware/eel_core/host_test/eel_player_selftest.cpp -lm -o "$TMP/eng" 2>&1)"; then
+  n="$("$TMP/eng" 0 | wc -l)"
+  if [ "$n" -gt 1000 ]; then
+    pass "eel_core     eel_player_selftest (dumper: $n samples for item 0)"
+  else
+    bad "eel_player_selftest produced only $n samples"
+  fi
+else
+  bad "eel_player_selftest (compile)"; printf '%s\n' "$out" | sed 's/^/       /'
+fi
+
+# ===== 3. Teensy syntax compile per sketch =================================
+step "3. Teensy compile (arm-none-eabi-g++ -fsyntax-only)"
+
+if [ ! -x "$TEENSY_GXX" ]; then
+  bad "Teensy compiler not found at $TEENSY_GXX (set TEENSY_GXX / TEENSY_ROOT)"
+else
+  syntax_check_sketch eel_fakefish_button
+  syntax_check_sketch eel_fakefish_rc
+fi
+
+# ===== 4. python ===========================================================
+step "4. python"
+
+try "pytest" uv run pytest -q
+try "ruff"   uv run ruff check .
+
+# ===== verdict =============================================================
+if [ "$fail" -eq 0 ]; then
+  printf '\n\033[32mall checks passed\033[0m — bench flash + scope remain the owner'"'"'s step.\n'
+  exit 0
+fi
+printf '\n\033[31m%d check(s) FAILED\033[0m\n' "$fail"
+exit 1
