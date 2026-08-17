@@ -1,6 +1,6 @@
 """Plot every volley in the exported stimulus library as voltage over time.
 
-Parses the generated firmware (``firmware/eel_fakefish/eel_stimuli.cpp``), keeps the
+Parses the generated firmware (``firmware/eel_core/eel_stimuli.cpp``), keeps the
 two volley-family kinds (real volley / synth volley), reconstructs each one as the
 full-rate signed trace the electrode emits (the additive-mixer output scaled to the
 firmware's ``VOLLEY_AMPLITUDE``), and draws them in one gallery — the same "what goes

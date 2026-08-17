@@ -14,8 +14,9 @@ Card layout (one dir per button; ``E`` is left unused)::
     /D/  loc->volley  : loc->volley sessions     = marker -> gap -> loc(5 s) -> gap -> volley
     /F/  song         : a supplied WAV (data/rickroll.wav, → mono/50 kHz) or a synth melody
 
-Two fidelity rules make these WAVs a faithful migration of the on-device sessions
-(``firmware/eel_fakefish/{eel_control.h,eel_fakefish.ino,eel_player.cpp}``):
+Two fidelity rules make these WAVs a faithful migration of the on-device sessions the
+flash-library firmware used to synthesise (now ``firmware/eel_core/eel_player.cpp`` +
+``firmware/eel_fakefish_button/``):
 
 1. **Absolute levels are baked in, NOT peak-normalised.** The loc/volley/marker level
    ratios (0.45 / 0.90 / 0.25 of full scale) must survive, so each item is scaled by its

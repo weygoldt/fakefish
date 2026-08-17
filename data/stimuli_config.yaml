@@ -9,7 +9,8 @@ paths:
   eods_root: /mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods
   # Global cross-recording mean EOD waveform (with flanks). Default: <eods_root>/global_pulse_alignment_eel_eod.json
   alignment_json: null
-  firmware_dir: firmware/eel_fakefish   # the self-contained Teensy 4.1 sketch folder
+  firmware_dir: firmware/eel_core       # the CANONICAL shared core; sync_core.sh copies it
+                                        # into each sketch's src/eel_core (run `make sync`)
   out_dir: data
 
 sample_rate:
@@ -85,7 +86,7 @@ selection:
 marker:
   # Out-of-band 5 kHz sine marker (the ANCHOR): a ~1 s sine lead-in precedes every
   # volley/localization playback, and CALIBRATION mode is a 10 s sine. The tone itself
-  # (frequency/durations/amplitude) is a FIRMWARE concern (eel_fakefish/eel_control.h);
+  # (frequency/durations/amplitude) is owned by shared/stim_constants.json;
   # only the per-item lead-in GAP is generated here. Each item gets its own gap, drawn
   # once (uniform, deterministic off seed) and fixed — so downstream can key off the
   # marker offset + the item's known gap to locate/identify the stimulus.

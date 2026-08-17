@@ -1,6 +1,6 @@
 """Reference player: reconstruct any exported stimulus item as a 50 kHz numpy trace.
 
-Parses the *generated firmware* (``firmware/eel_fakefish/eel_stimuli.cpp``, format
+Parses the *generated firmware* (``firmware/eel_core/eel_stimuli.cpp``, format
 v2) — so it validates the actual arrays the Teensy compiles — and reconstructs any
 item (real/synthetic volley or localization) as the full-rate
 signed trace the device emits, at a chosen amplitude and polarity, using the
@@ -11,7 +11,7 @@ sanity check before it touches water.
 
 Examples::
 
-    fakefish-render info --firmware firmware/eel_fakefish/eel_stimuli.cpp
+    fakefish-render info --firmware firmware/eel_core/eel_stimuli.cpp
     fakefish-render render --index 0 --amplitude 0.8 --polarity -1 --out /tmp/i0.npy
     fakefish-render render --index 20 --wav /tmp/i20.wav --png /tmp/i20.png
 """

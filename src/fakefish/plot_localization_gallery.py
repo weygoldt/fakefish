@@ -1,6 +1,6 @@
 """Plot every localization sequence in the exported library as voltage over time.
 
-Parses the generated firmware (``firmware/eel_fakefish/eel_stimuli.cpp``), keeps the
+Parses the generated firmware (``firmware/eel_core/eel_stimuli.cpp``), keeps the
 localization items (real single-fish windows + the synthetic 1-10 Hz set), and draws
 each pulse train as the full-rate signed trace the electrode emits. A fixed leading
 window is shown so the different average rates are directly comparable (denser panel =

@@ -12,7 +12,7 @@ it); polarity is a firmware concern too.
 
 This tool reads the source recording NIX outputs (production workspace) and writes:
 
-* ``firmware/eel_fakefish/eel_stimuli.h`` / ``.cpp`` — the generated arrays (into the sketch).
+* ``firmware/eel_core/eel_stimuli.h`` / ``.cpp`` — the generated arrays (into the sketch).
 * ``data/stimuli_qc.pdf``       — a multi-panel QC figure (see ``qc.py``-style panels here).
 * ``data/stimuli_provenance.json`` — full provenance of every selected scene.
 * ``data/multifish_volley_candidates.csv`` — rejected overlapping-volley scenes.
@@ -236,7 +236,7 @@ class Config:
             eods_root=eods_root,
             alignment_json=Path(align).expanduser() if align else None,
             firmware_dir=Path(
-                paths.get("firmware_dir", "firmware/eel_fakefish")
+                paths.get("firmware_dir", "firmware/eel_core")
             ).expanduser(),
             out_dir=Path(paths.get("out_dir", "data")).expanduser(),
             sites=list(sites),
@@ -2075,13 +2075,17 @@ def _lead_in_marker_provenance(
 ) -> dict:
     """The frozen sine-marker + per-item lead-in-gap contract (see the detector handoff).
 
-    Firmware realises the tone itself (frequency/durations/amplitude live in the sketch);
-    the values here are the FROZEN nominal contract a downstream marker detector keys off,
-    plus the deterministic per-item gaps generated at export.
+    The values here are the FROZEN nominal contract a downstream marker detector keys off,
+    plus the deterministic per-item gaps generated at export. The tone is realised by
+    ``build_sd_card.py`` from ``shared/stim_constants.json``; this dict is what the shipped
+    library DECLARED, and ``tests/test_gen_constants.py`` asserts the two agree.
     """
     return dict(
-        # nominal marker contract (realised in firmware/eel_fakefish/eel_control.h):
-        nominal_freq_hz=10000,   # realised in eel_control.h (MARKER_FREQ_HZ)
+        # Nominal marker contract. These values are part of the BYTE-FROZEN provenance
+        # schema, so they are restated literally here and must not be rewired to the
+        # codegen: shared/stim_constants.json owns what the card is BUILT with, this owns
+        # what the shipped library DECLARED. tests/test_gen_constants.py pins them equal.
+        nominal_freq_hz=10000,   # SD_MARKER_FREQ_HZ in firmware/eel_core/stim_levels.h
         leadin_s=1.0,
         calibration_s=10.0,
         note=(

@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from fakefish import _constants as K
+from fakefish import _resources as _res
 from fakefish import build_sd_card as bc
 from fakefish import gen_constants as gc
 
@@ -124,6 +125,23 @@ def test_validate_rejects_a_marker_tag_that_does_not_fit():
     c["rc_path"]["pulse_marker"]["pulses_sham"] = 99
     with pytest.raises(ValueError, match="max_pulses"):
         gc.validate(c, gc.RATE_HZ)
+
+
+def test_frozen_provenance_marker_contract_matches_the_codegen():
+    """The library's DECLARED marker contract must equal what the card is BUILT with.
+
+    ``data/stimuli_provenance.json`` is byte-frozen, so ``export_teensy_stimuli`` restates
+    the marker frequency and tone durations as literals rather than importing them. That is
+    correct — but it means the frozen contract and ``shared/stim_constants.json`` could
+    silently disagree, and a downstream detector keys off the frozen values. This is the
+    check that they never diverge.
+    """
+    frozen = json.loads(_res.data_file("stimuli_provenance.json").read_text())
+    marker = frozen["lead_in_marker"]
+    assert marker["nominal_freq_hz"] == K.MARKER_FREQ_HZ
+    assert marker["leadin_s"] == K.MARKER_LEADIN_S
+    assert marker["calibration_s"] == K.MARKER_CAL_S
+    assert frozen["playback_sample_rate_hz"] == K.RATE_HZ
 
 
 def test_source_json_is_valid_json_with_stripped_comments():

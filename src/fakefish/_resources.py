@@ -1,18 +1,24 @@
 """Repo-relative path resolution for the fakefish tools.
 
 The tools used to run as plain scripts from the repo root, so their input and
-output paths were written CWD-relative (``firmware/eel_fakefish/eel_stimuli.cpp``,
+output paths were written CWD-relative (``firmware/eel_core/eel_stimuli.cpp``,
 ``tools/stimuli_config.yaml``, ...). As an installed package the tools may run
 from any directory, so paths are resolved here relative to the *project root* —
-the directory that contains ``firmware/eel_fakefish`` — discovered by walking up
+the directory that contains ``firmware/eel_core`` — discovered by walking up
 from this file. That works for an editable install (``uv sync`` / ``pip install
 -e .``), which is how the toolchain is used; flashing needs no Python at all.
 
+The root marker is ``firmware/eel_core`` because that is where the generated
+stimulus library lives: it is the CANONICAL copy, shared by every sketch. Each
+sketch also carries a synced copy under ``<sketch>/src/eel_core/`` (see
+``firmware/sync_core.sh``), but those are build artefacts of the canonical one —
+the export tool writes ``firmware/eel_core/`` and ``sync_core.sh`` propagates it.
+
 Layout resolved here::
 
-    <root>/firmware/eel_fakefish/eel_stimuli.cpp   the generated library (parsed by tools)
-    <root>/data/                                   versioned inputs + the frozen provenance
-    <root>/figs/                                   regenerable figure output (gitignored)
+    <root>/firmware/eel_core/eel_stimuli.cpp   the generated library (parsed by tools)
+    <root>/data/                               versioned inputs + the frozen provenance
+    <root>/figs/                               regenerable figure output (gitignored)
 """
 
 from __future__ import annotations
@@ -21,7 +27,7 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    """Return the repo root (the dir containing ``firmware/eel_fakefish``).
+    """Return the repo root (the dir containing ``firmware/eel_core``).
 
     Walks up from this module. Falls back to the current working directory if
     the marker is not found (e.g. a non-editable install detached from the
@@ -29,7 +35,7 @@ def project_root() -> Path:
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
-        if (parent / "firmware" / "eel_fakefish").is_dir():
+        if (parent / "firmware" / "eel_core").is_dir():
             return parent
     return Path.cwd()
 
@@ -40,8 +46,9 @@ ROOT: Path = project_root()
 #: the tuned volley model + populations. The export ``out_dir`` writes here too.
 DATA_DIR: Path = ROOT / "data"
 
-#: The self-contained Teensy sketch folder.
-FIRMWARE_DIR: Path = ROOT / "firmware" / "eel_fakefish"
+#: The canonical shared firmware core (L1 output HAL + L2 sample producers).
+#: Sketches live alongside it in ``firmware/`` and bundle synced copies of it.
+FIRMWARE_DIR: Path = ROOT / "firmware" / "eel_core"
 
 #: The generated stimulus library the tools parse (``ex.parse_firmware``).
 DEFAULT_FIRMWARE: Path = FIRMWARE_DIR / "eel_stimuli.cpp"
