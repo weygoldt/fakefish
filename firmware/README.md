@@ -276,6 +276,11 @@ direct-pin stage and still has to be **scoped** before it goes near an animal.
   overlap — a `static_assert` in `locgen.h` enforces exactly that.
 - **`eel_stimuli`** — the generated library: `EOD_HV` (131 samples @ 50 kHz) plus 31 items.
   Byte-frozen; regenerated only by `fakefish-export`.
+- **`pulse_log`** — the **mirror image of `sd_player`**: where that one has the ISR *pop* samples
+  `loop()` read from the card, this one has the ISR *push* event records that `loop()` writes to
+  the card. Same rule, same lock-free SPSC ring, same pure/glue split. Used by the RC device; the
+  button device gets the file for free but does not reference it yet. See
+  [Pulse logging](#pulse-logging).
 
 All produce `int16` at 32767 full scale, 50 kHz. A producer a sketch does not reference simply
 links out.
@@ -400,13 +405,190 @@ signal loss can never *start* a trial. A volley already playing always runs to c
 Presence is tracked by change-detection on a millisecond clock, wrap-safe over ~49 days.
 
 **LED:** flash per pulse, a distinct 3-blink pattern for a fired sham (which produces no output —
-it is the no-stimulus control), and a double-blink per second when the RC link is lost after
-having been present.
+it is the no-stimulus control), a double-blink per second when the RC link is lost after having
+been present, and — outranking all of them — a steady **inverse blink** (on, with a brief dark
+notch each second) when logging has failed and output is therefore suppressed. That one is
+deliberately the only *inverted* pattern in the vocabulary; every other is a short flash on a dark
+background, and a blocked device otherwise looks exactly like an idle one.
+
+**This device now needs an SD card.** It still needs no *WAV card* — it live-synthesises
+everything — but it writes a per-pulse log and **will not stimulate without one**. See
+[Pulse logging](#pulse-logging).
 
 **Concurrency:** the 50 kHz ISR is the single owner of all playback state. `loop()` only decodes
 inputs and publishes targets through aligned 32-bit volatile words, latched by the ISR at pulse
 boundaries. The sample clock runs at a higher priority than the RC pin ISRs so input capture can
 never perturb output timing.
+
+---
+
+## Pulse logging
+
+The RC device writes **one row per emitted pulse** to its SD card, stamped with the exact 50 kHz
+sample tick that placed it. Core: `eel_core/pulse_log.h`. Reader: `fakefish-pulse-log`
+(`src/fakefish/pulse_log.py`).
+
+### Why
+
+Volley and sham **trials** are already identifiable in a recording — the count-coded marker tags
+them (2 pulses volley, 4 sham). The **localization train is not**. It is single-polarity EOD
+pulses at 1–20 Hz with lognormal jitter, deliberately built to look exactly like a real cruising
+eel, and nothing in the water distinguishes it from biology. Without a log, every analysis of a
+recording made during playback has to treat an unknown subset of pulses as possibly ours — and
+localization is the thing that runs *continuously* for a whole session.
+
+Second reason: the trigger is **blinded** — the firmware draws volley-vs-sham in the ISR and the
+operator does not know which fired. The marker records that in the water; the log records it on
+the card. Two independent records of the same fact, on purpose.
+
+### Logging is a precondition for output
+
+**No working log, no stimulation** — at boot *and* mid-session. An unlogged localization pulse is
+indistinguishable from a real fish, so emitting one silently poisons the recording; refusing is the
+lesser failure.
+
+What "blocking" means precisely:
+
+- **Nothing in flight is ever truncated.** A marker, volley or sham already playing runs to
+  completion, exactly as an RC link loss never aborts one. A half-played volley is not "no data",
+  it is an artefact that looks like data. Only playback *starts* are gated, plus localization
+  stopping at a clean pulse boundary.
+- **A failure is announced, loudly.** The LED switches to the inverse blink described above.
+- **Recovery is automatic and explicit.** `loop()` retries the card every 2 s. On success it opens
+  a **new** indexed file — never reopening the interrupted one, whose tail length is unknowable —
+  writes the full header again, and records a `GAP` row naming the file that was cut short.
+- **A throw made while blocked is discarded, not queued**, so a stale request cannot fire without
+  warning the moment the card recovers.
+
+### Files: indexed, never overwritten
+
+`/LOGS/PULS0000.CSV` … `PULS9999.CSV`, 8.3-safe, one file **per power-cycle**, opened **at boot**.
+
+- Indexed rather than dated **because the RTC may reset**: with a dead coin cell every boot would
+  produce the same date-based name and collide. The RTC time is recorded *inside* the file instead.
+- Opened at boot rather than lazily, because that proves the card is **writable** (a bare
+  `SD.begin()` mount probe does not) and moves the first write failure to boot — where a card swap
+  is cheap — instead of to the first trial you were waiting for.
+- The next index is always **highest existing + 1**, never lowest-free, so the index orders the
+  sessions even after files are removed.
+- A subdirectory, because a FAT32 **root** directory is capped at 512 entries.
+- Exhausting `PULS9999` is treated as a logging failure (fault LED, no output) rather than
+  wrapping — wrapping would overwrite, and never-overwrite is the point. Teensyduino also stamps
+  FAT timestamps from the RTC, a free second channel for session order.
+
+### The time base is the sample counter, not the RTC
+
+Rows carry a **64-bit sample tick**: 20 µs resolution, and by construction the same clock that
+placed the pulse. The Teensy RTC has 1 s resolution, so it would be both far coarser and more
+expensive per pulse. Absolute time comes from periodic `ANCHOR` rows (every 10 s) that pair a tick
+with an RTC reading; `PulseLogFile.absolute_time()` fits through them, recovering wall-clock far
+more precisely than any single reading.
+
+This makes the design **RTC-optional by construction**: with no coin cell you lose the absolute
+anchor and keep exact relative timing. Nothing else changes. The anchor also proves the device was
+*alive* through a quiet stretch — otherwise "idle" and "died" look identical after a power-cut
+truncation.
+
+> The log tick is a **separate** counter from the sketch's `g_tick`. `g_tick` stays `uint32_t`
+> because the LED code relies on 32-bit wrap arithmetic; a log spanning more than 23.9 h needs one
+> that does not wrap.
+
+### Overflow is recorded, never silent
+
+If the ring fills — realistically only when an SD block-erase stalls `loop()` during a volley
+burst — the ISR counts the losses and the next successful push emits a `DROP` row carrying the
+exact count, stamped with the tick at which the stream resumed. **A log that quietly omits pulses
+turns into wrong analysis; one that admits a gap turns into a caveat.** The ring is sized for
+latency, not bandwidth: 512 records absorbs ~250 ms of stall at the worst burst rate (~400 Hz),
+against a steady rate of ~1 kB/s at 20 Hz localization.
+
+### File format
+
+A `#key=value` header block, then a comment column line, then the bare column line, then rows.
+`pandas.read_csv(path, comment='#')` works directly, as does the bundled reader.
+
+| Column | Meaning |
+|---|---|
+| `seq` | monotonic row counter within the file — a break means the file was torn or edited |
+| `tick` | 64-bit sample counter (÷ `sample_rate_hz` for seconds of device time). **Empty on `GAP`**, which `loop()` writes and which therefore has no reading of the ISR-owned counter — `BOOT`'s tick 0 is real |
+| `event` | `BOOT` `LOC` `MARKER` `VOLLEY` `TRIAL` `SHAM` `LOCON` `LOCOFF` `LINK` `ANCHOR` `DROP` `GAP` |
+| `item` | library item index — **empty when the pulse came from no item** |
+| `pulse` | index of this pulse within its item (`MARKER`, `VOLLEY`) |
+| `trial` | trial id, tying a trial's `MARKER` rows to its `VOLLEY` rows or its `SHAM` row |
+| `pol` | playback polarity, +1 / −1 |
+| `amp_m` | amplitude applied to **this** pulse, ×1000 — for a `VOLLEY` row this includes the item's per-pulse envelope, so it decays down the burst while `master_m` holds |
+| `master_m` | the master (volley) amplitude setting in force, ×1000 |
+| `cv_m` | localization jitter CV in force, ×1000 |
+| `rate_ipi` | mean localization IPI in whole samples |
+| `val` | event-specific: `DROP` records lost, `LINK` 1 = up, `ANCHOR` RTC unix seconds, `GAP`/`BOOT` file index |
+| `req` | trial **requested**: `R` = blinded lever, `V`/`S` = explicit panel button |
+| `res` | trial **resolved**: `V` / `S` — what the firmware actually drew |
+
+Three properties of the schema are load-bearing:
+
+- **An empty column means "not applicable", never zero.** For `item` this is critical:
+  `STIM_ITEMS[0]` is a *real recorded volley*, so a `0` default would silently attribute every
+  localization and marker pulse to it. `-1` is no better as a written value — `STIM_ITEMS[-1]`
+  does not raise in Python, it quietly returns the last item. Hence: empty.
+- **Every row carries the settings in force at that instant**, rather than delta-encoding them.
+  The data cost is negligible and the realistic field failure is a file *truncated by power loss*;
+  with delta encoding a torn head makes everything after it ambiguous.
+- **`req` and `res` are both recorded.** Only the pair distinguishes a genuinely blinded trial
+  (requested `R`) from a bench-forced one (requested `V`/`S`). With the outcome alone, a bench test
+  silently contaminates the trial set.
+
+`item` + `pulse` together also buy a real integrity check: look up the *expected* IPI in the
+library and compare it against the logged tick deltas. That confirms the engine emitted what it
+was told to, and makes a partial volley obvious rather than looking like a short one. The volley
+item index is recoverable from **nowhere else** — not from the marker, not from the settings, and
+from a recording only by matching the IPI sequence against all 18 candidates.
+
+### Aligning a log to a recording
+
+The log alone **is** sufficient to align — this is the intended procedure:
+
+1. The log gives pulse times as sample indices in Teensy time (exact, 20 µs).
+2. Detect pulse times in the recording.
+3. Cross-correlate the two point processes to find the offset.
+4. Every logged pulse then maps to a recorded pulse; everything unmatched is a real fish.
+
+**The lognormal jitter is what makes this work.** A perfectly periodic train would correlate
+ambiguously — an equally good peak at every IPI. The jittered train (CV up to 0.8) gives any
+stretch a unique fingerprint and a sharp peak. The randomness that makes the stimulus
+biologically realistic also makes it uniquely identifiable; a zero-jitter localization mode would
+degrade alignment. Detection precision is not the limit: an EOD is ~800 µs FWHM, so each peak
+localises to well under a millisecond.
+
+> **The one real constraint is clock drift.** The Teensy's 50 kHz clock and the recorder's 48 kHz
+> clock are independent crystals. Two parts at ±20 ppm can differ by ~40 ppm ≈ **144 ms per hour**.
+> Unambiguous per-pulse assignment needs alignment inside half an inter-pulse interval — at the
+> 20 Hz maximum that is ±25 ms, which 40 ppm consumes in **about 10 minutes**. So a single global
+> offset is fine for a short recording and degrades over a session: fit **offset + rate** (two
+> parameters), or cross-correlate in windows and track the offset. Crystal drift is near-constant
+> over minutes to hours, so a linear fit usually suffices; go piecewise if residuals grow. The
+> nominal rates are exactly commensurate (50 : 48 = 25 : 24), so there is no awkward resampling
+> ratio — only ppm-level crystal error. Always report a **match quality** (what fraction of logged
+> pulses found a recorded pulse within tolerance): it is both the confidence measure and the signal
+> that the device was out of range, or that the card and the recording came from different sessions.
+
+Markers are **useful redundancy, not a requirement** — a 2-or-4 pulse burst at exactly 100 Hz is a
+short distinctive anchor that independently confirms volley vs sham. `pol` is a further independent
+confirmation channel: the log predicts the sign of each playback pulse in the recording.
+
+The reader is shipped; the aligner is not yet — see `TODO.md`.
+
+### The golden log
+
+`tests/data/pulse_log_golden.csv` is emitted by `pulse_log_selftest --emit` through the **real
+firmware formatters** and parsed by `tests/test_pulse_log.py` with the **real Python reader**.
+`check.sh` regenerates it and fails on any diff, so the C writer and the Python reader are pinned
+to one artifact and cannot drift apart silently. To change the format deliberately: edit
+`pulse_log.h`, rebuild the self-test, regenerate the golden, and update the reader.
+
+```sh
+g++ -std=c++17 -Wall -Wextra firmware/eel_core/host_test/pulse_log_selftest.cpp -o /tmp/plog
+/tmp/plog --emit > tests/data/pulse_log_golden.csv
+```
 
 ---
 
@@ -464,6 +646,7 @@ Individual host tests, if you want them one at a time:
 
 ```sh
 g++ -std=c++17 firmware/eel_core/host_test/sd_player_selftest.cpp -o /tmp/t && /tmp/t
+g++ -std=c++17 firmware/eel_core/host_test/pulse_log_selftest.cpp -o /tmp/t && /tmp/t
 g++ -std=c++17 firmware/eel_fakefish_button/host_test/button_control_selftest.cpp -o /tmp/t && /tmp/t
 g++ -std=c++17 firmware/eel_fakefish_rc/host_test/panel_control_selftest.cpp -o /tmp/t && /tmp/t
 g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
@@ -472,7 +655,8 @@ g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
 
 Each prints `OK`. The exception is `eel_core/host_test/eel_player_selftest.cpp`, which is a
 sample **dumper** for diffing against the Python reference, not an assertion suite — it prints
-samples and never `OK`.
+samples and never `OK`. `pulse_log_selftest` has a second mode, `--emit`, which regenerates
+`tests/data/pulse_log_golden.csv` (see [The golden log](#the-golden-log)); the gate diffs it.
 
 ## Bench bring-up checklist
 

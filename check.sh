@@ -74,12 +74,30 @@ step "1. generated files are in sync with their sources"
 try "shared/stim_constants.json -> stim_levels.h + _constants.py" \
     uv run fakefish-gen-constants --check
 
+# NOTE THE TRAILING '/*' IN THESE PATHSPECS — it is load-bearing. A git pathspec containing a
+# wildcard is matched with fnmatch against the FULL path, not treated as a directory prefix, so
+# 'firmware/*/src/eel_core' matches nothing at all and the check silently passes on any diff.
+# (It was written without it and was blind until 2026-08-20; invariant 1 was still enforced by
+# tests/test_firmware_sync.py, which compares bytes in Python, but this step was not enforcing
+# it.) Both forms are verified below to FAIL on a hand-edited copy.
+CORE_COPIES='firmware/*/src/eel_core/*'
 if bash firmware/sync_core.sh >/dev/null 2>&1; then
-  if git diff --quiet -- 'firmware/*/src/eel_core'; then
+  if git diff --quiet -- "$CORE_COPIES"; then
     pass "firmware/eel_core -> each sketch's src/eel_core (sync_core.sh leaves no diff)"
   else
     bad "sync_core.sh produced a diff — a sketch's src/eel_core was hand-edited, or the core changed without a re-sync. Run 'bash firmware/sync_core.sh' and commit."
-    git --no-pager diff --stat -- 'firmware/*/src/eel_core' | sed 's/^/       /'
+    git --no-pager diff --stat -- "$CORE_COPIES" | sed 's/^/       /'
+  fi
+  # `git diff` only sees TRACKED files, and sync_core.sh does `rm -rf $dest; cp` — so a sketch
+  # copy that was never committed is silently recreated on every run and the diff above stays
+  # clean. A new file in the canonical core would then be invisible to the gate while the
+  # sketches fail to compile for anyone who clones the repo. Untracked copies are the signal.
+  untracked="$(git ls-files --others --exclude-standard -- "$CORE_COPIES")"
+  if [ -z "$untracked" ]; then
+    pass "every synced src/eel_core copy is tracked by git"
+  else
+    bad "a synced src/eel_core copy is UNTRACKED — 'git add' it, or a fresh clone will not compile."
+    printf '%s\n' "$untracked" | sed 's/^/       /'
   fi
 else
   bad "sync_core.sh failed to run"
@@ -90,6 +108,23 @@ step "2. host self-tests (pure logic, PC g++)"
 
 run_selftest "eel_core     sd_player_selftest"     sdp \
     firmware/eel_core/host_test/sd_player_selftest.cpp
+run_selftest "eel_core     pulse_log_selftest"     plog \
+    firmware/eel_core/host_test/pulse_log_selftest.cpp
+
+# The pulse-log GOLDEN is the single artifact shared by the firmware writer and the Python
+# reader: this binary emits it through the real formatters, and tests/test_pulse_log.py parses
+# the committed copy. Regenerating and diffing here is what stops the two sides drifting apart
+# — a format change on either side without the other fails right now instead of in the field.
+if [ -x "$TMP/plog" ]; then
+  if "$TMP/plog" --emit 2>/dev/null | diff -q - tests/data/pulse_log_golden.csv >/dev/null 2>&1; then
+    pass "pulse-log golden is current (tests/data/pulse_log_golden.csv)"
+  else
+    bad "tests/data/pulse_log_golden.csv is stale — regenerate it (see firmware/README.md, 'Pulse logging')"
+    "$TMP/plog" --emit 2>/dev/null | diff - tests/data/pulse_log_golden.csv | head -20 | sed 's/^/       /'
+  fi
+else
+  bad "pulse_log_selftest did not build — cannot verify the golden log"
+fi
 run_selftest "rc surface   rc_control_selftest"    rc \
     firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp \
     firmware/eel_fakefish_rc/host_test/rc_control_selftest.cpp -lm

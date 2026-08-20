@@ -32,6 +32,14 @@
 // src/eel_core/ is a COMMITTED COPY of firmware/eel_core/, produced by firmware/sync_core.sh —
 // that is what makes this sketch self-contained for the IDE / arduino-cli / rsync-to-bench.
 //
+// PULSE LOGGING. Every pulse this device emits — localization, marker and volley alike — is
+// logged to the SD card with its exact sample tick, one row per pulse, never summarised. That
+// is what makes the localization train separable from real fish in a recording (nothing else
+// can: it is built to look exactly like a cruising eel), and it is the on-device ground truth
+// for the blinded trial draw. LOGGING IS A PRECONDITION FOR OUTPUT: with no working card this
+// sketch does not stimulate at all, and shows a distinct inverse-blink on the LED. See
+// src/eel_core/pulse_log.h and firmware/README.md.
+//
 // CONCURRENCY MODEL. The 50 kHz sample-clock ISR (onSampleTick) is the SINGLE OWNER of all
 // playback-engine state (the localization scheduler + the shared EelPlayer used for the marker
 // and the volley). loop() only decodes the RC/panel inputs and publishes target parameters +
@@ -46,6 +54,7 @@
 #include "src/eel_core/eel_stimuli.h"   // L2: EOD_HV[] + STIM_ITEMS[] (volley snippets)
 #include "src/eel_core/eel_player.h"    // L2: shared overlap-add engine (marker + volley playback)
 #include "src/eel_core/locgen.h"        // L2: live localization scheduler
+#include "src/eel_core/pulse_log.h"     // L2: per-pulse SD event log (ISR pushes, loop() writes)
 #include "panel_control.h"              // L3: three panel buttons + the LED feedback vocabulary
 #include "rc_control.h"                 // L3: 4-channel RC decode + conditioning
 
@@ -69,6 +78,11 @@ static volatile float    g_loc_amp     = 0.0f;     // localization amplitude = v
 static volatile bool     g_link_up     = false;    // CH3 (throttle) delivering edges
 static volatile bool     g_rc_ever     = false;    // RC has been present at least once
 static volatile bool     g_playing     = false;    // ISR is emitting a playback (owns the LED then)
+// LOGGING IS A PRECONDITION FOR OUTPUT. loop() publishes the log's health here and the ISR
+// latches it: with no working log the device does not stimulate at all (see the block comment
+// above onSampleTick). Starts false so a card that fails in setup() can never be raced by the
+// first sample tick.
+static volatile bool     g_log_ok      = false;    // the SD event log is healthy
 
 // ===== ISR-owned playback state ===========================================
 enum Source { SRC_IDLE, SRC_LOC, SRC_MARKER, SRC_VOLLEY, SRC_SHAM };
@@ -89,9 +103,50 @@ static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM
 static uint16_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
 static StimItem   g_marker_item;
 
+// ===== pulse log (ISR-owned counters; the FILE is owned by loop()) ========
+static PulseLog   g_plog;                             // ring + open file (see pulse_log.h)
+static PlogTick   g_tick64;                           // 64-bit sample counter FOR THE LOG.
+                                                      // Separate from g_tick on purpose: g_tick
+                                                      // must stay 32-bit for the LED's wrap
+                                                      // arithmetic, but a log spanning >23.9 h
+                                                      // needs a counter that does not wrap.
+static uint16_t   g_trial_id     = 0;                 // monotonic trial counter (1-based)
+static int8_t     g_volley_item  = PLOG_ABSENT_ITEM;  // library item drawn for the live volley
+static uint32_t   g_anchor_left  = 1;                 // samples until the next ANCHOR row
+static bool       g_link_seen    = false;             // last g_link_up the ISR turned into a row
+
 // ----- LED (per-pulse flash from the KNOWN onset; never a |sample| threshold) --
 static inline void led_flash() { digitalWriteFast(LED_PIN, HIGH); g_led_off_at = g_tick + RC_LED_FLASH_SAMP; }
 static inline void led_service() { if ((int32_t)(g_tick - g_led_off_at) >= 0) digitalWriteFast(LED_PIN, LOW); }
+
+// ----- pulse log (ISR side: fill + push; NEVER touches the card) ----------
+// The ISR only ever fills a POD record and pushes it into the lock-free ring; loop() formats
+// and writes. No snprintf, no String, no SD call, no Serial in here — see pulse_log.h.
+//
+// Every record carries the settings in force at that instant rather than relying on separate
+// settings-change events. The data cost is negligible and it keeps each row interpretable on
+// its own, which matters because the realistic field failure is a file TRUNCATED by power
+// loss: with delta-encoded settings a torn head makes everything after it ambiguous.
+static inline void log_fill(PlogRec* r, uint8_t ev) {
+  plog_rec_init(r, ev, plog_tick_value(&g_tick64));
+  r->master_m = plog_milli(g_volley_amp);
+  r->cv_m     = plog_milli(g_cv);
+  r->rate_ipi = (uint32_t)(g_rate_ipi_samp + 0.5f);
+}
+static inline void log_event(uint8_t ev) { PlogRec r; log_fill(&r, ev); plog_push(&g_plog, &r); }
+
+// RC_TRIG_* -> the log's trial-kind character. Recording the REQUESTED kind alongside the
+// resolved one is what separates a genuinely blinded trial (requested RANDOM from the lever)
+// from a bench-forced one (an explicit panel button); with only the outcome they are
+// indistinguishable, and a bench test would silently contaminate the trial set.
+static inline uint8_t log_trig_code(int kind) {
+  switch (kind) {
+    case RC_TRIG_RANDOM: return PLOG_KIND_RANDOM;
+    case RC_TRIG_VOLLEY: return PLOG_KIND_VOLLEY;
+    case RC_TRIG_SHAM:   return PLOG_KIND_SHAM;
+    default:             return PLOG_KIND_NONE;
+  }
+}
 
 // ----- random helpers (called ONLY from the ISR -> single-caller, no lock) --
 static inline int8_t rand_polarity() { return random(2) ? (int8_t)1 : (int8_t)-1; }
@@ -109,6 +164,7 @@ static inline void begin_loc() {
   locgen_reset(&loc, draw_loc_ipi(), g_loc_amp, rand_polarity());
   src = SRC_LOC;
   g_playing = true;
+  log_event(PLOG_LOCON);
 }
 // A trigger (volley or sham) always starts with the coded marker; g_post_marker records what
 // follows. One polarity is chosen here and shared by the marker + the volley it precedes.
@@ -121,6 +177,8 @@ static inline void begin_loc() {
 // buttons pass through unchanged, so the bench stays deterministic.
 static inline void begin_marker(int kind) {
   out_silence();
+  if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
+  const int requested = kind;                    // BEFORE the blinded draw — see log_trig_code
   if (kind == RC_TRIG_RANDOM)
     kind = (random(TRIAL_DRAW_RANGE) < TRIAL_VOLLEY_CUTOFF) ? RC_TRIG_VOLLEY : RC_TRIG_SHAM;
   g_playback_pol = rand_polarity();
@@ -129,24 +187,45 @@ static inline void begin_marker(int kind) {
   eel_player_start_item(&player, &g_marker_item, PULSE_MARKER_AMP, g_playback_pol);
   g_marker_onset = 0xFFFFFFFFu;
   g_post_marker = kind;
+  g_volley_item = PLOG_ABSENT_ITEM;   // no item drawn yet; a sham never draws one at all
   g_trig_seen = g_trig_seq;   // consume the request (one playback per throw; later throws ignored)
   src = SRC_MARKER;
   g_playing = true;
+  // THE ON-DEVICE GROUND TRUTH FOR THE BLIND. The marker's pulse count records the outcome in
+  // the water; this row records it on the card. Two independent records of the same fact, by
+  // design — and this one also captures what was REQUESTED, which the water cannot show.
+  g_trial_id++;
+  PlogRec r;
+  log_fill(&r, PLOG_TRIAL);
+  r.trial = g_trial_id;
+  r.pol   = g_playback_pol;
+  r.req   = log_trig_code(requested);
+  r.res   = log_trig_code(kind);
+  plog_push(&g_plog, &r);
 }
 static inline void begin_volley_burst() {
   out_silence();
   uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
   eel_player_start_item(&player, &STIM_ITEMS[idx], g_playback_volley_amp, g_playback_pol);   // latched amp + marker's polarity
   g_volley_onset = 0xFFFFFFFFu;
+  // WHICH pattern fired is recoverable from NOWHERE else — not from the marker, not from the
+  // settings, and from a recording only by matching the IPI sequence against all 18 candidates.
+  g_volley_item = (int8_t)idx;
   src = SRC_VOLLEY;
 }
 static inline void begin_sham() {   // no water output — just the distinct LED pattern
   out_silence();
   g_sham_phase = 0;
   src = SRC_SHAM;
+  // A sham emits NOTHING into the water, so without this row the trial is invisible in the log.
+  PlogRec r;
+  log_fill(&r, PLOG_SHAM);
+  r.trial = g_trial_id;
+  plog_push(&g_plog, &r);
 }
 static inline void go_idle() {
   out_silence();
+  if (src == SRC_LOC) log_event(PLOG_LOCOFF);
   src = SRC_IDLE;
   g_playing = false;
 }
@@ -154,19 +233,68 @@ static inline void go_idle() {
 // resume localization if the throttle still commands it, else idle.
 static inline void resume_after_playback() {
   g_trig_seen = g_trig_seq;
-  if (g_loc_enabled) begin_loc();
+  if (g_loc_enabled && g_log_ok) begin_loc();
   else go_idle();
 }
 
-// One 50 kHz sample tick. Single owner of the playback engine.
+// One 50 kHz sample tick. Single owner of the playback engine AND the sole producer of pulse-
+// log records.
+//
+// BLOCK ON LOGGING FAILURE. With no working log this ISR emits nothing at all: an unlogged
+// localization pulse is indistinguishable from a real fish, so putting one in the water
+// silently poisons the recording. The gate is applied only where a playback would START
+// (SRC_IDLE, and the silent gap / interval boundary of SRC_LOC) — never mid-playback: a
+// marker, volley or sham already in flight always runs to completion, exactly as an RC link
+// loss never aborts one. A truncated volley is not "no data", it is an artefact that looks
+// like data.
 static void onSampleTick() {
   g_tick++;
+  plog_tick_advance(&g_tick64);
+
+  // loop() publishes the RC link state; the ISR turns a CHANGE into a row ITSELF. That keeps
+  // the ring strictly single-producer — loop() is the consumer and must never push — and it
+  // stamps the row with an exact tick instead of one sampled at loop() rate.
+  bool link_now = g_link_up;
+  if (link_now != g_link_seen) {
+    g_link_seen = link_now;
+    PlogRec r;
+    log_fill(&r, PLOG_LINK);
+    r.val = link_now ? 1u : 0u;
+    plog_push(&g_plog, &r);
+  }
+
+  // Periodic tick <-> RTC anchor, emitted unconditionally so it also proves the device was
+  // ALIVE through a quiet stretch. rtc_get() is a couple of SNVS register reads, done once per
+  // PULSELOG_ANCHOR_S (10 s) — comfortably inside the 20 us budget. Reading the clock HERE,
+  // rather than having loop() publish it, is what makes the tick and the wall-clock an exact
+  // pair rather than one up to a second stale.
+  if (--g_anchor_left == 0) {
+    g_anchor_left = PULSELOG_ANCHOR_SAMP;
+    PlogRec r;
+    log_fill(&r, PLOG_ANCHOR);
+    r.val = (uint32_t)rtc_get();
+    plog_push(&g_plog, &r);
+  }
+
   switch (src) {
     case SRC_MARKER: {
       int16_t s;
       if (eel_player_next(&player, &s)) {
         if (s == 0) out_silence(); else out_write(s);
-        if (player.last_onset != g_marker_onset) { g_marker_onset = player.last_onset; led_flash(); }
+        if (player.last_onset != g_marker_onset) {
+          g_marker_onset = player.last_onset;
+          led_flash();
+          // eel_player_next() has already advanced k past the pulse it just started, so the
+          // pulse whose onset this is has index k-1. No item: the marker is a StimItem built
+          // at runtime in setup(), not a library entry — so its item column stays EMPTY.
+          PlogRec r;
+          log_fill(&r, PLOG_MARKER);
+          r.pulse = (uint16_t)(player.k - 1);
+          r.trial = g_trial_id;
+          r.pol   = g_playback_pol;
+          r.amp_m = plog_milli(PULSE_MARKER_AMP);
+          plog_push(&g_plog, &r);
+        }
         led_service();
       } else {
         if (g_post_marker == RC_TRIG_VOLLEY) begin_volley_burst();
@@ -178,7 +306,32 @@ static void onSampleTick() {
       int16_t s;
       if (eel_player_next(&player, &s)) {
         if (s == 0) out_silence(); else out_write(s);
-        if (player.last_onset != g_volley_onset) { g_volley_onset = player.last_onset; led_flash(); }
+        if (player.last_onset != g_volley_onset) {
+          g_volley_onset = player.last_onset;
+          led_flash();
+          // item + pulse index together let an analysis look up the EXPECTED IPI in the
+          // library and check it against the logged tick deltas — confirming the engine
+          // emitted what it was told to, and making a partial volley obvious rather than
+          // looking like a short one.
+          uint16_t k = (uint16_t)(player.k - 1);
+          // amp_m is "the amplitude applied to THIS pulse", so it must include the item's
+          // PER-PULSE envelope, which eel_player_next() applies on top of the global scale
+          // (eel_player.cpp: `if (it->rel_amp) a *= rel_amp[k]/255`). Every one of the 18 volley
+          // items the RC device can draw carries such a table, running 255 down to 204 — so
+          // logging the global scale alone would overstate the tail of every volley by up to
+          // ~20 %, silently, in the file that is meant to be the exact ground truth.
+          float applied = g_playback_volley_amp;
+          if (player.item && player.item->rel_amp)
+            applied *= (float)player.item->rel_amp[k] * (1.0f / 255.0f);
+          PlogRec r;
+          log_fill(&r, PLOG_VOLLEY);
+          r.item  = g_volley_item;
+          r.pulse = k;
+          r.trial = g_trial_id;
+          r.pol   = g_playback_pol;
+          r.amp_m = plog_milli(applied);
+          plog_push(&g_plog, &r);
+        }
         led_service();
       } else {
         resume_after_playback();   // link loss NEVER aborts a volley — it runs to the end here
@@ -203,28 +356,63 @@ static void onSampleTick() {
       // In the silent gap (don't truncate a loc EOD mid-flight): honour a pending trigger OR a
       // localization-disable promptly rather than waiting for the interval boundary.
       if (loc.phase >= (uint32_t)EOD_HV_LEN) {
+        // A logging failure stops the train HERE, in the silent gap — a clean seam that
+        // truncates nothing. It is checked first because it outranks both other reasons.
+        if (!g_log_ok) { go_idle(); break; }
         if (trig_pending()) { begin_marker(g_trig_kind); break; }
         if (!g_loc_enabled) { go_idle(); break; }
       }
       int onset, boundary;
       int16_t s = locgen_tick(&loc, &onset, &boundary);
       if (s == 0) out_silence(); else out_write(s);
-      if (onset) led_flash();
+      if (onset) {
+        led_flash();
+        // THE REASON THIS FEATURE EXISTS. A localization pulse is deliberately built to look
+        // exactly like a real cruising eel, so this row is the only thing that will ever
+        // distinguish it from biology in a recording. No item: locgen synthesises the pulse
+        // directly from EOD_HV with a drawn IPI, so no library item is involved.
+        PlogRec r;
+        log_fill(&r, PLOG_LOC);
+        r.amp_m = plog_milli(loc.amp);
+        r.pol   = loc.pol;
+        plog_push(&g_plog, &r);
+      }
       led_service();
       if (boundary) {
-        if (!g_loc_enabled) { go_idle(); }
+        if (!g_loc_enabled || !g_log_ok) { go_idle(); }
         else { loc.ipi = draw_loc_ipi(); loc.amp = g_loc_amp; }   // latch for the next pulse
       }
       break;
     }
     default: {  // SRC_IDLE
       out_silence();
+      // No working log -> no stimulation. A throw made while blocked is DISCARDED, not
+      // queued, matching how a throw made during a playback is ignored — otherwise a stale
+      // request would fire without warning the moment the card recovered.
+      if (!g_log_ok) { g_trig_seen = g_trig_seq; break; }
       if (trig_pending()) { begin_marker(g_trig_kind); }
       else if (g_loc_enabled) { begin_loc(); }
-      // LED in idle is owned by loop() (dark, or the no-RC-signal blink).
+      // LED in idle is owned by loop() (dark, the no-RC-signal blink, or the log-fault
+      // inverse-blink).
       break;
     }
   }
+}
+
+// L3 provenance appended to EVERY log file's header (including one opened by a mid-session
+// recovery — it is stored as a hook, not called once). These are the surface-specific
+// constants an analysis needs to interpret the rows: the marker code that tags a trial in the
+// water, the range the volley item index is drawn from, and the blind probability.
+static void log_header_hook(PulseLog* L) {
+  plog_header_kv(L, "surface", 0);                 // 0 == eel_fakefish_rc
+  plog_header_kv(L, "marker_ipi_samp", PULSE_MARKER_IPI_SAMP);
+  plog_header_kv(L, "marker_pulses_volley", PULSE_MARKER_PULSES_VOLLEY);
+  plog_header_kv(L, "marker_pulses_sham", PULSE_MARKER_PULSES_SHAM);
+  plog_header_kv(L, "marker_amp_milli", plog_milli(PULSE_MARKER_AMP));
+  plog_header_kv(L, "volley_item_first", RC_VOLLEY_ITEM_FIRST);
+  plog_header_kv(L, "volley_item_count", RC_VOLLEY_ITEM_COUNT);
+  plog_header_kv(L, "trial_p_volley_milli", plog_milli(TRIAL_P_VOLLEY));
+  plog_header_kv(L, "loc_refractory_samp", LOC_REFRACTORY_SAMP);
 }
 
 void setup() {
@@ -252,6 +440,23 @@ void setup() {
   g_cv = PANEL_CV;
   g_volley_amp = PANEL_VOLLEY_AMP;
   g_loc_amp    = rc_loc_amp(PANEL_VOLLEY_AMP);   // localization = half the volley
+
+  // Pulse log. Opened HERE — before the sample clock, and after the settings defaults so the
+  // first rows carry real values. Opening at boot rather than lazily on the first event is
+  // deliberate: it proves the card is WRITABLE (a bare SD.begin() mount probe does not), and
+  // it moves the first write failure to boot, where a card swap is cheap, instead of to the
+  // first trial you were waiting for. Until this succeeds g_log_ok stays false and the ISR
+  // emits nothing.
+  plog_tick_reset(&g_tick64);
+  g_log_ok = plog_begin(&g_plog, log_header_hook);
+  if (g_log_ok) {
+    // Pushing straight from setup() is safe and is NOT an SPSC violation: the sample clock —
+    // the ring's only other producer — has not been started yet.
+    PlogRec r;
+    log_fill(&r, PLOG_BOOT);
+    r.val = (uint32_t)g_plog.index;
+    plog_push(&g_plog, &r);
+  }
 
   sampleClock.begin(onSampleTick, ISR_PERIOD_US);    // continuous 50 kHz clock (runs forever)
   sampleClock.priority(64);                          // above the RC pin ISRs (default 128): protect pulse timing
@@ -291,8 +496,33 @@ static bool rc_present_ms(uint8_t i, uint32_t now_ms) {
   return s != 0 && (uint32_t)(now_ms - change_ms[i]) < RC_ABSENCE_MS;
 }
 
+// "Logging failed, output is suppressed": an INVERTED blink — steady on with a brief dark
+// notch. Deliberately unlike every other pattern in the vocabulary, which are all short
+// flashes on a dark background, because a blocked device otherwise looks exactly like an idle
+// one and this is the one signal that must not be misread from shore.
+static inline void log_fault_blink(uint32_t now_ms) {
+  uint32_t ph = now_ms % LOGFAULT_LED_PERIOD_MS;
+  digitalWriteFast(LED_PIN, (ph < LOGFAULT_LED_DARK_MS) ? LOW : HIGH);
+}
+
 // loop() decodes the RC channels + panel and publishes targets; it never touches engine state.
 void loop() {
+  uint32_t now_ms = millis();
+
+  // ----- pulse log: drain the ISR's ring to the card ------------------------------------
+  // THE ONLY PLACE FILE I/O HAPPENS. Serviced first so the ring drains promptly. On a failure
+  // plog_retry() re-mounts and opens a NEW indexed file (never reopening the interrupted one,
+  // whose tail length is unknowable) and records the discontinuity as a GAP row. g_log_ok is
+  // republished every pass; the ISR latches it and stops emitting at its next clean seam.
+  //
+  // An SD write can stall for 100 ms+, which delays the ~200 Hz RC decode below. That is
+  // tolerable by design: presence detection is time-based against RC_ABSENCE_MS (500 ms), so a
+  // stall delays the decode rather than faking a link loss, and PULSELOG_DRAIN_MAX bounds how
+  // much one pass can take on.
+  plog_service(&g_plog, now_ms);
+  if (!plog_healthy(&g_plog)) plog_retry(&g_plog, now_ms);
+  g_log_ok = plog_healthy(&g_plog);
+
   // ----- panel buttons (OR-ed with RC; every loop so a held button can't retrigger) -----
   static bool panel_loc_state = false;
   int loc_fell, volley_fell, sham_fell;
@@ -311,7 +541,6 @@ void loop() {
   static RcTrigger trig = {};
   static bool     trig_prev_present = false;
 
-  uint32_t now_ms = millis();
   if ((uint32_t)(now_ms - last_decode_ms) >= RC_DECODE_PERIOD_MS) {
     last_decode_ms = now_ms;
 
@@ -385,8 +614,13 @@ void loop() {
   }
 
   // ----- idle LED (loop owns the LED only while the ISR is not emitting a playback) -----
+  // A logging fault OUTRANKS the no-signal blink: it is the more severe condition, because it
+  // is actively suppressing stimulation. There is never contention with the ISR's per-pulse
+  // flash here — a logging fault means there is no playback to flash for, so g_playing is
+  // false and this branch owns the LED outright.
   if (!g_playing) {
-    if (g_rc_ever && !g_link_up) no_signal_blink(now_ms);
+    if (!plog_healthy(&g_plog)) log_fault_blink(now_ms);
+    else if (g_rc_ever && !g_link_up) no_signal_blink(now_ms);
     else digitalWriteFast(LED_PIN, LOW);
   }
 }

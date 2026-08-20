@@ -27,6 +27,7 @@ fakefish-export = "fakefish.export_teensy_stimuli:app"
 fakefish-synth-volleys = "fakefish.synthetic_volleys:app"
 # Runs against the committed firmware library (no dataset needed):
 fakefish-render = "fakefish.render_stimulus:app"
+fakefish-pulse-log = "fakefish.pulse_log:app"
 fakefish-build-card = "fakefish.build_sd_card:app"
 fakefish-simulate = "fakefish.simulate_firmware:app"
 fakefish-gallery-volley = "fakefish.plot_volley_gallery:app"

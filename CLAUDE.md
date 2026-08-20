@@ -28,8 +28,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   its own copy into its own binary.
 - **L2 — sample producers.** `eel_player.{h,cpp}` (overlap-add engine, the C twin of
   `export_teensy_stimuli.reconstruct_item`), `eel_stimuli.{h,cpp}` (the generated library),
-  `sd_player.h` (SD WAV streaming runtime), `locgen.h` (live localization scheduler).
-  Device-agnostic: they produce `int16` samples and know nothing about pins.
+  `sd_player.h` (SD WAV streaming runtime), `locgen.h` (live localization scheduler),
+  `pulse_log.h` (per-pulse SD event log — the **mirror image** of `sd_player.h`: there the ISR
+  pops samples `loop()` read from the card, here the ISR pushes records `loop()` writes to it;
+  same lock-free SPSC ring, same pure/`#ifdef ARDUINO` split). Device-agnostic: they produce
+  `int16` samples (or records) and know nothing about pins.
 - **L3 — control surfaces.** One sketch folder per device; each owns its inputs, its session
   state machine and its ISR, and nothing else.
   - **`firmware/eel_fakefish_button/`** — 6-button hand-held **SD WAV player**.
@@ -41,8 +44,10 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     trigger→volley/sham on pin 5, CH5 jitter on pin 6, CH6 amplitude on pin 7 — pins are 4–7
     not 5–8 because pin 8 was dead on the build board), `panel_control.h` (pins 9–11 +
     the LED-feedback vocabulary) + `eel_fakefish_rc.ino`. Uses L2 `eel_player` + `locgen` +
-    `eel_stimuli`. No SD card, no `MASTER_GAIN` — amplitude is live (CH6, or
-    `PANEL_VOLLEY_AMP` on the bench).
+    `eel_stimuli` + `pulse_log`. No `MASTER_GAIN` — amplitude is live (CH6, or
+    `PANEL_VOLLEY_AMP` on the bench). **It needs an SD card** — not for playback (it
+    live-synthesises everything, no WAV card) but for the per-pulse log, and it refuses to
+    stimulate without one (invariant 9).
 - **`firmware/rc_input_test/`** — a standalone, read-only RC bring-up diagnostic. Bundles no
   core, drives no output pins. Keep its pin numbers in sync with `rc_control.h`'s `RC_PIN_*`.
 - **`src/fakefish/`** — the Python toolchain (installable package, console scripts). One
@@ -109,11 +114,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    made of eel pulses. `MARKER_LUT`, `MARKER_FREQ_HZ`, `MARKER_RAMP_SAMPLES`, `MARKER_LEADIN_*`,
    `MARKER_CAL_*`, `Levels.marker_cal`, `build_sd_card.render_marker` and `_marker_envelope` are
    **gone** — do not reintroduce those names.)*
-5. **Flashing needs no Python; only the button device needs an SD card.** Both sketches compile
-   and flash with no Python and no dataset. Button-device **playback** reads a WAV card (one
-   directory per button) built by `fakefish-build-card`, which renders from the committed
-   library and needs Python but **no dataset**. The RC device needs **no card** — it
-   live-generates over the `EOD_HV` waveform baked into `eel_stimuli.{h,cpp}`. Only the
+5. **Flashing needs no Python; BOTH devices now need an SD card, for different reasons.** Both
+   sketches compile and flash with no Python and no dataset. Button-device **playback** reads a
+   WAV card (one directory per button) built by `fakefish-build-card`, which renders from the
+   committed library and needs Python but **no dataset**. The RC device still needs **no WAV
+   card** — it live-generates over the `EOD_HV` waveform baked into `eel_stimuli.{h,cpp}` — but
+   it does need a **writable** card for the per-pulse log, and refuses to stimulate without one
+   (invariant 9). Its card needs no prepared content: it creates `/LOGS/` itself. Only the
    *library regeneration* path (`fakefish-export`, reading
    `data/stimuli_config.yaml → paths.eods_root`) needs the source recordings (not shipped).
    Keep that split intact.
@@ -144,6 +151,34 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      noise-shaper accumulators are file-static; two including TUs would silently keep two
      divergent shaper states.
 
+9. **The RC pulse log is a PRECONDITION FOR OUTPUT, and its format is pinned by a golden file.**
+   `firmware/eel_core/pulse_log.h` logs **one row per emitted pulse** (localization, marker and
+   volley alike) with the exact 50 kHz sample tick. Four things are load-bearing:
+   - **No working log ⇒ no stimulation**, at boot *and* mid-session. The localization train is
+     built to be indistinguishable from a real eel, so an unlogged pulse silently poisons the
+     recording. But **nothing in flight is ever truncated** — a marker/volley/sham already
+     playing runs to completion, and localization stops at a pulse boundary; only playback
+     *starts* are gated. A truncated volley is an artefact that looks like data.
+   - **The ISR NEVER touches the card, and is the ring's ONLY producer.** `loop()` is the
+     consumer and must never push. An event that originates in `loop()` (e.g. RC link state) is
+     published as a volatile word and *watched* by the ISR, which pushes the record itself —
+     the same publish/latch idiom as `g_trig_seq`/`g_trig_seen`. Do not "simplify" this by
+     pushing from `loop()`.
+   - **Absent fields render as EMPTY CSV columns, never as a number.** `STIM_ITEMS[0]` is a real
+     recorded volley, so a `0` default would misattribute every localization and marker pulse;
+     and `-1` is no safer as a *written* value, because `STIM_ITEMS[-1]` does not raise in
+     Python, it quietly returns the last item. `-1` is the in-memory sentinel only.
+   - **`tests/data/pulse_log_golden.csv` is generated, not authored.** `pulse_log_selftest
+     --emit` produces it through the real firmware formatters and `tests/test_pulse_log.py`
+     parses it with the real Python reader; `check.sh` diffs it. Changing the format means
+     editing `pulse_log.h`, regenerating the golden, and updating `src/fakefish/pulse_log.py` —
+     the gate fails if you do only one. Sizing constants (`PULSELOG_RING_SIZE`, flush and
+     anchor periods) live in the header, **not** in `shared/stim_constants.json`, which
+     invariant 2 reserves for playback/session values.
+
+   Full rationale, the file format, and the log↔recording alignment procedure (including the
+   clock-drift caveat) are in `firmware/README.md` → "Pulse logging".
+
 ## Toolchain conventions
 
 - **Path resolution** goes through `src/fakefish/_resources.py`: it finds the repo root by
@@ -157,6 +192,7 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   module `:app` Typer entry point:
   - codegen (no dataset): `fakefish-gen-constants`
   - regeneration (**needs the source recordings**): `fakefish-export`, `fakefish-synth-volleys`
+  - reading a device's SD log (no dataset, no library): `fakefish-pulse-log`
   - against the committed library (no dataset): `fakefish-render`, `fakefish-build-card`,
     `fakefish-simulate`, `fakefish-gallery-volley`, `fakefish-gallery-localization`,
     `fakefish-gallery-loc-volley`, `fakefish-anatomy`
@@ -177,13 +213,21 @@ fail; each must print `ok`:
 
 1. **generated files are in sync** — `fakefish-gen-constants --check` (JSON → `stim_levels.h`
    + `_constants.py`), then `firmware/sync_core.sh` must leave **no** `git diff` under
-   `firmware/*/src/eel_core`.
+   `firmware/*/src/eel_core/*` **and** leave no *untracked* file there. The untracked check
+   matters because `sync_core.sh` does `rm -rf && cp`: a sketch copy that was never committed
+   is silently recreated on every run, so the diff stays clean while a fresh clone fails to
+   compile. (Both pathspecs need the trailing `/*` — a git pathspec containing a wildcard is
+   fnmatch'd against the FULL path rather than treated as a directory prefix, so the older
+   `firmware/*/src/eel_core` form matched nothing and this step was blind until 2026-08-20.
+   `tests/test_firmware_sync.py` compares bytes in Python and was enforcing invariant 1
+   throughout.)
 2. **host self-tests** (pure logic, PC `g++ -std=c++17 -Wall -Wextra`) —
-   `sd_player_selftest`, `rc_control_selftest`, `panel_control_selftest`,
+   `sd_player_selftest`, `pulse_log_selftest`, `rc_control_selftest`, `panel_control_selftest`,
    `button_control_selftest` must each print exactly `OK`. **`eel_player_selftest` is a sample
    DUMPER, not an assertion suite — it never prints `OK`**; it streams one item's samples for
    diffing against the Python reference, and the gate only requires a clean build, exit 0 and
-   >1000 lines of output.
+   >1000 lines of output. This group also re-emits `tests/data/pulse_log_golden.csv` from
+   `pulse_log_selftest --emit` and fails on any diff (invariant 9).
 3. **Teensy compile, per sketch** — `arm-none-eabi-g++ -fsyntax-only -std=gnu++17 -Wall
    -Wextra` through each sketch's `host_test/_amalgam.cpp`, for `eel_fakefish_button`,
    `eel_fakefish_rc` and `rc_input_test`. Must be warning-free. `arduino-cli` is not installed

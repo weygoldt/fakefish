@@ -40,6 +40,16 @@
 #define NOSIG_BLINK_MS      60u            // each blink length within the period
 #define NOSIG_BLINK_SPACING_MS 150u        // start of the 2nd blink within the period
 
+// "LOGGING FAILED — output is suppressed". INVERTED duty: steady ON with a brief dark notch.
+// Every other pattern in this vocabulary is a SHORT FLASH ON A DARK BACKGROUND (6 ms per
+// pulse, 2x60 ms no-signal, 3x120 ms sham), so an inverted one is unmistakable at distance —
+// which matters here because a blocked device otherwise looks exactly like an idle one.
+// It OUTRANKS the no-signal blink in loop()'s arbitration: it is the more severe condition,
+// since it is actively preventing stimulation. There is no contention with the ISR's
+// per-pulse flash, because a logging fault means there is no playback to flash for.
+#define LOGFAULT_LED_PERIOD_MS 1000u       // full inverse-blink period
+#define LOGFAULT_LED_DARK_MS   100u        // the dark notch within that period
+
 // ===== Debounce (pure; host-tested) =======================================
 // millis()-based debounce + falling-edge (press) detector. `raw_high` is the pin level read
 // active-low-inverted (true == released/HIGH, false == pressed/LOW). Returns true exactly once

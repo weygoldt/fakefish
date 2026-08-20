@@ -91,7 +91,50 @@ components. The most likely reason a measurement disagrees:
 - [ ] Confirm idle really is braked (hard 0 V single-ended, no slow leak), and that duty → volts
       is linear to the rail. `AMP_DEBUG 1` in `eel_core/config.h` automates this sweep.
 
-## 5. Future control surfaces (documented slots, deliberately unbuilt)
+## 5. Pulse logging — bench verification and the aligner
+
+The RC device now logs **every emitted pulse** to `/LOGS/PULSnnnn.CSV` and **refuses to
+stimulate without a working card** (`CLAUDE.md` invariant 9, `firmware/README.md` → "Pulse
+logging"). The pure logic is host-tested and the C↔Python format is pinned by a generated
+golden, but none of it has touched real hardware.
+
+Bench items:
+
+- [ ] **Run it with a real card.** Confirm `/LOGS/` is created, the first file is `PULS0000.CSV`,
+      and a second power-cycle produces `PULS0001.CSV` — never a reopened file.
+- [ ] **Confirm no dropped records during a volley burst.** The worst case is ~400 Hz for ~1 s
+      against a 512-record ring. Fire volleys back to back and check for `DROP` rows
+      (`uv run fakefish-pulse-log info /path/PULS0000.CSV` reports them). If drops appear, the
+      SD stall is longer than assumed — raise `PULSELOG_RING_SIZE`, do **not** silence the row.
+- [ ] **Verify the block-always policy on hardware.** Boot with no card: the LED must show the
+      inverse blink (steady on, brief dark notch) and **nothing** may reach the electrodes. Then
+      pull the card mid-session: a volley in flight must finish, localization must stop at a
+      pulse boundary, and re-inserting must open a *new* file carrying a `GAP` row.
+- [ ] **Fit the RTC coin cell and verify it holds time across a power cycle.** Check
+      `#rtc_valid=1` in the header and that `ANCHOR` rows carry a plausible clock. Without it the
+      log is still fully usable — you lose absolute time, not relative timing — so this is a
+      convenience, not a blocker.
+- [ ] **Measure the `loop()` cost.** An SD write can stall 100 ms+, delaying the ~200 Hz RC
+      decode. `RC_ABSENCE_MS` is 500 ms so a stall should not fake a link loss, but confirm the
+      trigger still responds crisply while logging at 20 Hz.
+- [ ] Check flash/RAM headroom now that `SD`/`SdFat` are linked into the RC binary (`make check`
+      is a syntax check, not a link — only `arduino-cli` or the IDE will tell you).
+
+Toolchain follow-up:
+
+- [ ] **`fakefish-align-log` is not written.** The procedure is specified in full in
+      `firmware/README.md` → "Aligning a log to a recording": detect pulses in the recording,
+      cross-correlate against the logged train, fit **offset + drift rate** (a single global
+      offset degrades in ~10 minutes at 40 ppm), and report a **match quality**. Deliberately
+      deferred until there is a real recording to tune the detection thresholds against —
+      written blind it would be plausible and unverifiable. The reader it will build on
+      (`fakefish-pulse-log`) is shipped.
+- [ ] **The button device could get logging for free.** `pulse_log.h` is L2 and is already
+      synced into `eel_fakefish_button/src/eel_core/`; that sketch simply does not include it.
+      It has a card mounted already. Not done now, on purpose — the button device's 36 V
+      hardware does not exist yet (§1), so there is nothing to verify it on.
+
+## 6. Future control surfaces (documented slots, deliberately unbuilt)
 
 Adding one is a new folder under `firmware/`, not a fork — see "Adding a new surface" in
 `firmware/README.md`.
@@ -101,7 +144,7 @@ Adding one is a new folder under `firmware/`, not a fork — see "Adding a new s
 - [ ] **De-novo-synthesis handheld** — reuse `locgen` (already L2 core, exactly so this is
       possible) with a button surface instead of the RC decode layer.
 
-## 6. Smaller follow-ups
+## 7. Smaller follow-ups
 
 - [ ] `simulate_firmware.py`'s remaining commands (`dac`, `analyze`) were written to argue for
       the 585.9 kHz / 1-pole chain. The filter model is now correct everywhere, but some of the
@@ -114,7 +157,7 @@ Adding one is a new folder under `firmware/`, not a fork — see "Adding a new s
       the future tense and its §C9 "22 nF" figure was wrong — corrected in place). Delete it or
       move it to `docs/` at the owner's discretion.
 
-## 7. Not done here, by design
+## 8. Not done here, by design
 
 - **Nothing in this repo has been flashed, scoped or field-tested.** Firmware is bench-owned;
   the gate proves it compiles and that the pure logic behaves, nothing more.

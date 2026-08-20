@@ -78,8 +78,9 @@ while it is stale.
 | **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
 | **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
 | **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at half (`PANEL_VOLLEY_AMP` on the bench) |
-| **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost |
-| **Needs an SD card** | **yes** | no |
+| **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost; **inverse blink = logging failed, output suppressed** |
+| **Needs an SD card** | **yes** — to *read* the stimulus WAVs | **yes** — to *write* the per-pulse log (no WAVs needed; it creates `/LOGS/` itself) |
+| **Logs to the card** | not yet ([`TODO.md`](TODO.md) §5) | **every pulse**, with its exact 50 kHz sample tick — and it **will not stimulate without a working card** |
 
 **The two markers are deliberately not unified.** Both are made of eel pulses now — nothing either
 device emits is out of band — but they carry **different codes**, because they answer different
@@ -182,7 +183,8 @@ check.sh  Makefile             the acceptance gate — `make check`
 **You need:** a Teensy 4.1 and the 36 V DRV8871 output stage wired per
 [`firmware/README.md`](firmware/README.md). For the hand-held device also: a microSD card, six
 momentary push-buttons, an indicator LED. For the RC device: a HY-M154 4-channel PC817 board,
-an FS-i6X / FS-iA6B RC link, and three panel buttons.
+an FS-i6X / FS-iA6B RC link, three panel buttons, and **a microSD card** — blank is fine, it is
+for the pulse log, and the device refuses to stimulate without one.
 
 ### 1 · Flash a sketch (no Python, no dataset)
 
@@ -241,7 +243,10 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   does nothing at all; one-shot, re-arms at centre); CH5 pot = jitter; CH6 pot =
   amplitude. Losing the link turns localization off and can never start a trial. On the bench
   with no transmitter, the three panel buttons drive the same state machine: pin 9 toggles
-  localization, pin 10 fires a volley, pin 11 fires a sham.
+  localization, pin 10 fires a volley, pin 11 fires a sham. **Put a (blank) microSD card in
+  before you start**: it logs every pulse to `/LOGS/PULSnnnn.CSV` and will not stimulate
+  without one — a steady LED with a brief dark notch each second means logging has failed.
+  Afterwards, read the card with `uv run fakefish-pulse-log info /path/PULS0000.CSV`.
 
 ### 5 · Tune — no reflash where possible
 
@@ -284,6 +289,7 @@ An editable install (`uv sync`, or `pip install -e .`); run from the repo root. 
 | `fakefish-gallery-localization` | committed library | every localization session |
 | `fakefish-gallery-loc-volley` | committed library | every localize → strike (program D) session |
 | `fakefish-anatomy` | committed library | marker → gap → onset playback anatomy |
+| `fakefish-pulse-log` | a device's SD log | `info` summarises one `/LOGS/PULSnnnn.CSV` (provenance, pulse counts, trials, integrity); `pulses` lists the emitted pulses |
 | `fakefish-export` | **source recordings** | `scan` mines candidate scenes; `export` re-emits the firmware library + provenance |
 | `fakefish-synth-volleys` | **source recordings** | `analyze` / `synthesize` / `compare` / `overlap-demo` the volley population model |
 
