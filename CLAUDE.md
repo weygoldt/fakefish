@@ -268,7 +268,10 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
 - **Logging** via `from fakefish.viz.loggers import get_logger, configure_logging`
   (stdlib; verbosity 0=WARNING, 1=INFO, 2+=DEBUG).
 - **ruff excludes `firmware/`** (it is C/C++). `make gen` / `make sync` / `make test` /
-  `make lint` are front doors for the individual steps.
+  `make lint` are front doors for the individual steps. **`make figs`** rebuilds every figure
+  in the gitignored `figs/` from the committed library (no recordings); the one figure step it
+  omits is `fakefish-synth-volleys analyze`, which refreshes the real-volley QC population and
+  does need the recordings + `--group export`.
 
 ## Validate before committing
 

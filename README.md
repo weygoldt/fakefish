@@ -310,6 +310,7 @@ no dataset is needed:
 uv run fakefish-render info
 uv run fakefish-gallery-volley
 uv run fakefish-simulate marker
+make figs                       # all of them at once, into the gitignored figs/
 ```
 
 ---
