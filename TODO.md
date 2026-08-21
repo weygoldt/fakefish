@@ -289,13 +289,15 @@ the packet is 58.7 kB of a 131 kB budget.
       card content predates all of this. Note program D's 5 s lead gets only ~2 pulses from the
       1 Hz rung now (a 1 Hz fish with the model's tail); pick a faster rung if that lead needs to
       be denser.
-- [ ] **Bench:** confirm the ISR still closes an interval inside its 20 µs budget on the part you
-      actually flash. The draw costs three `expf`, two Box–Muller pairs and eight PRNG words —
-      once per *interval*, a few times a second, not per sample tick. Comfortable on a 4.1; a 3.5
-      at 120 MHz is the one worth scoping. If it is tight, the spec sanctions two exact-in-context
-      reductions (§7): drop to `n_components = 2`, or replace the medium/slow `expf` with
-      `1 - dt/tau`. Neither is done in the firmware, because either would put the C and the Python
-      reference on different arithmetic and cost the golden parity test.
+- [x] **Bench: DONE 2026-08-22 — the Teensy 3.5 keeps up.** The draw costs three `expf`, two
+      Box–Muller pairs and eight PRNG words, once per *interval* rather than per sample tick, and
+      the 120 MHz part was the one worth checking. Measured from a real field log rather than a
+      scope: the `ANCHOR` rows pair an exact sample tick with an RTC second, and over 39 anchors
+      380.0 s of ticks landed against 379 s of RTC — ratio **1.0026**, i.e. crystal tolerance, not
+      a slipping sample clock. `uv run fakefish-pulse-log info <PULSnnnn.CSV>` re-runs the check on
+      any log. So neither of the spec's sanctioned reductions (§7: `n_components = 2`, or
+      `1 - dt/tau` for the medium/slow `expf`) is needed — good, because either would put the C and
+      the Python reference on different arithmetic and cost the golden parity test.
 - [ ] **Bench:** listen to / scope a few minutes of the resting train at randomness 1.0 and
       confirm the multi-second silences look right rather than alarming. 1.5 % of intervals exceed
       5 s and 0.6 % exceed 10 s — that is measured behaviour, not a fault, and the device is

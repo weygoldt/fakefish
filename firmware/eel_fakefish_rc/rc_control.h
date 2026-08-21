@@ -9,7 +9,8 @@
 // through a 4-channel PC817 optocoupler module in THIS (stimulator) box. Four servo-PWM channels
 // are decoded:
 //
-//   CH3  throttle stick (ratcheted)    -> localization ON/OFF (dead-band) + RATE (0..20 Hz)
+//   CH3  throttle stick (ratcheted)    -> localization ON/OFF (dead-band) + TICK TEMPO
+//                                         (0.5..20 Hz, LOGARITHMIC — see rc_rate_to_hz)
 //   CH4  right stick axis (self-centre)-> one-shot TRIGGER: throw high = VOLLEY, low = SHAM
 //   CH5  pot                           -> localization RANDOMNESS (0 = metronome .. ~1.5)
 //   CH6  pot                           -> AMPLITUDE (sets the volley/max; localization = volley/2)
@@ -258,10 +259,26 @@ static inline bool rc_throttle_gate(float raw_unit, bool prev_on, uint32_t* coun
   else *count = 0;                                              // in [off,on) while off -> don't build
   return *count >= debounce_ticks;                              // ON only after a sustained rise
 }
-// Tick tempo (Hz) for a quantised rate level: a plain linear ladder over the CH3 travel.
+// Tick tempo (Hz) for a quantised rate level: a LOGARITHMIC ladder over the CH3 travel, so
+// every rung is the same RATIO from its neighbours rather than the same number of Hz.
+//
+// It was linear 1-20 Hz until 2026-08-22. Rate is perceived and used multiplicatively -- the
+// interesting question is always "twice as fast", never "one Hz faster" -- and a linear ladder
+// spends its resolution in the wrong place: ~85 % of the throttle's travel sat above anything a
+// real eel does (they tick at 3.15 Hz), while the entire biological range was squeezed into the
+// bottom rungs. The slowest settings were worse than coarse, they were unreachable: 1 Hz landed
+// inside the ~6 % of travel between CH3_OFF_DEADBAND and CH3_ON_THRESH, right against the edge
+// where localization cuts out. A field log confirmed the operator never got below 4 Hz.
+//
+// Geometric spacing puts the resolution where the biology is. At 20 steps over 0.5-20 Hz each
+// rung is ~21 % from the next, so the steps near 1 Hz are ~0.1 Hz instead of ~1 Hz, and the
+// measured eel lands at almost exactly mid-throttle (sqrt(0.5 * 20) = 3.16 Hz). The endpoints
+// are unchanged in meaning: level 0 is LOC_RATE_MIN_HZ and the top level is LOC_RATE_MAX_HZ.
+//
+// powf() is fine here: this runs in loop() at the RC decode rate, never in the sample ISR.
 static inline float rc_rate_to_hz(int rate_level, int rate_steps) {
   float frac = (rate_steps > 1) ? (float)rate_level / (float)(rate_steps - 1) : 0.0f;
-  return LOC_RATE_MIN_HZ + frac * (LOC_RATE_MAX_HZ - LOC_RATE_MIN_HZ);
+  return LOC_RATE_MIN_HZ * powf(LOC_RATE_MAX_HZ / LOC_RATE_MIN_HZ, frac);
 }
 // ...as the model's rate knob, which is a TEMPO MULTIPLIER (1.0 == the measured eel).
 static inline float rc_rate_to_tempo(int rate_level, int rate_steps) {

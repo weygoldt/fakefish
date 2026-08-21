@@ -162,6 +162,18 @@ def validate(c: dict, rate_hz: int, eod_len: int | None = None) -> None:
     if not 0.0 <= p <= 1.0:
         raise ValueError(f"rc_path.trial.p_volley = {p} is not a probability in 0..1")
 
+    # (8a) The CH3 rate ladder is GEOMETRIC (rc_rate_to_hz raises max/min to a fraction),
+    #      so a zero or negative floor is not merely odd, it is undefined. A ladder that does
+    #      not increase is equally broken.
+    loc = c["rc_path"]["loc_rate"]
+    if loc["min_hz"] <= 0.0:
+        raise ValueError(
+            f"rc_path.loc_rate.min_hz = {loc['min_hz']} — the CH3 ladder is logarithmic, so "
+            f"the floor must be strictly positive"
+        )
+    if loc["max_hz"] <= loc["min_hz"]:
+        raise ValueError("rc_path.loc_rate.max_hz must exceed min_hz")
+
     # (8) The RC marker IPI table is sized by max_pulses; both tags must fit.
     rcm = c["rc_path"]["pulse_marker"]
     if max(rcm["pulses_volley"], rcm["pulses_sham"]) > rcm["max_pulses"]:
@@ -272,6 +284,13 @@ def render_header(c: dict) -> str:
     a("// measured eel ticks at LOC_NOMINAL_TICK_HZ (3.15 Hz). Under the retired lognormal a")
     a("// setting of 5 Hz meant 5 pulses/s on average; it now means the fish ticks at 5 Hz,")
     a("// which delivers about 3.3 pulses/s once the heavy tail is included.")
+    a("//")
+    a("// The ladder between these two is LOGARITHMIC (rc_rate_to_hz), so every rung is the same")
+    a("// RATIO from its neighbours. A linear one spent ~85 % of the throttle's travel above")
+    a("// anything a real eel does and pushed the slow settings into the sliver of travel just")
+    a("// above the fail-safe cutoff. Geometric spacing puts the measured eel at mid-throttle")
+    a(f"// (sqrt({loc['min_hz']} * {loc['max_hz']}) = "
+      f"{(loc['min_hz'] * loc['max_hz']) ** 0.5:.2f} Hz) and gives ~0.1 Hz steps near 1 Hz.")
     a(f"#define LOC_RATE_MIN_HZ    {_f(loc['min_hz'])}")
     a(f"#define LOC_RATE_MAX_HZ    {_f(loc['max_hz'])}")
     a(f"#define PANEL_RATE_HZ      {_f(loc['panel_rate_hz'])}")

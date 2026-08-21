@@ -5,7 +5,7 @@
 // with the same binary and no transmitter, by three panel buttons for the bench (panel_control.h).
 // Both input sources are OR-ed. It LIVE-GENERATES its stimuli over the mean-EOD waveform (EOD_HV):
 //
-//   CH3 throttle  -> localization ON/OFF (dead-band) + TICK TEMPO 1..20 Hz (a resting train)
+//   CH3 throttle  -> localization ON/OFF (dead-band) + TICK TEMPO 0.5..20 Hz, log ladder
 //   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws volley
 //                    or sham); throw low does NOTHING
 //   CH5 pot       -> localization RANDOMNESS      CH6 pot -> AMPLITUDE (sets volley/max; loc = quarter)
