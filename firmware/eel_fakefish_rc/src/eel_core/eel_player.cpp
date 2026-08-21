@@ -2,8 +2,35 @@
 #include "eel_player.h"
 #include <math.h>
 
+// Round to nearest, ties to even, then saturate to the int16 range.
+//
+// WHY THIS IS NOT SIMPLY lrintf(). "Round to nearest, ties to even" IS a single ARM
+// instruction — VCVTR.S32.F32 converts using the FPSCR rounding mode, whose reset default is
+// exactly that and which Teensyduino never changes. But GCC will not emit it for lrintf() at
+// any optimisation level, on either core, with or without -fno-math-errno / -fno-trapping-math
+// / -funsafe-math-optimizations / -ffast-math (all checked, GCC 11.3). It calls newlib
+// instead, and newlib's lrintf is a SOFTWARE routine: for our value range it takes the
+// magic-number path, ~35 instructions with two round-trips of the value through the stack.
+//
+// That call sat on the EMIT path — not once per pulse, but on every one of the 50 000 ticks a
+// second — which made it more expensive than the pulse mixing it follows. Hence the two lines
+// of assembly. The saturation below is unchanged and still does the real clamping; only the
+// float-to-integer conversion moved.
+//
+// It is equivalent for EVERY float, not merely the ones that occur: newlib's routine and
+// VCVTR agree on all 2^32 bit patterns once saturated to +/-32767 (verified exhaustively —
+// they take the same rounding for anything in range, and both saturate to the int32 limits,
+// with NaN -> 0, outside it). Host builds keep lrintf, so the self-tests are unaffected and
+// their samples do not move.
 static inline int16_t clamp16(float v) {
-  long r = lrintf(v);
+#if defined(__ARM_FP)
+  int32_t r;
+  __asm__("vcvtr.s32.f32 %[f], %[f]\n\t"
+          "vmov %[i], %[f]"
+          : [i] "=r"(r), [f] "+t"(v));
+#else
+  const long r = lrintf(v);   // host (self-tests): same rule, no instruction for it
+#endif
   if (r > 32767) return 32767;
   if (r < -32767) return -32767;
   return (int16_t)r;
