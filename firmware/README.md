@@ -884,10 +884,17 @@ ambiguously — an equally good peak at every IPI. A train whose intervals vary 
 unique fingerprint and a sharp peak, and the fitted rhythm varies *more* than the lognormal it
 replaced (median CV2 ~0.42 at randomness 1.0, and a heavy tail that the old 4×-mean clamp used to
 cut off), so alignment got better rather than worse. The randomness that makes the stimulus
-biologically realistic also makes it uniquely identifiable — which is why **CH5 at 0 is a trap in
-the field**: it is an exact metronome and degrades alignment badly. Keep it near 1.0, the
-measured eel, unless a metronome is the point of the test. Detection precision is not the limit: an EOD is ~800 µs FWHM, so each peak
-localises to well under a millisecond.
+biologically realistic also makes it uniquely identifiable. Detection precision is not the limit:
+an EOD is ~800 µs FWHM, so each peak localises to well under a millisecond.
+
+**What CH5 at 0 actually costs.** An exact metronome has no fingerprint — sliding the log by any
+whole interval fits as well as the true offset, so the localization train stops being usable for
+alignment. It is not fatal: each trial's coded marker burst is short and distinctive, so it still
+gives a sharp unambiguous anchor, and the drift can be interpolated between those anchors. So the
+real cost scales with how often you fire: frequent trials, workable; long quiet stretches between
+them, and you are interpolating drift across a gap with nothing to check it against. The better
+reason to keep CH5 near 1.0 is simply that 0 is not a fish — no eel discharges at a fixed
+interval. Use 0 when a predictable train is the point of the test.
 
 > **The one real constraint is clock drift.** The Teensy's 50 kHz clock and the recorder's 48 kHz
 > clock are independent crystals. Two parts at ±20 ppm can differ by ~40 ppm ≈ **144 ms per hour**.

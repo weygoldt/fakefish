@@ -37,7 +37,7 @@ static void test_debounce_bounce() {
 static void test_panel_pins() {
   // The three panel buttons must sit on distinct pins that avoid every other GPIO user on this
   // board: the FOUR DRV8871 output pins (L1 HAL — note this is now 0,1,2,3, not just the old
-  // 2,3, since IN2 moved onto 0/1 with the complementary drive), the four RC input pins, the
+  // 2,3, with IN2 on 22/23 under the complementary drive), the four RC input pins, the
   // indicator LED, and A0 (== digital 14, the randomSeed source).
   //
   // Checked against the REAL macros rather than pin literals, so moving a pin in

@@ -20,7 +20,7 @@
 //
 // OUTPUT STAGE — MIGRATED. This device now runs the SAME 36 V DRV8871 complementary stage as
 // the RC unit (two single-bridge drivers, IN1 held HIGH on pins 2/3, IN2 PWM'd at the
-// complement of the wanted duty on pins 0/1, 100 kHz carrier, braked-not-coasting idle). It
+// complement of the wanted duty on pins 22/23, 100 kHz carrier, braked-not-coasting idle). It
 // previously drove pins 2/3 directly at a 585.9 kHz carrier for an open-circuit full scale of
 // ~5.7 Vpp.
 //

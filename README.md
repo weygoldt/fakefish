@@ -250,7 +250,7 @@ otherwise a synthesised melody; `--song mytune.wav` overrides it.
 ### 3 · Wire it (once)
 
 Buttons/panel: each from its pin to **GND** (`INPUT_PULLUP`, active-low). LED on pin 13. The
-electrodes hang off the two DRV8871 boards — IN1 held HIGH on pins 2/3, IN2 PWM'd on pins 0/1.
+electrodes hang off the two DRV8871 boards — IN1 held HIGH on pins 2/3, IN2 PWM'd on pins 22/23.
 Full wiring in [`firmware/README.md`](firmware/README.md).
 
 ### 4 · Use it

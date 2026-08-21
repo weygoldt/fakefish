@@ -11,7 +11,11 @@ The hand-held SD player **migrated off** its old direct-pin ~5.7 Vpp stage onto 
 36 V DRV8871 stage. That hardware **has to be built** before the sketch can be bench-tested.
 
 - [ ] Build the 36 V DRV8871 output stage for the hand-held unit (2× DRV8871, IN1 on pins 2/3
-      held high, IN2 on pins 0/1, plus the per-channel output filter). **Build the filter as the
+      held high, **IN2 on pins 22/23** — NOT 0/1, which this line said until 2026-08-21 and which
+      have no FTM channel at all on a Teensy 3.5 — plus the per-channel output filter). Double-check
+      IN1/IN2 orientation at each driver before first power-up: see the hazard note in
+      `firmware/eel_core/config.h`, because both mis-wirings are silent on the LED and one of them
+      holds the electrodes at full-rail DC. **Build the filter as the
       3-section network** in `firmware/README.md` → "A better network for the next build"
       (`220 Ω/150 nF → 110 Ω/100 nF → 110 Ω/100 nF`), not as a copy of the RC unit's 2-section
       one: same parts cost and same dissipation, 39 % less pulse distortion. See §4.
