@@ -1,41 +1,54 @@
-"""Model real eel volleys and synthesise a population for Teensy playback.
+"""Synthesise a population of realistic eel volleys for Teensy playback.
 
-The tracker fragments real volleys at rapid amplitude transitions, so the volleys
-we extract from the pipeline are only the *body* of a discharge — they start
-already-strong and are mostly short (median ~0.2 s). A real volley, per field
-observation, is richer:
+**The volley model is not fitted here.** It is :mod:`fakefish.volley_model`, a
+verbatim copy of the reference sampler from the eeltracker ``volley_dynamics``
+analysis, driven by ``data/volley_model_params.json``. That model was fitted to
+the 200 strongest hunting volleys in the FLONA 2025 field dataset (43 recordings,
+16 sites) and validated there against re-fitted synthetic draws.
+``docs/VOLLEY_GENERATIVE_SPEC.md`` is the shipped copy of its spec — the model,
+every fitted number, and every caveat.
 
-* a **localization prelude** — the excited fish ticks at ~10-50 Hz (≈1/10 of the
-  volley voltage) for a second or two beforehand;
-* a **voltage ramp** — already at the ~2 ms volley IPI, the discharge ramps up
-  over the first few pulses (≈1/10 → 1/4 → full "stunning" pulse);
-* a **smooth IPI decay** — the instantaneous rate rises to a peak within the first
-  pulses then decays back toward the localization rate (an inverted, left-leaning
-  gamma), over 0.5-2 s (sometimes longer). Mid-volley rate *troughs* in the
-  recording are missed-pulse detection artifacts, not real slowdowns.
+**Do not edit either vendored file.** Both are byte-identical to their source in
+``eeltracker/analyses/volley_dynamics/`` so that dropping in a newer fit is a plain
+copy and ``diff`` is the drift check. A change to the *model* belongs upstream,
+where ``volley_validate.py`` is its regression test. ``tests/test_volley_model.py``
+pins the copies' sha256 here.
 
-This module (1) extracts the structure of the real population, (2) fits a rough
-generative model, and (3) synthesises a population of volleys of varied lengths plus
-localization activity, using the one mean EOD waveform.
+Three things in the model are measurements, not modelling choices, and the wiring
+below must not quietly undo them:
 
-Every synthetic volley **starts already-strong**: the localization prelude and the
-onset voltage ramp are deliberately *not* synthesised. For hand-timed dynamic
-playback the user supplies the localization lead-in live (play localization → stop →
-switch → trigger the volley), so a volley must be *just the volley* — a high-rate
-discharge that fires at full amplitude immediately, with no low-voltage preamble. Over
-its course two things vary: the instantaneous rate decays from a per-volley peak toward
-a tail rate, and a gentle per-pulse voltage envelope winds the amplitude down from full
-to ``VOLLEY_DECAY_FLOOR`` (80 %), beginning at a random point in the volley's first
-third. That envelope is a *physiological* relative amplitude — what ``rel_amp`` is for,
-distinct from the distance-confounded recorded amplitude we exclude; the absolute output
-level, and the localization↔volley amplitude contrast, remain firmware global scales.
-The floor stays above the localization level so a decaying volley never dips into
-localization territory.
+1. **Pulse times integrate the rate curve** with a small multiplicative jitter —
+   *not* a Poisson process. Real volleys are nearly clockwork (CV2 ~ 0.12, where
+   Poisson is 1.0). A Poisson train has the right mean rate and the wrong texture.
+2. **There is no ramp-up.** A volley starts at its peak rate and decays from there
+   (median time-to-peak 18 ms, lower quartile 0 ms).
+3. **Amplitude decays smoothly**, ~20 % across the volley, with only ~1.4 %
+   pulse-to-pulse jitter.
+
+What THIS module owns is everything between the model's event series and the
+firmware's item table:
+
+* **the sample grid.** The model emits float times; the device emits pulses on
+  50 kHz sample boundaries. Volleys are generated *on that grid*, so the numbers
+  the QC prints are exactly the numbers the device plays.
+* **the IPI floor** (``SYNTH_MIN_IPI_SAMP``) — below it pulses collide
+  spike-on-spike and the overlap-add engine saturates. See the constant.
+* **amplitude normalisation.** The model's amplitude is relative to a volley's own
+  MEDIAN pulse, so it exceeds 1.0 at onset; firmware ``rel_amp`` is a 0..255
+  encoding of 0..1. Each volley is normalised to its own peak, which discards only
+  the absolute level — and the spec is explicit that absolute level is a free knob.
+* **the localization trains**, which the volley model does not cover.
+* **the population**: how many volleys, and the playback-safety QC over them.
+
+Every synthetic volley is *just the volley* — a high-rate discharge firing at full
+amplitude from its first pulse, with no localization prelude and no onset ramp.
+That is both what the model says (point 2 above) and what hand-timed playback
+needs: the operator supplies the localization lead-in live.
 
 Subcommands::
 
     fakefish-synth-volleys overlap-demo   # what mean-waveform overlap looks like at high rate
-    fakefish-synth-volleys analyze        # extract real population, plot, fit model
+    fakefish-synth-volleys analyze        # extract the real population (QC cross-check) + plot
     fakefish-synth-volleys synthesize     # generate the synthetic population
     fakefish-synth-volleys compare        # synthetic vs real
 """
@@ -43,7 +56,7 @@ Subcommands::
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -60,6 +73,7 @@ from fakefish.viz.plotstyle import (  # noqa: E402
 
 from fakefish import export_teensy_stimuli as ex  # noqa: E402
 from fakefish import _resources as _res  # noqa: E402
+from fakefish import _constants as K  # noqa: E402
 import typer  # noqa: E402
 
 log = get_logger(__name__)
@@ -76,67 +90,100 @@ def _main() -> None:
 OUT_DIR = _res.DATA_DIR
 FIG_DIR = _res.FIGS_DIR / "synthetic_volleys"
 POP_CACHE = OUT_DIR / "real_volley_population.npz"
-MODEL_JSON = OUT_DIR / "volley_model.json"
 SYNTH_NPZ = OUT_DIR / "synthetic_population.npz"
 
-# Realistic single-fish volley peak rate. A real Electrophorus volley peaks at a few
-# hundred Hz; anything much above ~400 Hz is TWO fish volleying together (the rates
-# add), a multi-fish artifact — NOT a single-fish stimulus. So:
-#  - the model is fit only on real volleys peaking below VOLLEY_MULTIFISH_PEAK_HZ, and
-#  - the sampled per-volley peak is held to the SUSTAINED band below.
-VOLLEY_MULTIFISH_PEAK_HZ = 450.0  # real peak above this = two fish, drop from the fit
+# ==========================================================================
+# What this module adds on top of the vendored model
+# ==========================================================================
 
-# PEAK RATE IS MEASURED AS A *SUSTAINED* RATE, NOT AS 1/min(IPI).
+# The fitted parameters, vendored verbatim (see the module docstring).
+VOLLEY_MODEL_JSON = OUT_DIR / "volley_model_params.json"
+
+# Everything the library fires is a `strong` volley: the extreme hunting volleys the
+# source analysis selected for (~393 Hz start, ~0.47 s, ~88 pulses). That is what a
+# "fire a hunting volley" trigger should emit. The model's `ordinary` class is the
+# everyday volley and is deliberately NOT used here — the spec (§4) reports it re-fits
+# ~30 % long, because at ~12 pulses a three-parameter decay is barely identifiable.
+VOLLEY_KIND = "strong"
+
+# How many synthetic volleys the library carries. The RC device draws one uniformly per
+# trigger, so the POOL IS THE SAMPLING DISTRIBUTION: more items = a finer discrete
+# approximation of the fitted joint (r_start, duration, lambda) distribution. Flash is
+# cheap — ~3 B per pulse, ~330 B for a median volley.
 #
-# 1/min(IPI) is an EXTREME-VALUE statistic: its expected value grows with the number of
-# intervals you draw. Simulating lognormal IPIs at the fitted jitter (CV 0.166) around a
-# true 300 Hz, 1/min(IPI) reports 429 Hz over 37 intervals but 463 Hz over 125. Real
-# volleys carry ~37 intervals and synthetic ones ~125, so calibrating the synthesis so
-# that 1/min(IPI) matches compares unlike with unlike — and silently forces the synthetic
-# SUSTAINED rate down to compensate.
+# 100 is not a round number, it is set by the LOG FORMAT. `pulse_log.h` types the library
+# item as `int8_t` with -1 as the absent sentinel (PLOG_ABSENT_ITEM), so an item index
+# must fit a signed byte: at most 128 items in the whole library. With the real scenes and
+# the localization trains alongside, 100 volleys puts the highest index at 112 — inside,
+# with room to grow. Going beyond is not a flash question but a pulse-log FORMAT change
+# (CLAUDE.md invariant 9, and the golden file that pins it).
+N_SYNTH_VOLLEYS = 100
+
+# Pulses land on the 50 kHz sample grid, so samples are the honest unit for the floor.
 #
-# That is exactly what happened: the old code deflated the sampled peak by a constant
-# PEAK_JITTER_INFLATION = 1.35 (removed). Measured on the real population the raw/sustained
-# ratio is 1.133, not 1.35, and the resulting synthetic volleys ran at 283 Hz sustained
-# against the real 348 Hz — 18 % slow — while their 1/min(IPI) matched almost exactly.
+# THE FLOOR IS SET BY THE EOD'S ENERGY WIDTH, NOT ITS LENGTH. EOD_HV is 131 samples
+# (2.62 ms) long but back-loaded with a low tail: 99 % of its energy is inside 1.92 ms.
+# Two pulses closer than that collide spike-on-spike and the overlap-add sum saturates;
+# further apart they only overlap tail-on-spike, which adds harmlessly. Measured over 400
+# model volleys: a 2.00 ms floor gives ZERO overlap-clip, an unclamped train clips 3 % of
+# volleys, and the clamp costs nothing in aggregate — duration, pulse count and sustained peak
+# are unchanged, because the intervals it moves move by microseconds.
 #
-# So the peak is now measured with sustained_peak_hz() on both sides, and the sampled
-# distribution is used AS IS with no inflation factor: generate_volley()'s `rate_peak` is
-# the instantaneous rate at t=0, which is the same quantity sustained_peak_hz() measures.
-SUSTAINED_PEAK_WINDOW = 5         # intervals a "peak" must hold for, to not be one outlier
-SYNTH_PEAK_SUSTAINED_LO_HZ = 300.0  # a proper volley reaches at least this
-# Ceiling set by PHYSICS, not by taste: EOD_HV is 131 samples = 2.62 ms at 50 kHz, so a
-# sustained rate above 1/2.62 ms = 382 Hz means the MEAN IPI is shorter than one EOD and
-# the pulses overlap permanently. Exactly 1 of 41 real volleys sustains above that.
-SYNTH_PEAK_SUSTAINED_HI_HZ = 381.0
-# hard IPI floor (ms): no pulse faster than this. 2.5 ms == a 400 Hz ceiling, which is
-# >= the 2 ms field minimum AND hard-caps the realised peak at the single-fish
-# ceiling — a 2.0 ms floor would let the fastest jittered pulse reach 500 Hz. The
-# deflated distribution spreads the rest down to ~300 Hz.
-SYNTH_MIN_IPI_MS = 2.5
+# IT DOES LEAVE A VISIBLE SIGNATURE, and that is worth knowing before analysing a recording:
+# **9.5 % of shipped intervals sit exactly on the floor**, a delta spike where real volleys
+# have a smooth tail down to ~2.1 ms. (6.4 % of raw model draws fall below 2.0 ms; the rest of
+# the pile-up is intervals that simply round to 100 samples.) Not hidden and not a bug — the
+# spec's own §5 says the sub-2 ms intervals in the source data are spurious EXTRA DETECTIONS
+# rather than extra EODs, so clamping them moves the model toward biology. But it does it by
+# stacking them on one value instead of redistributing them.
+#
+# 2.0 ms is independently the source detector's resolution limit: the analysis ran
+# `find_peaks(distance_ms=1.5)`, and its raw-trace check (spec §5) showed the sub-2 ms
+# intervals in the data are spurious EXTRA DETECTIONS, not extra EODs. So the model has no
+# support below it either. Physics and provenance land on the same number.
+#
+# The retired 2.5 ms floor — and the 381 Hz "physics ceiling" that went with it, derived
+# from the EOD's full 2.62 ms LENGTH rather than its energy width — cost 11 % of the
+# sustained peak for no gain in overlap safety.
+SYNTH_MIN_IPI_SAMP = 100  # 2.00 ms at 50 kHz
+SYNTH_MIN_IPI_MS = SYNTH_MIN_IPI_SAMP / ex.PLAYBACK_RATE_HZ * 1e3
+
 # min IPI (ms) of the fastest pulse a volley must contain to count as reaching the
 # >100 Hz volley regime — the same 10 ms the export gate tests.
 VOLLEY_PEAK_MAX_IPI_MS = 10.0
+
+# A real train peaking above this is TWO fish volleying together (the rates add), a
+# multi-fish artifact. Used ONLY to select the real population that `analyze` and
+# `compare` plot as an independent cross-check — the model's own selection happened
+# upstream and does not use this.
+VOLLEY_MULTIFISH_PEAK_HZ = 450.0
+SUSTAINED_PEAK_WINDOW = 5  # intervals a "peak" must hold for, to not be one outlier
 
 # Synthetic localization: a set of standalone resting/exploring trains spanning the
 # realistic 1-10 Hz range, one per target average rate. Each is lognormally jittered
 # (LOC_SYNTH_CV) with IPIs clamped under LOC_MAX_IPI_S so a low-rate (1 Hz) train
 # neither overflows the uint16 sample-IPI (65535 samp = 1.31 s) nor gets chopped by
 # the gap-free trim (localization_max_gap_s = 1.2 s).
+#
+# THIS IS THE SEAM FOR A PROPER LOCALIZATION MODEL. It is a designed rate ladder, not a
+# fit: the old in-repo lognormal fit was retired with the old volley fit, and the volley
+# model deliberately does not cover localization (its own §1.3 — one call is one volley).
+# Its §2.3 measures ~3.2 Hz between volleys but labels that an UPPER BOUND, contaminated
+# by imperfectly-separated neighbours, so it is not used. When a fitted localization model
+# lands, it replaces this ladder the same way volley_model.py replaced the volley fit.
 LOC_SYNTH_RATES_HZ = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
 LOC_SYNTH_CV = 0.3
 LOC_MAX_IPI_S = 1.15
 
-# Volley amplitude decay (a per-pulse *relative* voltage envelope, distinct from the
-# excluded distance-confounded recorded amplitude). A synthetic volley starts at full
-# amplitude and gently winds DOWN to VOLLEY_DECAY_FLOOR of max over its course, mimicking
-# the physiological voltage decay of a real discharge. The decay BEGINS at a random point
-# within the first VOLLEY_DECAY_START_MAX_FRAC of the volley (so a volley always STARTS
-# strong) and reaches the floor at the last pulse. The floor stays well above the
-# localization level (a firmware 0.5x scale), so a volley is never mistaken for
-# localization — that separation is the point of the 0.8 floor.
-VOLLEY_DECAY_FLOOR = 0.8
-VOLLEY_DECAY_START_MAX_FRAC = 1.0 / 3.0
+# Where localization sits relative to a volley, as a fraction. Read from the SD-path
+# levels because those are the pair the codegen renders into Python; the RC path
+# expresses the same decision as VOLLEY_AMP_RATIO in stim_levels.h. Used only to
+# ANNOTATE how deep a volley's amplitude envelope runs — nothing here clamps to it.
+LOC_LEVEL_FRAC = K.LOC_AMPLITUDE / K.VOLLEY_AMPLITUDE
+
+# N_SYNTH_VOLLEYS volleys will not fit on a readable page; the gallery shows this many,
+# evenly spaced through the duration-sorted population.
+GALLERY_MAX_VOLLEYS = 24
 
 
 # ==========================================================================
@@ -411,164 +458,6 @@ def plot_real_amplitude_over_time(pop: list[RealVolley], out: Path) -> None:
 
 
 # ==========================================================================
-# The generative model
-# ==========================================================================
-
-
-@dataclass
-class VolleyModel:
-    """Rough generative model of eel volley + localization discharge.
-
-    Volley instantaneous rate decays from a peak toward a tail rate as
-    ``rate(t) = (rate_peak - rate_end) * exp(-t / tau_s) + rate_end`` (an
-    inverted, left-leaning gamma in rate). ``rate_peak`` and ``tau_s`` are
-    genuinely fit from the real fragments (robust loss, all points). ``rate_end``
-    is NOT identifiable from the data (all real fragments are t<0.8 s where the
-    rate is still ~68 Hz) — it is a **biological prior** for the volley-tail rate
-    before the discharge blends into localization, and is *sampled per volley*
-    from ``[rate_end_lo_hz, rate_end_hi_hz]`` at synthesis so the population
-    reflects that uncertainty rather than freezing one value.
-
-    Between-volley variability: each synthetic volley draws its own ``rate_peak``
-    (lognormal from the real single-fish SUSTAINED peak distribution — see
-    ``sustained_peak_hz``, applied with no inflation factor and capped to the
-    ``SYNTH_PEAK_SUSTAINED_*`` band) and ``tau`` (around the fitted value). Real volleys
-    peaking above ``VOLLEY_MULTIFISH_PEAK_HZ`` are two fish volleying at once (rates add)
-    and are excluded — a single eel does not discharge at >400 Hz.
-
-    Every synthetic volley starts already-strong (the onset voltage ramp and
-    localization prelude are deliberately not synthesised — see the module docstring)
-    and gently winds its per-pulse amplitude down to ``VOLLEY_DECAY_FLOOR`` over its
-    course. The absolute output level and the localization↔volley contrast remain
-    firmware global scales, not data.
-    """
-
-    # volley rate decay — nominal curve (rate_peak/tau fit; rate_end a prior)
-    rate_peak_hz: float
-    rate_end_hz: float  # PRIOR (not fit); sampled per volley at synthesis
-    tau_s: float
-    ipi_jitter_cv: float  # multiplicative lognormal jitter on each IPI
-
-    # between-volley variability, on the SUSTAINED peak (see sustained_peak_hz). These
-    # are the rate the volley HOLDS at onset, in Hz — not 1/min(IPI), and not deflated.
-    peak_log_mu: float = 0.0
-    peak_log_sigma: float = 0.0
-    peak_lo_hz: float = 300.0  # sustained rate_peak floor
-    peak_hi_hz: float = 381.0  # sustained rate_peak cap (one EOD per IPI; see module top)
-    tau_lo_s: float = 0.2
-    tau_hi_s: float = 0.6
-    # the volley-tail rate the decay approaches (a biological PRIOR, not fit — all real
-    # fragments are t<0.8 s where the rate is still high); sampled per volley at synthesis.
-    rate_end_lo_hz: float = 12.0
-    rate_end_hi_hz: float = 60.0
-
-    # playback safety
-    min_ipi_ms: float = 2.5  # hard floor: no IPI below this (2.5 ms == 400 Hz ceiling)
-
-    # resting localization (fit, lognormal on IPI ms)
-    loc_log_mu: float = 0.0
-    loc_log_sigma: float = 0.0
-    loc_median_hz: float = 0.0
-
-    def rate_at(
-        self, t: np.ndarray, rate_peak=None, rate_end=None, tau=None
-    ) -> np.ndarray:
-        rp = self.rate_peak_hz if rate_peak is None else rate_peak
-        re = self.rate_end_hz if rate_end is None else rate_end
-        ta = self.tau_s if tau is None else tau
-        return (rp - re) * np.exp(-t / ta) + re
-
-
-def fit_volley_params(pop: list[RealVolley]) -> dict:
-    """Fit the volley-side model parameters from the real population alone.
-
-    Split out from :func:`fit_model` so it can be re-run from the cached population
-    (``data/real_volley_population.npz``) without the source recordings or the
-    unshipped candidates file — see the ``refit-peaks`` command. The localization
-    parameters are the only ones that need anything beyond this cache.
-
-    Uses a robust (soft-L1) loss on ALL clean+artifact points rather than
-    one-sided deletion of high-IPI outliers, so missed-pulse spikes are
-    down-weighted symmetrically instead of truncating the upper tail (which
-    biased ``rate_peak`` upward ~4%). ``rate_end`` is fixed to a nominal prior for
-    the display curve; the sampled range is what synthesis uses.
-    """
-    from scipy.optimize import curve_fit
-
-    ts, rates, cvs, peaks = [], [], [], []
-    for v in pop:
-        if v.ipi_ms.size < 5:
-            continue
-        tmid = 0.5 * (v.t[1:] + v.t[:-1])
-        ts.append(tmid)
-        rates.append(1000.0 / v.ipi_ms)
-        trend = ex._moving_median(v.ipi_ms, max(3, (v.ipi_ms.size // 6) | 1))
-        good = ~flag_missed_pulses(v.ipi_ms)
-        cvs.append(np.std((v.ipi_ms[good] - trend[good]) / trend[good]))
-        # The SUSTAINED peak, not the stored 1/min(IPI) — see sustained_peak_hz().
-        peaks.append(sustained_peak_hz(v.ipi_ms))
-    ts = np.concatenate(ts)
-    rates = np.concatenate(rates)
-    peaks = np.asarray(peaks, dtype=float)
-
-    def _decay(t, rp, tau):
-        return (rp - RATE_END_NOMINAL) * np.exp(-t / tau) + RATE_END_NOMINAL
-
-    RATE_END_NOMINAL = 20.0  # display-curve prior; synthesis samples [lo, hi]
-    (rp, tau), _ = curve_fit(
-        _decay,
-        ts,
-        rates,
-        p0=[370, 0.4],
-        bounds=([100, 0.05], [900, 3.0]),
-        loss="soft_l1",
-        f_scale=50.0,
-        maxfev=40000,
-    )
-    # `peaks` are the real single-fish SUSTAINED peaks (_good_volleys already dropped
-    # multi-fish >450 Hz and late-peak fragments). No inflation factor is applied: the
-    # sampled rate_peak IS a sustained rate (the generator's instantaneous rate at t=0),
-    # so it is the same quantity, measured the same way, on both sides. Clipping into the
-    # band BEFORE taking the log keeps the weak partial fragments in the fit as band-edge
-    # mass instead of dragging the mean down to a rate no real volley sustains.
-    peak_lo = SYNTH_PEAK_SUSTAINED_LO_HZ
-    peak_hi = SYNTH_PEAK_SUSTAINED_HI_HZ
-    log_pk = np.log(np.clip(peaks, peak_lo, peak_hi))
-    return {
-        "rate_peak_hz": float(rp),
-        "rate_end_hz": RATE_END_NOMINAL,
-        "tau_s": float(tau),
-        "ipi_jitter_cv": float(np.clip(np.median(cvs), 0.05, 0.5)),
-        "peak_log_mu": float(np.mean(log_pk)),
-        "peak_log_sigma": float(np.std(log_pk)),
-        "peak_lo_hz": float(peak_lo),
-        "peak_hi_hz": float(peak_hi),
-        "min_ipi_ms": SYNTH_MIN_IPI_MS,
-        "tau_lo_s": float(tau * 0.6),
-        "tau_hi_s": float(tau * 1.7),
-    }
-
-
-def fit_model(pop: list[RealVolley], loc_ipi_ms: np.ndarray) -> VolleyModel:
-    """Fit the full model: the volley-side parameters plus the localization ones."""
-    log_ipi = np.log(loc_ipi_ms)
-    return VolleyModel(
-        **fit_volley_params(pop),
-        loc_log_mu=float(np.mean(log_ipi)),
-        loc_log_sigma=float(np.std(log_ipi)),
-        loc_median_hz=float(1000.0 / np.exp(np.median(log_ipi))),
-    )
-
-
-def save_model(m: VolleyModel, path: Path) -> None:
-    path.write_text(json.dumps(asdict(m), indent=2))
-
-
-def load_model(path: Path) -> VolleyModel:
-    return VolleyModel(**json.loads(Path(path).read_text()))
-
-
-# ==========================================================================
 # Synthesis
 # ==========================================================================
 
@@ -590,93 +479,120 @@ def _lognormal_ipi(rate_hz: float, cv: float, rng, floor_ms: float = 1.6) -> flo
     return float(max(np.exp(rng.normal(mu, sigma)), floor_ms / 1000.0))
 
 
-def _volley_decay_envelope(times_s: np.ndarray, rng) -> np.ndarray:
-    """A per-pulse volley amplitude envelope: full-scale until a random onset within the
-    first ``VOLLEY_DECAY_START_MAX_FRAC`` of the volley, then a linear decay reaching
-    ``VOLLEY_DECAY_FLOOR`` at the last pulse. Always starts strong; the floor stays above
-    the localization level so the volley reads as a distinct, higher-voltage discharge."""
-    n = times_s.size
-    total = float(times_s[-1]) if n else 0.0
-    if n < 2 or total <= 0.0:
-        return np.ones(n)
-    t_start = float(rng.uniform(0.0, VOLLEY_DECAY_START_MAX_FRAC * total))
-    frac = np.clip((times_s - t_start) / (total - t_start), 0.0, 1.0)
-    return 1.0 + (VOLLEY_DECAY_FLOOR - 1.0) * frac
+def _load_volley_model():
+    """The vendored sampler, bound to the vendored parameters.
 
-
-def generate_volley(
-    model: VolleyModel, body_duration_s: float, rng, label: str
-) -> SyntheticVolley:
-    """One synthetic volley — a high-rate discharge that starts strong then gently decays.
-
-    There is no localization prelude and no onset voltage ramp: for hand-timed dynamic
-    playback the user supplies the localization lead-in live, so a synthetic volley is
-    *just the volley*, firing at full amplitude from its first pulse (this also matches
-    the real tracker fragments, which start already-strong). The instantaneous *rate*
-    decays from ``rate_peak`` toward ``rate_end`` with time constant ``tau`` (all sampled
-    per volley), and a gentle per-pulse amplitude envelope winds the voltage down from
-    full to ``VOLLEY_DECAY_FLOOR`` over the volley (starting at a random point in its first
-    third — see ``_volley_decay_envelope``).
+    Deferred import so that a toolchain command which never synthesises (``render``,
+    ``build-card``) does not pay for it, and so the vendored module stays a leaf: it
+    imports numpy and the standard library only, and nothing in fakefish imports *it*
+    except here.
     """
-    floor = model.min_ipi_ms
-    # per-volley decay parameters (between-volley variability)
-    rate_peak = float(
-        np.clip(
-            np.exp(rng.normal(model.peak_log_mu, model.peak_log_sigma)),
-            model.peak_lo_hz,
-            model.peak_hi_hz,
-        )
-    )
-    tau = float(rng.uniform(model.tau_lo_s, model.tau_hi_s))
-    rate_end = float(rng.uniform(model.rate_end_lo_hz, model.rate_end_hi_hz))
+    from fakefish.volley_model import VolleyModel
 
-    times: list[float] = []
-    t = 0.0
-    while t < body_duration_s:
-        rate = float(
-            model.rate_at(
-                np.array([t]), rate_peak=rate_peak, rate_end=rate_end, tau=tau
-            )[0]
-        )
-        if times:
-            t += _lognormal_ipi(rate, model.ipi_jitter_cv, rng, floor)
-        if t >= body_duration_s:
-            break
-        times.append(t)
+    return VolleyModel.from_json(VOLLEY_MODEL_JSON)
 
-    times = np.asarray(times) - times[0]
+
+def _snap_to_grid(times_s: np.ndarray, hz: int, min_samp: int) -> np.ndarray:
+    """Quantise pulse times onto the playback sample grid, enforcing a minimum IPI.
+
+    Two jobs, both load-bearing, and they have to happen together:
+
+    * **Quantise.** The device can only place an onset on a sample boundary, and the
+      export rounds to samples anyway (``ipi_samples_from_times``). Doing it here instead
+      means the population we QC is bit-for-bit the population the device plays, rather
+      than a float idealisation of it that rounds differently.
+    * **Enforce the floor.** Each pulse is pushed to at least ``min_samp`` after its
+      predecessor — and no further. Later pulses keep their own drawn times wherever those
+      already clear the floor, so the train RE-SYNCS after a violation instead of
+      accumulating a shift. Measured over the population this leaves total duration
+      unchanged to 3 decimal places; a naive "add the deficit to everything downstream"
+      clamp would stretch the volley and slow its tail.
+
+    Returns integer sample offsets from the first pulse, as float seconds.
+    """
+    samp = np.round(np.asarray(times_s, float) * hz).astype(np.int64)
+    samp -= samp[0]
+    for i in range(1, samp.size):
+        if samp[i] - samp[i - 1] < min_samp:
+            samp[i] = samp[i - 1] + min_samp
+    return samp / float(hz)
+
+
+def generate_volley(model, rng, label: str, hz: int = ex.PLAYBACK_RATE_HZ) -> SyntheticVolley:
+    """One synthetic volley, drawn from the vendored model and made playable.
+
+    The model supplies the whole event series — pulse times and per-pulse relative
+    amplitude — from a joint draw of ``(r_start, duration, lambda)`` plus a per-volley
+    CV2 and amplitude trend. Nothing about the volley's shape is decided here.
+
+    Two transforms turn that event series into something the firmware can emit, and
+    both are lossy in a direction the spec explicitly permits:
+
+    * **the sample grid + IPI floor** — see :func:`_snap_to_grid`.
+    * **amplitude normalisation to the volley's own peak.** The model's amplitude is
+      relative to the volley's MEDIAN pulse, so it runs above 1.0 near onset (median
+      max 1.16, 95th percentile 1.78) while firmware ``rel_amp`` encodes 0..1 in a
+      byte. Dividing by the per-volley max preserves the measured envelope SHAPE
+      exactly and discards only the absolute level — which the spec (§5) is explicit
+      is not a trustworthy measurement anyway, and belongs to the amplitude knob.
+
+    What it does NOT do is impose a floor on the envelope. The trend is drawn per volley
+    from its measured ECDF, whose tail is long: the quietest pulse reaches ~0.39 of the
+    volley's own peak at the 5th percentile, and the deepest single draw in the shipped
+    population fades to **0.08**. 3 % of volleys end below the localization level. That is
+    the measurement, and a volley is identified by its RATE, not its level — a 300 Hz train
+    at 0.4 amplitude is not mistakable for a 5 Hz localization train. (The retired
+    ``VOLLEY_DECAY_FLOOR = 0.8`` would have clipped 64 % of volleys. The loc-vs-volley
+    separation it was protecting is now a firmware level instead: localization is
+    volley / ``volley_amp_ratio``, and that ratio moved 2 -> 4.)
+
+    One caveat travels with that tail, from spec §1.4: recorded amplitude is source
+    amplitude x distance attenuation, and a striking fish moves. A volley that fades to 8 %
+    is far more likely a fish swimming away from the electrode than an organ winding down.
+    Those draws are kept because the spec draws ``trend`` per volley from the ECDF rather
+    than fixing it, and truncating a fitted tail by eye is how a model stops being one —
+    but see TODO.md if the near-silent tail turns out to matter in the water.
+    """
+    times, amp = model.sample_volley(rng, VOLLEY_KIND)
+    times = _snap_to_grid(times, hz, SYNTH_MIN_IPI_SAMP)
     return SyntheticVolley(
         kind="volley",
         label=label,
         times_s=times,
-        rel_amp=_volley_decay_envelope(times, rng),
-        body_duration_s=body_duration_s,
+        rel_amp=np.asarray(amp, float) / float(np.max(amp)),
+        body_duration_s=float(times[-1]),
     )
 
 
 def generate_localization(
-    model: VolleyModel,
     duration_s: float,
     rng,
     label: str,
-    rate_hz: float | None = None,
+    rate_hz: float,
     cv: float = LOC_SYNTH_CV,
 ) -> SyntheticVolley:
     """A standalone localization train at a fixed target average ``rate_hz`` (Hz).
 
     IPIs are lognormally jittered around ``1/rate_hz`` (``cv``) and clamped under
-    ``LOC_MAX_IPI_S`` so a low-rate (1 Hz) train neither overflows the uint16 sample-
-    IPI nor gets fragmented by the gap-free trim. If ``rate_hz`` is None, the fitted
-    resting distribution is used instead (the wide real-localization lognormal).
+    ``LOC_MAX_IPI_S`` so a low-rate (1 Hz) train neither overflows the uint16
+    sample-IPI nor gets fragmented by the gap-free trim.
+
+    ``rate_hz`` is now REQUIRED. It used to be optional, falling back to a fitted
+    resting lognormal; that fit is retired (see ``LOC_SYNTH_RATES_HZ``), and a
+    silent fallback to a distribution that no longer exists is worse than an
+    argument error.
     """
     times, t = [], 0.0
     while t < duration_s:
         times.append(t)
-        if rate_hz is not None:
-            ipi = _lognormal_ipi(rate_hz, cv, rng, model.min_ipi_ms)
-        else:
-            ipi = float(np.exp(rng.normal(model.loc_log_mu, model.loc_log_sigma)) / 1000.0)
-        t += min(ipi, LOC_MAX_IPI_S)
+        t += min(_lognormal_ipi(rate_hz, cv, rng, SYNTH_MIN_IPI_MS), LOC_MAX_IPI_S)
+    # NOT snapped to the sample grid, unlike a volley. The snap is there to make the IPI
+    # FLOOR exact, and localization runs two orders of magnitude away from it — so here it
+    # would only re-round already-rounded numbers, moving every train by up to one sample
+    # (20 us). That costs something real: the six localization items come out
+    # BYTE-IDENTICAL across a volley-model change, which is what makes such a change
+    # reviewable — any localization row that moves in the export diff is a genuine
+    # regression rather than noise. Keeping them still is worth more than uniformity.
     times = np.asarray(times)
     return SyntheticVolley(
         kind="localization",
@@ -687,9 +603,27 @@ def generate_localization(
     )
 
 
-def build_population(model: VolleyModel, seed: int = 0) -> list[SyntheticVolley]:
-    """A population of synthetic volleys (varied body lengths, all starting
-    already-strong) + localization trains. Labels carry the played duration."""
+def build_population(model, seed: int = 0) -> list[SyntheticVolley]:
+    """``N_SYNTH_VOLLEYS`` volleys drawn from the model, plus the localization trains.
+
+    **There is no duration ladder any more.** The old one (log-spaced 0.1-4 s, 3 reps
+    each) existed because the only volleys this repo could see were tracker *fragments*,
+    whose durations measured the segmentation rather than the animal — so duration had to
+    be a design choice. The vendored model fits duration jointly with start rate and decay
+    on whole volleys, and its own §3 works through the truncation question, so duration is
+    now drawn like everything else and the correlations survive: a volley that is both
+    fast and long is not the same object as either alone.
+
+    The pool is large (see ``N_SYNTH_VOLLEYS``) precisely because the RC device draws from
+    it uniformly. With 21 items a uniform draw was a lumpy stand-in for the fitted
+    distribution; with 100 it is a good one, and flash is nearly free.
+
+    One thing the fitted range does NOT cover: the model tops out around 2.3 s, but a
+    volley in the field runs much longer. That is a blind spot of the source analysis, not
+    biology — a 25 s analysis window cannot contain a 20 s volley without right-censoring
+    it, and censored bursts were dropped rather than fitted. It is left as a known gap
+    here rather than papered over by extrapolation; see TODO.md.
+    """
     # INDEPENDENT RNG STREAMS for the two families. They used to share one generator, so
     # the localization trains consumed whatever draws were left after the volleys — and any
     # change to the volley model (which changes how many draws a volley takes) silently
@@ -697,37 +631,18 @@ def build_population(model: VolleyModel, seed: int = 0) -> list[SyntheticVolley]
     # moved. Separate streams keep a volley-side change confined to the volleys.
     rng_vol = np.random.default_rng(seed)
     rng_loc = np.random.default_rng(seed + 1_000_000)
-    # Body lengths span 0.1 s to 4 s, LOG-SPACED (each step ~1.85x the last).
-    #
-    # The range comes from the owner's field observation, not from the recorded population:
-    # real volleys run from short bursts up to ~20 s, and the volleys in
-    # real_volley_population.npz (median 0.20 s) are TRACKER FRAGMENTS — truncated, and
-    # biased short because genuinely long volleys are rare. So their duration distribution
-    # is evidence about the tracker, not about the animal, and must not set this ladder.
-    # (Their RATE is trustworthy and does set the peak — see sustained_peak_hz.)
-    #
-    # Log spacing, not linear: the range spans 40x, so linear steps would spend almost every
-    # item on the long end. Log steps give equal resolution per octave, which also keeps the
-    # rare long volleys from crowding out the short strong bursts that dominate in nature.
-    #
-    # The short end is deliberately BELOW one tau (~0.31 s): a 0.1 s body is cut off after
-    # ~0.3 tau, so its rate barely decays and it plays as a short burst held near peak. That
-    # used to be excluded as "truncated" (the ladder started at 0.6 s), but a brief
-    # full-rate burst is a real and common discharge, and it is the strong-event end of the
-    # range the experiment cares about.
-    body_lengths = [0.1, 0.2, 0.35, 0.65, 1.2, 2.2, 4.0]
     out: list[SyntheticVolley] = []
-    for L in body_lengths:
-        for rep in range(3):
-            v = generate_volley(model, L, rng_vol, "")
-            # 2 dp on the body length: the log-spaced ladder has 0.35 s and 0.65 s steps,
-            # which 1 dp would round to "0.3"/"0.7" and misreport in the provenance.
-            v.label = f"synth_volley_body{L:.2f}s_tot{v.times_s[-1]:.2f}s_{rep}"
-            out.append(v)
+    for i in range(N_SYNTH_VOLLEYS):
+        v = generate_volley(model, rng_vol, "")
+        # The label carries what the draw produced, not what was asked for — there is no
+        # requested duration any more. 2 dp: the population spans 0.15-2.3 s, where 1 dp
+        # would collapse the short end into three distinct values.
+        v.label = f"synth_volley_{i:03d}_dur{v.times_s[-1]:.2f}s_n{v.times_s.size}"
+        out.append(v)
     # a set of localization trains spanning the resting/exploring rate range (1-10 Hz),
     # one per target average rate.
     for r in LOC_SYNTH_RATES_HZ:
-        out.append(generate_localization(model, 60.0, rng_loc, f"synth_loc_{r:g}hz", rate_hz=r))
+        out.append(generate_localization(60.0, rng_loc, f"synth_loc_{r:g}hz", rate_hz=r))
     return out
 
 
@@ -788,104 +703,22 @@ def load_synthetic(path: Path) -> list[SyntheticVolley]:
 
 
 # ==========================================================================
-# Localization extraction + comparison figures
+# Comparison figures
 # ==========================================================================
 
 
-def extract_localization_ipi(cfg: ex.Config, candidates: Path) -> np.ndarray:
-    from collections import defaultdict
-
-    d = json.loads(Path(candidates).read_text())
-    loc = [s for s in d if s["kind"] == "localization" and s["single_fish"]]
-    by_rec = defaultdict(list)
-    for s in loc:
-        by_rec[(s["site"], s["recording"])].append(s)
-    ipis = []
-    for (site, rec_id), scenes in by_rec.items():
-        h5 = next((cfg.eods_root / site).glob(f"{rec_id}*.h5"))
-        rec = ex.open_recording(h5, site, cfg.original_hz_fallback)
-        try:
-            for s in scenes:
-                tt = np.sort(rec.times_s[np.asarray(s["rows"])])
-                ipis.append(np.diff(tt) * 1e3)
-        finally:
-            rec.close()
-    return np.concatenate(ipis)
-
-
-def plot_model_fit(pop: list[RealVolley], model: VolleyModel, out: Path) -> None:
-    fig, axes = full_page(height_cm=7.0, nrows=1, ncols=2)
-    ax = axes[0]
-    for v in pop:
-        if v.ipi_ms.size < 5:
-            continue
-        tmid = 0.5 * (v.t[1:] + v.t[:-1])
-        missed = flag_missed_pulses(v.ipi_ms)
-        ax.scatter(tmid[~missed], 1000 / v.ipi_ms[~missed], s=3, color="0.6", alpha=0.4)
-        ax.scatter(
-            tmid[missed],
-            1000 / v.ipi_ms[missed],
-            s=8,
-            color=CATEGORICAL[1],
-            marker="x",
-            alpha=0.6,
-        )
-    tt = np.linspace(0, 1.2, 200)
-    ax.plot(
-        tt,
-        model.rate_at(tt),
-        color=CATEGORICAL[0],
-        lw=2,
-        label=f"model: peak {model.rate_peak_hz:.0f} Hz, τ={model.tau_s:.2f}s (fit); "
-        f"tail {model.rate_end_lo_hz:.0f}–{model.rate_end_hi_hz:.0f} Hz (prior)",
-    )
-    ax.axvline(0.8, color="0.4", ls=":", lw=1, label="real-data support limit (~0.8 s)")
-    ax.axhline(
-        model.loc_median_hz,
-        color=CATEGORICAL[2],
-        ls="--",
-        lw=1,
-        label=f"localization median {model.loc_median_hz:.0f} Hz",
-    )
-    ax.set_xlabel("time from volley onset (s)")
-    ax.set_ylabel("instantaneous rate (Hz)")
-    ax.legend(fontsize=7)
-    ax.set_title(
-        "Volley rate decay (grey real · ✕ missed-pulse · line model)", fontsize=8
-    )
-
-    ax = axes[1]
-    li = extract_localization_ipi(
-        ex.Config.from_yaml(_res.DEFAULT_CONFIG),
-        str(_res.data_file("stimuli_candidates.json")),
-    )
-    ax.hist(
-        li,
-        bins=np.logspace(np.log10(20), np.log10(2000), 40),
-        color=CATEGORICAL[2],
-        alpha=0.7,
-    )
-    ax.axvline(
-        np.exp(model.loc_log_mu),
-        color="k",
-        lw=1,
-        label=f"median {model.loc_median_hz:.0f} Hz",
-    )
-    ax.set_xscale("log")
-    ax.set_xlabel("localization IPI (ms)")
-    ax.set_ylabel("count")
-    ax.legend(fontsize=7)
-    ax.set_title("Resting localization IPI (lognormal)", fontsize=8)
-    fig.suptitle("Volley + localization model fit")
-    fig.savefig(out)
-    plt.close(fig)
-    log.info("wrote %s", out)
-
-
 def plot_synthetic_gallery(synth: list[SyntheticVolley], out: Path) -> None:
-    """Grid of every synthetic volley's per-pulse relative amplitude (blue — starts full,
-    decays to VOLLEY_DECAY_FLOOR) with the instantaneous rate (red) over time."""
-    vol = [s for s in synth if s.kind == "volley"]
+    """Grid of synthetic volleys: per-pulse relative amplitude (blue) + instantaneous
+    rate (red) over time.
+
+    The population is ``N_SYNTH_VOLLEYS`` strong, which is far too many to read on one
+    page, so the gallery shows an evenly-spaced slice through it ORDERED BY DURATION —
+    which, because duration is drawn jointly with rate and decay, is also a slice
+    through the shape of the population rather than an arbitrary subset."""
+    vol = sorted((s for s in synth if s.kind == "volley"), key=lambda v: v.times_s[-1])
+    if len(vol) > GALLERY_MAX_VOLLEYS:
+        idx = np.round(np.linspace(0, len(vol) - 1, GALLERY_MAX_VOLLEYS)).astype(int)
+        vol = [vol[i] for i in idx]
     ncol = 3
     nrow = int(np.ceil(len(vol) / ncol))
     fig, axes = full_page(
@@ -910,7 +743,8 @@ def plot_synthetic_gallery(synth: list[SyntheticVolley], out: Path) -> None:
     for j in range(len(vol), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
     fig.suptitle(
-        "Synthetic volleys — relative amplitude (blue) + instantaneous rate (red) over time"
+        f"{len(vol)} of {sum(s.kind == 'volley' for s in synth)} synthetic volleys, "
+        "by duration · amplitude (blue), rate (red)"
     )
     fig.supxlabel("time (s)", fontsize=8)
     fig.supylabel("relative amplitude", fontsize=8)
@@ -922,7 +756,6 @@ def plot_synthetic_gallery(synth: list[SyntheticVolley], out: Path) -> None:
 def plot_comparison(
     real: list[RealVolley],
     synth: list[SyntheticVolley],
-    model: VolleyModel,
     cfg: ex.Config,
     out: Path,
 ) -> None:
@@ -946,12 +779,13 @@ def plot_comparison(
         ax.scatter(
             tmid, 1000 / (np.diff(tb) * 1e3), s=2, color=CATEGORICAL[1], alpha=0.3
         )
-    tt = np.linspace(0, 2.0, 300)
-    ax.plot(tt, model.rate_at(tt), color=CATEGORICAL[0], lw=2)
+    # No model curve to overlay: the fitted decay lives in the volley's OWN fractional
+    # time (r(f) = r_start·exp(-λf)), so it has no single absolute-time trace. The
+    # population of red points IS the model, drawn.
     ax.set_xlim(0, 1.2)
     ax.set_xlabel("time from volley onset (s)")
     ax.set_ylabel("rate (Hz)")
-    ax.set_title("A · rate decay (grey real · red synth · line model)", fontsize=8)
+    ax.set_title("A · rate decay · grey real, red synthetic", fontsize=8)
 
     # B: body IPI histograms
     ax = axes[0, 1]
@@ -987,12 +821,15 @@ def plot_comparison(
         label=f"real max {np.max(real_ipi):.0f} ms",
     )
     ax.set_xscale("log")
+    # Explicit decade-ish ticks: matplotlib's default log minor labels collide into an
+    # unreadable smear at this width.
+    ax.set_xticks([2, 3, 5, 10, 20, 40, 80])
+    ax.set_xticklabels(["2", "3", "5", "10", "20", "40", "80"])
+    ax.minorticks_off()
     ax.set_xlabel("volley-body IPI (ms)")
     ax.set_ylabel("density")
     ax.legend(fontsize=6)
-    ax.set_title(
-        "B · volley IPI (synth tail > real max = model extrapolation)", fontsize=8
-    )
+    ax.set_title("B · volley IPI · spike at 2 ms = the floor", fontsize=8)
 
     # C: duration distribution
     ax = axes[1, 0]
@@ -1016,7 +853,7 @@ def plot_comparison(
     ax.set_xlabel("total duration (s)")
     ax.set_ylabel("count")
     ax.legend(fontsize=7)
-    ax.set_title("C · duration (synth extends past fragments)", fontsize=8)
+    ax.set_title("C · duration · synth = whole volleys, real = fragments", fontsize=8)
 
     # D: amplitude — real recorded (distance-confounded) vs the synthetic physiological
     # voltage envelope (full -> VOLLEY_DECAY_FLOOR). The grey real curves are recorded
@@ -1029,14 +866,15 @@ def plot_comparison(
     for v in synth_vol:
         tn = v.times_s / max(v.times_s[-1], 1e-9)
         ax.plot(tn, v.rel_amp, color=CATEGORICAL[1], lw=0.6, alpha=0.5)
-    ax.axhline(VOLLEY_DECAY_FLOOR, color="0.4", ls=":", lw=0.8)
+    ax.axhline(
+        LOC_LEVEL_FRAC, color="0.4", ls=":", lw=0.8,
+        label=f"localization level ({LOC_LEVEL_FRAC:.2f} x volley)",
+    )
+    ax.legend(fontsize=6, loc="lower left")
     ax.set_ylim(0, 1.12)
     ax.set_xlabel("normalised time")
     ax.set_ylabel("relative amplitude")
-    ax.set_title(
-        "D · amplitude (grey real = recorded/distance · red synth = physiological decay)",
-        fontsize=8,
-    )
+    ax.set_title("D · amplitude · grey recorded, red fitted envelope", fontsize=8)
 
     # a long synthetic volley to display as the played trace
     ex_vol = max(synth_vol, key=lambda v: v.times_s[-1])
@@ -1091,63 +929,31 @@ def analyze(
     config: Path = typer.Option(_res.DEFAULT_CONFIG, "--config", "-c"),
     verbose: int = typer.Option(2, "--verbose", "-v", count=True),
 ) -> None:
-    """Extract the real volley population, plot it, and fit the generative model."""
+    """Re-extract the real volley population used as an independent QC cross-check.
+
+    **This no longer fits anything.** The generative model is fitted upstream in
+    eeltracker and vendored in (see the module docstring); all this does is refresh
+    ``data/real_volley_population.npz``, the 41 single-fish volleys that ``compare``
+    plots the synthetic population against.
+
+    That population is a *different selection* from the model's — extracted by this
+    repo's own single-fish criteria, and consisting of tracker fragments rather than
+    whole volleys — which is exactly what makes it useful here: it catches a wiring
+    mistake between the model and the item table, not a modelling mistake.
+
+    Needs the source recordings and the `export` dependency group.
+    """
     configure_logging(verbose)
     cfg = ex.Config.from_yaml(config)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     pop = extract_population(cfg, str(_res.data_file("stimuli_candidates.json")))
     save_population(pop, POP_CACHE)
     plot_real_amplitude_over_time(pop, FIG_DIR / "real_volleys_amplitude.png")
-    loc_ipi = extract_localization_ipi(cfg, str(_res.data_file("stimuli_candidates.json")))
-    model = fit_model(pop, loc_ipi)
-    save_model(model, MODEL_JSON)
     log.info(
-        "model: peak=%.0fHz end=%.0fHz tau=%.2fs jitter_cv=%.2f loc_median=%.0fHz",
-        model.rate_peak_hz,
-        model.rate_end_hz,
-        model.tau_s,
-        model.ipi_jitter_cv,
-        model.loc_median_hz,
-    )
-    plot_model_fit(pop, model, FIG_DIR / "model_fit.png")
-
-
-@app.command("refit-peaks")
-def refit_peaks(
-    verbose: int = typer.Option(2, "--verbose", "-v", count=True),
-) -> None:
-    """Re-fit the VOLLEY-side model parameters from the cached real population.
-
-    Unlike ``analyze`` this needs **no source recordings** and no candidates file — it
-    reads ``data/real_volley_population.npz``, which is versioned. The localization
-    parameters are carried over from the existing model unchanged, because they are the
-    only ones that cannot be derived from that cache.
-
-    Use it after changing how the peak rate is measured (``sustained_peak_hz``) or the
-    ``SYNTH_PEAK_SUSTAINED_*`` band. Follow with ``synthesize`` and then
-    ``fakefish-export`` to carry the change into the firmware library.
-    """
-    configure_logging(verbose)
-    pop = load_population(POP_CACHE)
-    old = load_model(MODEL_JSON)
-    fitted = fit_volley_params(pop)
-    new = VolleyModel(
-        **fitted,
-        loc_log_mu=old.loc_log_mu,
-        loc_log_sigma=old.loc_log_sigma,
-        loc_median_hz=old.loc_median_hz,
-    )
-    save_model(new, MODEL_JSON)
-    log.info("re-fit from %d cached real volleys (localization params carried over)", len(pop))
-    for f in ("rate_peak_hz", "tau_s", "ipi_jitter_cv", "peak_log_mu",
-              "peak_log_sigma", "peak_lo_hz", "peak_hi_hz"):
-        o, n = getattr(old, f), getattr(new, f)
-        mark = "" if abs(n - o) < 1e-9 else "   <-- CHANGED"
-        log.info("  %-16s %10.4f -> %10.4f%s", f, o, n, mark)
-    log.info(
-        "sampled peak median %.1f Hz -> %.1f Hz",
-        float(np.exp(old.peak_log_mu)),
-        float(np.exp(new.peak_log_mu)),
+        "real population: %d volleys, sustained peak median %.0f Hz, duration median %.2f s",
+        len(pop),
+        float(np.median([sustained_peak_hz(v.ipi_ms) for v in pop])),
+        float(np.median([v.duration for v in pop])),
     )
 
 
@@ -1156,28 +962,65 @@ def synthesize(
     seed: int = typer.Option(0, "--seed"),
     verbose: int = typer.Option(2, "--verbose", "-v", count=True),
 ) -> None:
-    """Generate the synthetic volley + localization population from the fitted model."""
+    """Draw the synthetic volley + localization population from the vendored model."""
     configure_logging(verbose)
-    model = load_model(MODEL_JSON)
+    FIG_DIR.mkdir(parents=True, exist_ok=True)  # figs/ is gitignored, so it may not exist
+    model = _load_volley_model()
     pop = build_population(model, seed=seed)
-    save_synthetic(pop, SYNTH_NPZ, min_ipi_ms=model.min_ipi_ms)
-    nvol = sum(v.kind == "volley" for v in pop)
-    log.info("synthesised %d volleys + %d localization trains", nvol, len(pop) - nvol)
+    save_synthetic(pop, SYNTH_NPZ, min_ipi_ms=SYNTH_MIN_IPI_MS)
+    vols = [v for v in pop if v.kind == "volley"]
+    log.info(
+        "synthesised %d volleys + %d localization trains from %s",
+        len(vols),
+        len(pop) - len(vols),
+        VOLLEY_MODEL_JSON.name,
+    )
 
-    # playback-safety QC (validator asks): min IPI floor + per-volley net charge.
+    # ---- does the drawn population still look like the fitted one? -------------
+    # The transforms in generate_volley (sample grid, IPI floor, amplitude
+    # normalisation) are all meant to be nearly free. These are the numbers that say
+    # so — compare them against docs/VOLLEY_GENERATIVE_SPEC.md §2.1 and §4.
+    durs = np.array([v.times_s[-1] for v in vols])
+    npulse = np.array([v.times_s.size for v in vols])
+    peaks = np.array([sustained_peak_hz(np.diff(v.times_s) * 1e3) for v in vols])
+    for name, arr, unit in (
+        ("duration", durs, "s"),
+        ("pulses", npulse, ""),
+        ("sustained peak", peaks, "Hz"),
+    ):
+        q = np.percentile(arr, [25, 50, 75])
+        log.info("  %-15s %8.3f / %8.3f / %8.3f %s (quartiles)", name, *q, unit)
+
+    # ---- playback safety --------------------------------------------------------
     cfg = ex.Config.from_yaml(_res.DEFAULT_CONFIG)
     w = _eod_waveform(cfg)
-    vols = [v for v in pop if v.kind == "volley"]
     min_ipi = min(float(np.min(np.diff(v.times_s))) * 1e3 for v in vols)
     charges = [net_charge(v, w.net_integral) for v in vols]
+    # Overlap-clip is the reason SYNTH_MIN_IPI_SAMP exists: the overlap-add engine sums
+    # pulses that land within one EOD of each other, and a sum above full scale is
+    # saturated, not scaled. Reconstruct every volley and look at the peak.
     peak_sums = [
         float(_reconstruct_with_amp(w, *_synthetic_to_ipi_amp(v)).max()) for v in vols
     ]
+    worst = max(peak_sums)
     log.info(
-        "min IPI across population: %.2f ms (floor %.2f) — no overlap-clip: %s",
+        "min IPI across population: %.2f ms (floor %.2f) — overlap peak %.3f: %s",
         min_ipi,
-        model.min_ipi_ms,
-        "OK" if max(peak_sums) <= 1.001 else f"CLIP {max(peak_sums):.3f}",
+        SYNTH_MIN_IPI_MS,
+        worst,
+        "OK" if worst <= 1.001 else "CLIP",
+    )
+    # The envelope has no floor by design; report how far it actually reaches, against
+    # the firmware level that localization sits at.
+    quietest = np.array([float(v.rel_amp.min()) for v in vols])
+    loc_level = LOC_LEVEL_FRAC
+    log.info(
+        "quietest pulse per volley: median %.2f, 5th pct %.2f of the volley's own peak — "
+        "%.0f%% end below the localization level (%.2f x volley)",
+        float(np.median(quietest)),
+        float(np.percentile(quietest, 5)),
+        100.0 * float(np.mean(quietest < loc_level)),
+        loc_level,
     )
     log.info(
         "per-volley net charge (n-pulse, norm·samp): median %.0f max %.0f — "
@@ -1185,6 +1028,13 @@ def synthesize(
         "between-playback polarity flips",
         float(np.median(charges)),
         float(np.max(charges)),
+    )
+    # The library item index is an int8_t in the pulse log (PLOG_ABSENT_ITEM = -1), so the
+    # whole library must fit 128 items. Fail here, where it is cheap, rather than in the
+    # export or — worse — silently in a log column that wraps negative.
+    assert len(pop) <= 128, (
+        f"{len(pop)} synthetic items alone exceed the 128-item pulse-log ceiling "
+        f"(int8_t item field); see N_SYNTH_VOLLEYS"
     )
     plot_synthetic_gallery(pop, FIG_DIR / "synthetic_gallery.png")
 
@@ -1199,8 +1049,7 @@ def compare(
     cfg = ex.Config.from_yaml(config)
     real = load_population(POP_CACHE)
     synth = load_synthetic(SYNTH_NPZ)
-    model = load_model(MODEL_JSON)
-    plot_comparison(real, synth, model, cfg, FIG_DIR / "synthetic_vs_real.png")
+    plot_comparison(real, synth, cfg, FIG_DIR / "synthetic_vs_real.png")
 
 
 if __name__ == "__main__":

@@ -96,11 +96,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
 
    ```sh
    uv run --group export fakefish-export scan -c data/stimuli_config.yaml   # -> data/stimuli_candidates.json (gitignored)
-   uv run fakefish-synth-volleys refit-peaks                                 # model, from the CACHED population (no recordings)
    uv run fakefish-synth-volleys synthesize                                  # -> data/synthetic_population.npz (+ QC)
    uv run --group export fakefish-export export -c data/stimuli_config.yaml  # -> eel_stimuli.{h,cpp} + provenance
    bash firmware/sync_core.sh
    ```
+
+   `synthesize` needs **no recordings** — it draws from the vendored model (invariant 10), so
+   only `scan` and `export` need the dataset.
 
    **Without the `export` group the scan skipped every recording with a per-file WARNING and
    wrote an empty manifest, from which `export` would regenerate an EMPTY library over the
@@ -108,7 +110,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    do not weaken those guards. `scan` is deterministic (KMeans is seeded), so a re-run
    reproduces `data/multifish_volley_candidates.csv` byte-for-byte and re-selects the same 7
    real exemplars — **verify that after any re-export**: items 0–6 and `EOD_HV` must come back
-   byte-identical, and only the synthetic items (7–30) may move.
+   byte-identical, and only the synthetic **volleys** (7–106) may move. The 8 localization
+   items must come back byte-identical too — `build_population` draws volleys and localization
+   from decoupled RNG streams precisely so a volley-side change is reviewable, and
+   `generate_localization` deliberately does **not** snap to the sample grid (which would move
+   every train by up to one sample and destroy that property for nothing).
 4. **TWO MARKER CODES, deliberately not unified.** Both devices mark with **eel pulses** —
    nothing this project emits is out of band any more — but the *codes* differ.
    - **Button/SD:** **6 pulses at a fixed 10 Hz (IPI 5000 samples = 100 ms) with ALTERNATING
@@ -200,6 +206,41 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    Full rationale, the file format, and the log↔recording alignment procedure (including the
    clock-drift caveat) are in `firmware/README.md` → "Pulse logging".
 
+10. **The volley model is VENDORED, not fitted here — and the pool size is capped by the
+    pulse log, not by flash.** `src/fakefish/volley_model.py` and
+    `data/volley_model_params.json` are **byte-identical copies** from
+    `eeltracker/analyses/volley_dynamics/`, where the model was fitted to the 200 strongest
+    hunting volleys in the FLONA 2025 dataset and where `volley_validate.py` is its regression
+    test. `docs/VOLLEY_GENERATIVE_SPEC.md` is the shipped spec. **Never edit any of the three**
+    — a copy has no merge base, so an in-place edit is silently reverted by the next drop.
+    Change the model upstream and re-drop all three, updating `VENDORED_SHA256` in
+    `tests/test_volley_model.py` in the same commit; that test is what makes this a gate rather
+    than a comment.
+
+    `synthetic_volleys.py` owns only the wiring between the model's event series and the item
+    table, and three parts of it are load-bearing:
+
+    - **`SYNTH_MIN_IPI_SAMP = 100` (2.00 ms).** Set by the EOD's *energy width* (99 % of
+      `EOD_HV`'s energy is inside 1.92 ms), **not** its 2.62 ms length. Measured: a 2.0 ms floor
+      gives zero overlap-clip; unclamped, 3 % of volleys clip. It is also the source detector's
+      own resolution limit, so the model has no support below it. The retired 2.5 ms floor and
+      its matching 381 Hz "physics ceiling" cost 11 % of the sustained peak for nothing.
+    - **Per-volley amplitude normalisation.** The model's amplitude is relative to a volley's
+      *median* pulse and exceeds 1.0 at onset; `rel_amp` encodes 0..1 in a byte. Normalising to
+      the volley's own peak keeps the measured envelope shape and discards only the absolute
+      level — which the spec (§5) says is not a trustworthy measurement anyway. There is
+      deliberately **no floor** on the envelope; the loc-vs-volley separation is a firmware
+      level instead (`VOLLEY_AMP_RATIO` 4, i.e. localization at a quarter).
+    - **`N_SYNTH_VOLLEYS = 100` is bounded by `pulse_log.h`, not flash.** The log stores the
+      library item in an `int8_t` with `-1` as the absent sentinel, so the whole library must
+      stay under **128 items**; at 100 volleys the highest index is 112 and the packet is
+      37.4 kB of a 131 kB budget. Growing past 128 is a **log format change** (invariant 9) plus
+      its golden file — not a bump of this constant. `RC_VOLLEY_ITEM_COUNT` must track it.
+
+    Localization is **not** covered by this model (its §1.3: one call is one volley), and its
+    §2.3 between-volley rate is explicitly an upper bound. `LOC_SYNTH_RATES_HZ` is therefore a
+    designed ladder, marked in the source as the seam where a fitted localization model lands.
+
 ## Toolchain conventions
 
 - **Path resolution** goes through `src/fakefish/_resources.py`: it finds the repo root by
@@ -213,7 +254,8 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   module `:app` Typer entry point:
   - codegen (no dataset): `fakefish-gen-constants`
   - regeneration (**needs the source recordings + `--group export`**): `fakefish-export`,
-    `fakefish-synth-volleys` (except its `refit-peaks`, which runs off the cached population)
+    and `fakefish-synth-volleys analyze` (QC population only — `synthesize` and `compare` run
+    off the vendored model and the committed caches, no recordings)
   - reading a device's SD log (no dataset, no library): `fakefish-pulse-log`
   - against the committed library (no dataset): `fakefish-render`, `fakefish-build-card`,
     `fakefish-simulate`, `fakefish-gallery-volley`, `fakefish-gallery-localization`,

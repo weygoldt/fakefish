@@ -426,11 +426,11 @@ def build_card(out_dir: Path, firmware: Path, cfg: CardConfig) -> dict:
 
     # B: one localization WAV per loc item
     for i in loc_idx:
-        _emit("B", f"loc_{i:02d}.wav", render_localization(eod, items[i], int(gaps[i]), cfg.levels))
+        _emit("B", f"loc_{i:03d}.wav", render_localization(eod, items[i], int(gaps[i]), cfg.levels))
 
     # C: one volley WAV per volley item
     for i in vol_idx:
-        _emit("C", f"volley_{i:02d}.wav", render_volley(eod, items[i], int(gaps[i]), cfg.levels))
+        _emit("C", f"volley_{i:03d}.wav", render_volley(eod, items[i], int(gaps[i]), cfg.levels))
 
     # D: loc->volley sessions. Default (d_pairings=0) = EVERY loc x volley combination, so a
     # random pick spans the full pairing space; d_pairings>0 renders N rotated pairings.
@@ -439,8 +439,21 @@ def build_card(out_dir: Path, firmware: Path, cfg: CardConfig) -> dict:
                  for k in range(cfg.d_pairings)]
     else:
         pairs = [(li, vi) for li in loc_idx for vi in vol_idx]
+    # Program D is the only QUADRATIC part of the card, and the volley pool is now a
+    # sampling distribution rather than a hand-picked set (100 items, see
+    # synthetic_volleys.N_SYNTH_VOLLEYS), so the all-pairs default grew with it. Warn
+    # rather than silently cap: a random pick spanning the full pairing space is the
+    # point of the default, and `--d-pairings N` is there when the card is the constraint.
+    if len(pairs) > 400:
+        log.warning(
+            "program D renders %d WAVs (%d loc x %d volley, all pairs) — roughly %.1f GB. "
+            "Pass --d-pairings N for N rotated pairings instead; a random pick still spans "
+            "loc x volley, just not exhaustively.",
+            len(pairs), len(loc_idx), len(vol_idx),
+            len(pairs) * 6.5 * RATE_HZ * 2 / 1e9,
+        )
     for li, vi in pairs:
-        _emit("D", f"locvol_{vi:02d}_{li:02d}.wav",
+        _emit("D", f"locvol_{vi:03d}_{li:03d}.wav",
               render_loc_volley(eod, items[li], items[vi], int(gaps[li]), cfg.levels))
 
     # F: the song — a supplied WAV rendered to the card, or the synth fallback if absent.

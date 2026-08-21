@@ -174,84 +174,91 @@ Toolchain follow-up:
       It has a card mounted already. Not done now, on purpose — the button device's 36 V
       hardware does not exist yet (§1), so there is nothing to verify it on.
 
-## 6. Volley peak rate and duration — recalibrated 2026-08-21
+## 6. Volley model — replaced by a proper fit, 2026-08-21
 
-**The synthetic volleys were ~18 % too SLOW at their peak, not too fast.** Measured against
-the 41 real volleys in `data/real_volley_population.npz`:
+**The intermediate calibration this section used to describe is gone.** It rested on the 41
+volleys in `data/real_volley_population.npz` — tracker *fragments*, whose durations measured the
+segmentation rather than the animal — and it said explicitly that full-dataset statistics would
+supersede it. They have.
 
-| metric | real | synthetic (before) | synthetic (now) |
-|---|---|---|---|
-| median rate over the first 50 ms | 328.8 Hz | 268.5 Hz (0.82×) | **331.1 Hz (1.01×)** |
-| sustained peak (max of a 5-IPI rolling median) | 347.8 Hz | 283.3 Hz | — |
-| `1/min(IPI)` | 369.2 Hz | 365.0 Hz (1.0×) | — |
+The volley model is now **vendored**, not fitted here: `src/fakefish/volley_model.py` +
+`data/volley_model_params.json`, byte-identical copies from
+`eeltracker/analyses/volley_dynamics/`, where it was fitted to the **200 strongest hunting
+volleys** in the FLONA 2025 dataset (43 recordings, 16 sites) and validated by re-fitting
+synthetic draws with the same estimator. The spec ships as
+[`docs/VOLLEY_GENERATIVE_SPEC.md`](docs/VOLLEY_GENERATIVE_SPEC.md); CLAUDE.md invariant 10 is the
+rule that keeps the copies copies.
 
-**Root cause.** The calibration matched `1/min(IPI)`, which is an *extreme-value* statistic: its
-expected value grows with the number of intervals drawn. Simulated at the fitted jitter
-(CV 0.166) around a true 300 Hz, it reads 429 Hz over 37 intervals and 463 Hz over 125. Real
-volleys carry ~37, the synthetic ones ~125 — so matching on it compared unlike with unlike and
-forced the sustained rate down to compensate. The old code corrected with a single constant
-`PEAK_JITTER_INFLATION = 1.35`; the real population's raw/sustained ratio is **1.133**. The
-model's own decay fit already said `rate_peak_hz = 347.4`, agreeing with the sustained estimate
-to 0.1 % — the fit was right, only the *sampling* distribution was wrong.
+What changed in the library:
 
-The peak is now measured with `sustained_peak_hz()` on both sides, sampled with no inflation
-factor, and capped at **381 Hz** — a physical ceiling, not a taste one: `EOD_HV` is 2.62 ms, so
-a sustained rate above 1/2.62 ms means the mean IPI is shorter than one pulse. Exactly 1 of 41
-real volleys sustains above that. The synthesis QC still reports **no overlap-clip**, and only
-1.6 % of synthetic IPIs sit on the 2.5 ms floor — against 1.6 % of real IPIs that go below it.
+| | before | now |
+|---|---|---|
+| synthetic volleys | 21, from a designed 0.1–4 s duration ladder | **100**, each an independent draw from the fitted joint distribution |
+| duration (quartiles) | 0.20 / 0.65 / 2.18 s | **0.31 / 0.46 / 0.68 s** (real: 0.28 / 0.47 / 0.75) |
+| pulses | 64 / 89 / 189 | **58 / 90 / 121** (real: 58 / 88 / 142) |
+| rate texture | lognormal jitter, CV 0.166, around an exponential decay | rate **integrated** off `r_start·exp(-λf)` with per-volley CV2 from its ECDF + an OU wander |
+| amplitude | linear ramp to a 0.8 floor, onset at a random point in the first third | the **measured** envelope: ~22 % decay, per-volley trend from its ECDF, 1.4 % pulse jitter |
+| IPI floor | 2.5 ms (+ a 381 Hz "physics ceiling") | **2.00 ms**, set by the EOD's 1.92 ms *energy width*; no ceiling needed |
+| localization level | volley / 2 | **volley / 4** |
+| library | 34 items, 12.6 kB | **113 items, 37.4 kB** of a 131 kB budget |
 
-Checked and deliberately NOT changed:
+Verified on the re-export: `EOD_HV`, the 7 real scenes, their lead gaps and all 8 localization
+trains came back **byte-identical** — only the synthetic volleys moved. Synthesis QC reports
+**no overlap-clip** at the 2.00 ms floor, and `scan` reproduced
+`data/multifish_volley_candidates.csv` byte-for-byte.
 
-- **The decay time constant.** Within-volley normalised decay matches through 200 ms (real
-  0.86 / 0.67 / 0.55 at 100 / 150 / 200 ms; synthetic 0.82 / 0.68 / 0.59). An absolute
-  comparison past 200 ms looks like a 1.4× mismatch, but that is a selection effect: a fast
-  volley is a short one, so only 20 of 41 real volleys still exist at 200 ms and only 4 at
-  400 ms. Retuning τ on that subsample would be fitting the bias.
-- **The duration ladder** `[0.6, 0.9, 1.2, 1.6, 2.0, 2.5] s`. Deliberate design
-  (`build_population`), and real durations are **not** usable ground truth here — the real
-  volleys are tracker *fragments* (median 0.20 s), so their length reflects segmentation, not
-  the animal.
+### Why the localization level moved 2:1 → 4:1
 
-**Duration — settled 2026-08-21 by field observation, not by the recorded population.** The
-owner's call, and it resolves the question this section previously left open:
+Not cosmetic. The synthetic volleys now carry the *measured* within-volley amplitude envelope,
+whose 5th-percentile tail reaches ~0.34 of a volley's own peak — so at 2:1 the end of a decaying
+volley sat exactly on the localization level, which is the separation that ratio existed to
+provide. The alternative was the retired `VOLLEY_DECAY_FLOOR = 0.8`, which flattened the measured
+decay on 64 % of volleys. At 4:1 only **3 %** of volleys end below the localization level, and the
+envelope ships intact. The absolute volley-to-resting step is *not* a measurement (spec §5) —
+it is a knob, and this is that knob.
 
-- real volleys run from short bursts up to **~20 s**;
-- the recorded population is **truncated** by the tracker, and
-- **biased short**, because genuinely long volleys are rare;
-- so its duration distribution is evidence about the *tracker*, not the animal, and must not
-  set the ladder. (Its *rate* is trustworthy and does set the peak — that is the distinction.)
+### What is still open
 
-The ladder is now **log-spaced from 0.1 s to 4 s** (7 lengths × 3 draws = 21 volleys, items
-7–27; `RC_VOLLEY_ITEM_COUNT` 18 → 21). Log rather than linear because the range spans 40×, so
-linear steps would spend nearly every item on the long end; log steps give equal resolution per
-octave and keep the rare long volleys from crowding out the short strong bursts. The short end
-sits deliberately **below one τ**, so a 0.1 s volley barely decays and plays as a brief burst
-held near peak — previously excluded as "truncated", but that is a real discharge and the
-strong-event end of the range this experiment cares about.
+- [ ] **The long tail is a known gap.** The fitted duration distribution tops out around 2.3 s,
+      but volleys in the field run much longer (~20 s by observation). That is a blind spot of
+      the source analysis, not biology: a 25 s analysis window cannot contain a 20 s volley
+      without right-censoring it, and censored bursts were **dropped rather than fitted**. The
+      library therefore has nothing above ~2.3 s, where the old ladder reached 4 s. Deliberate —
+      extrapolating a fitted distribution past its support would look like data and not be it.
+      Decide whether the experiment needs long volleys represented, and if so, on what basis.
+- [ ] **A fitted localization model.** The volley model deliberately does not cover localization
+      (its §1.3), and its §2.3 between-volley rate is an explicit upper bound. So
+      `LOC_SYNTH_RATES_HZ = [1, 2, 3, 5, 7, 10]` is still a *designed* ladder. The seam is marked
+      in `synthetic_volleys.py`; a fitted model drops in the same way the volley one did.
+- [ ] **Program D on the SD card is now 840 WAVs (~544 MB).** It renders every
+      localization × volley pair, which is quadratic in the volley pool: 26 volleys gave 208
+      WAVs, 105 give 840. `build_sd_card` warns above 400 pairs and `--d-pairings N` bounds it.
+      Not urgent — the hand-held device's 36 V hardware does not exist yet (§1) — but decide
+      whether all-pairs is still the right default at this pool size.
+- [ ] **The 2.00 ms IPI floor leaves a delta spike: 9.5 % of shipped intervals sit exactly on
+      it**, where real volleys have a smooth tail down to ~2.1 ms. It is the right clamp —
+      unclamped, 3 % of volleys overlap-clip, and the spec's §5 says the sub-2 ms intervals in
+      the source data are spurious *extra detections* rather than extra EODs — but it removes
+      them by stacking them on one value rather than redistributing them. Anyone analysing a
+      recorded playback will see that spike. Decide whether it matters; redistributing (e.g.
+      re-drawing a violating interval rather than clamping it) is the alternative.
+- [ ] **The amplitude ECDF's tail is long, and the deep end is probably fish movement.** The
+      trend is drawn per volley from the measured ECDF, so the deepest draw in the shipped
+      population fades to **8 %** of its own peak and holds there; 3 % of volleys end below the
+      localization level. Spec §1.4 warns that recorded amplitude is source amplitude ×
+      distance attenuation and that a striking fish moves — a 92 % fade is far more likely the
+      animal swimming away than its organ winding down. Kept because truncating a fitted tail
+      by eye is how a model stops being one, but the RC device draws uniformly, so ~1 % of
+      trials would deliver a volley that fades to near-silence. Worth a decision.
+- [ ] **`data/real_volley_population.npz` is now QC-only.** It is a *different* selection from
+      the model's (this repo's single-fish criteria, on fragments), which is what makes it a
+      useful independent cross-check in `compare` — it catches a wiring mistake, not a modelling
+      one. `fakefish-synth-volleys analyze` refreshes it and needs the recordings.
 
-Verified after the change: peak still matches (0.99× real over the first 50 ms), synthesis QC
-reports no overlap-clip, packet 12628 B of a 131072 B budget, and the 6 synthetic localization
-trains came out **byte-identical** — confirming the decoupled RNG streams do what they claim.
-
-### This calibration is INTERMEDIATE
-
-Both numbers above rest on the 41 volleys in `data/real_volley_population.npz`. The owner is
-preparing volley statistics over the **full** dataset, which will supersede them. What to keep
-and what to redo when that lands:
-
-- **Keep the method.** Measure the peak as a *sustained* rate (`sustained_peak_hz`), never as
-  `1/min(IPI)` — that is what went wrong before, and a bigger sample makes an extreme-value
-  statistic *worse*, not better.
-- **Redo the numbers**: `uv run fakefish-synth-volleys refit-peaks` re-fits from the cached
-  population with no recordings needed, so refreshing the peak is cheap once the population
-  file is updated. Then `synthesize` → `fakefish-export export` → `sync_core.sh`.
-- **Revisit the duration ladder against real statistics.** It is currently set from field
-  observation (0.1–4 s), because the recorded volleys are fragments. Real duration statistics
-  from complete discharges would replace that judgement call with data — including whether the
-  ~20 s tail deserves representation, and whether the draw should stay uniform-per-octave or be
-  weighted toward the short volleys that dominate in nature (more reps at the short end of
-  `body_lengths`, rather than 3 everywhere).
-- [ ] Re-run both calibrations when the full-dataset volley statistics are available.
+**Kept from the old calibration, because it was the right lesson:** measure a peak as a
+*sustained* rate (`sustained_peak_hz`), never as `1/min(IPI)` — an extreme-value statistic whose
+expected value grows with the number of intervals drawn, so a bigger sample makes it *worse*.
+`sustained_peak_hz` survives as QC on both the real and synthetic populations.
 
 ## 7. Future control surfaces (documented slots, deliberately unbuilt)
 

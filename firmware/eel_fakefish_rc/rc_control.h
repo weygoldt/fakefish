@@ -109,29 +109,44 @@
 // ===== CH6 pot: amplitude (sets the VOLLEY / max; localization is derived) ==
 // The amplitude control (CH6 pot, or PANEL_VOLLEY_AMP on the bench) sets the VOLLEY amplitude — the
 // LOUD discharge, the "max" — over MASTER_AMP_MIN..MAX (0..full rail). Localization is ALWAYS a fixed
-// fraction BELOW it: loc = volley / VOLLEY_AMP_RATIO (half at 2.0). Anchoring at the volley (not the
+// fraction BELOW it: loc = volley / VOLLEY_AMP_RATIO (a quarter at 4.0). Anchoring at the volley (not the
 // loc) is deliberate: the old "loc = pot, volley = 2x pot clamped to 1.0" made loc and volley CONVERGE
 // to full once the pot passed 0.5 (volley clamped while loc kept rising) — so localization jumped to
 // max. Deriving loc FROM the volley keeps the 2:1 (volley:loc) ratio at EVERY pot position and needs
 // no clamp (the volley never exceeds full scale because the pot IS the volley level).
+// The ratio moved 2 -> 4 on 2026-08-21: synthetic volleys now carry the MEASURED amplitude
+// envelope, whose tail reaches ~0.34 of the volley's own peak, and at 2:1 that tail landed on
+// the localization level. See shared/stim_constants.json for the full reasoning.
 // The levels themselves (MASTER_AMP_MIN/MAX, VOLLEY_AMP_RATIO) come from stim_levels.h.
 #define RC_AMP_STEPS      16               // quantise amplitude (8-bit duty loses shape at low amp)
 
 // ===== Volley snippet selection (from the stored library) ==================
-// The synthetic volleys (kind 1, STIM_ITEMS indices 7..27) carry the decaying-rate envelope.
-// A volley random-picks one of these per fire. Pin FIRST + COUNT=1 for a reproducible volley.
+// The synthetic volleys (kind 1, STIM_ITEMS indices 7..106) carry both the decaying-rate
+// envelope and a per-pulse amplitude envelope. A volley random-picks one of these per fire.
+// Pin FIRST + COUNT=1 for a reproducible volley.
 //
-// Their peak RATE is calibrated against the real recorded volleys: ~327 Hz over the first
-// 50 ms against the real population's 329 Hz. (Before 2026-08-21 they ran ~18 % slow, because
-// the calibration matched 1/min(IPI) — an extreme-value statistic that reads higher the more
-// pulses you draw, and these carry ~4x more than a real volley. See synthetic_volleys.py.)
+// SINCE 2026-08-21 THE POOL IS A DRAWN POPULATION, NOT A DESIGNED LADDER. Every item is one
+// independent draw from a generative model fitted to the 200 strongest hunting volleys in the
+// FLONA 2025 dataset (43 recordings, 16 sites) — start rate, duration and decay drawn jointly
+// so their correlations survive, then pulse times integrated off that rate curve with the
+// measured per-volley regularity. So a uniform pick over the pool approximates drawing a real
+// volley at random, and the pool is 100 items deep to make that approximation a good one:
+// the count is a SAMPLING RESOLUTION, not a menu of hand-chosen variants.
 //
-// Their DURATIONS are a log-spaced ladder from 0.1 s to 4 s (7 lengths x 3 draws = 21 items),
-// set from field observation rather than from the recorded population: the recorded volleys
-// are tracker FRAGMENTS, truncated and biased short. A throw therefore draws a duration
-// uniformly across that ladder, i.e. roughly uniform per OCTAVE of volley length.
+//   duration        quartiles ~0.29 / 0.46 / 0.73 s
+//   pulses          ~61 / 90 / 136
+//   sustained peak  ~366 / 450 / 566 Hz
+//
+// The ceiling on this pool is NOT flash, it is the pulse log: pulse_log.h stores the library
+// item in an int8_t (PLOG_ABSENT_ITEM = -1), so the whole library must stay under 128 items.
+// At 100 volleys the highest index is 112. Growing further means changing that format and its
+// golden file, not just this constant.
+//
+// The model, its fitted numbers and its caveats: docs/VOLLEY_GENERATIVE_SPEC.md.
+// (Superseded: a log-spaced 0.1-4 s duration ladder of 21 items, set from field observation
+// because the only volleys this repo could then see were truncated tracker fragments.)
 #define RC_VOLLEY_ITEM_FIRST 7
-#define RC_VOLLEY_ITEM_COUNT 21
+#define RC_VOLLEY_ITEM_COUNT 100
 
 // ===== Conditioning ========================================================
 #define RC_QUANT_HYST     0.30f            // quantiser boundary hysteresis (fraction of a step)

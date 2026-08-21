@@ -61,6 +61,10 @@ def main(
         0.15, "--marker-show-s",
         help="pre-onset seconds to draw (clamped to at least the full marker burst)",
     ),
+    max_synth: int = typer.Option(
+        24, "--max-synth",
+        help="synthetic volleys to draw, evenly spaced by duration (0 = all of them)",
+    ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Draw every volley in loc->volley (program D) mode: one alternating-polarity pulse
@@ -92,7 +96,19 @@ def main(
     # cycled across the volleys so every localization is represented.
     vol.sort(key=lambda it: (KIND_ORDER[it["kind"]], it["_dur"]))
     loc.sort(key=lambda it: it["_rate"])
-    log.info("%d volleys x cycling %d localizations", len(vol), len(loc))
+    n_total = len(vol)
+    if max_synth > 0:
+        # Same slice as the volley gallery: keep every real volley, thin the synthetic side
+        # evenly through the duration-sorted list. The library's synthetic volleys are a
+        # sampling distribution (N_SYNTH_VOLLEYS), so all of them would be a metre of page.
+        real = [it for it in vol if it["kind"] == ex.STIM_REAL_VOLLEY]
+        synth = [it for it in vol if it["kind"] == ex.STIM_SYNTH_VOLLEY]
+        if len(synth) > max_synth:
+            keep = np.round(np.linspace(0, len(synth) - 1, max_synth)).astype(int)
+            synth = [synth[i] for i in keep]
+        vol = real + synth
+    log.info("%d volleys (%d in the library) x cycling %d localizations",
+             len(vol), n_total, len(loc))
 
     d_loc_n = int(round(D_LOC_PLAYBACK_S * hz))   # the SHORT localization window (truncates)
 

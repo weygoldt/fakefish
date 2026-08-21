@@ -229,7 +229,10 @@ def test_build_card_structure_and_levels(tmp_path, parsed):
     marker = bc.render_pulse_marker(eod, bc.CardConfig().levels)
     assert marker.size == K.MARKER_SPAN_SAMPLES + eod.size  # the layout offset, spelled out
     vi = vol[0]
-    rate, data = wavfile.read(out / "C" / f"volley_{vi:02d}.wav")
+    # 3-digit index: the library passed 100 items with the fitted volley model, and mixed
+    # widths sort wrongly (volley_99 lands after volley_100). Keep this in step with
+    # build_sd_card's _emit calls.
+    rate, data = wavfile.read(out / "C" / f"volley_{vi:03d}.wav")
     start = marker.size + int(parsed["lead_gap_samp"][vi])
     ref = bc._to_i16(ex.reconstruct_item(eod, parsed["items"][vi]["ipi_samp"],
                                          parsed["items"][vi]["rel_amp"],

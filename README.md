@@ -77,7 +77,7 @@ while it is stale.
 | **Stimulus source** | **pre-rendered SD WAVs** — mono `int16` @ 50 kHz, one directory per button, built by `fakefish-build-card` | **live synthesis** on-device — `locgen` for the localization train, `eel_player` for the volley, over the mean EOD |
 | **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
 | **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
-| **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at half (`PANEL_VOLLEY_AMP` on the bench) |
+| **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at a quarter (`PANEL_VOLLEY_AMP` on the bench) |
 | **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost; **inverse blink = logging failed, output suppressed** |
 | **Needs an SD card** | **yes** — to *read* the stimulus WAVs | **yes** — to *write* the per-pulse log (no WAVs needed; it creates `/LOGS/` itself) |
 | **Logs to the card** | not yet ([`TODO.md`](TODO.md) §5) | **every pulse**, with its exact 50 kHz sample tick — and it **will not stimulate without a working card** |
@@ -95,20 +95,25 @@ trap.
 
 ## What goes into the water
 
-The library is a mean eel EOD waveform (`EOD_HV`, 131 samples @ 50 kHz) plus **timing**: 34
-items of inter-pulse intervals and per-pulse relative amplitudes — 5 real volleys, 21
+The library is a mean eel EOD waveform (`EOD_HV`, 131 samples @ 50 kHz) plus **timing**: 113
+items of inter-pulse intervals and per-pulse relative amplitudes — 5 real volleys, 100
 synthesised volleys, 8 localization trains (`uv run fakefish-render info` lists them). A
 stimulus is that waveform replayed on those intervals; pulses that out-run the EOD length are
 summed by the overlap-add engine.
 
 - **Localization** — a slow, jittered train (≤ 20 Hz), the discharge an eel emits while
-  cruising and probing. Played at the lower level.
-- **Volley** — the high-rate discharge burst with a decaying-rate envelope: the strike. Played
-  at the higher level. Its peak is calibrated against the real recorded population — **~330 Hz
-  held over the first 50 ms**, decaying with τ ≈ 0.31 s — measured on a *sustained* rate, never
-  on `1/min(IPI)`. Durations are a log-spaced ladder from **0.1 s to 4 s**, set from field
-  observation rather than from the recorded volleys, which are tracker *fragments* (see
-  [`TODO.md`](TODO.md) §6 for both calibrations). The **level ratio between volley and
+  cruising and probing. Played at the lower level (a **quarter** of the volley).
+- **Volley** — the high-rate discharge burst: the strike. Played at the higher level. Each of
+  the 100 is one independent draw from a generative model **fitted to the 200 strongest hunting
+  volleys in the FLONA 2025 dataset** (43 recordings, 16 sites) — start rate, duration and decay
+  drawn jointly so their correlations survive, then pulse times *integrated off that rate curve*
+  rather than drawn from a point process, because real volleys are nearly clockwork (CV2 ≈ 0.12,
+  where Poisson is 1.0). Quartiles: duration **0.31 / 0.46 / 0.68 s**, **58 / 90 / 121** pulses,
+  sustained peak **345 / 435 / 500 Hz**. Amplitude decays ~22 % across a volley, as measured.
+  The model, its fitted numbers and its caveats are in
+  [`docs/VOLLEY_GENERATIVE_SPEC.md`](docs/VOLLEY_GENERATIVE_SPEC.md); it is *vendored*, not
+  fitted here. The pool is 100 deep because the RC device draws from it uniformly, so the pool
+  size is a **sampling resolution**, not a menu. The **level ratio between volley and
   localization is the experiment**, so the SD WAVs are absolute-scaled, never peak-normalised.
 - **Localize → strike** — a localization lead, a short gap, then the volley (SD program D);
   one marker and one polarity span the whole sequence.
@@ -169,13 +174,14 @@ src/fakefish/                  the Python toolchain (installable package)
   _constants.py                GENERATED — do not edit
   build_sd_card.py             render the library (+ song) to a one-dir-per-button WAV card
   export_teensy_stimuli.py     library regeneration from the source recordings (needs dataset)
-  synthetic_volleys.py         volley population model + synthesis
+  volley_model.py              VENDORED generative volley model (do not edit; see docs/)
+  synthetic_volleys.py         draws the volley population from it + localization trains
   render_stimulus.py           parse/reconstruct the committed library
   simulate_firmware.py         model the PWM output chain (dac / carrier / marker)
   plot_*.py, _gallery_marker.py  the stimulus galleries + playback anatomy
   stimuli_qc.py, _resources.py, viz/   QC, path resolution, vendored figure + logging helpers
 
-data/                          export config, frozen provenance, tuned volley model/populations
+data/                          export config, frozen provenance, vendored model params, populations
 tests/                         export, card, codegen, and core-sync guards
 check.sh  Makefile             the acceptance gate — `make check`
 ```
@@ -295,7 +301,7 @@ An editable install (`uv sync`, or `pip install -e .`); run from the repo root. 
 | `fakefish-anatomy` | committed library | marker → gap → onset playback anatomy |
 | `fakefish-pulse-log` | a device's SD log | `info` summarises one `/LOGS/PULSnnnn.CSV` (provenance, pulse counts, trials, integrity); `pulses` lists the emitted pulses |
 | `fakefish-export` | **source recordings** | `scan` mines candidate scenes; `export` re-emits the firmware library + provenance |
-| `fakefish-synth-volleys` | **source recordings** | `analyze` / `synthesize` / `compare` / `overlap-demo` the volley population model |
+| `fakefish-synth-volleys` | committed library (`analyze` also needs **source recordings**) | `synthesize` draws the volley population from the vendored model; `compare` / `overlap-demo` / `analyze` are QC |
 
 Everything above the `fakefish-export` line runs against the **committed** firmware library, so
 no dataset is needed:

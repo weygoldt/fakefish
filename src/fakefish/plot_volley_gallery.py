@@ -5,10 +5,15 @@ two volley-family kinds (real volley / synth volley), reconstructs each one as t
 full-rate signed trace the electrode emits (the additive-mixer output scaled to the
 firmware's ``VOLLEY_AMPLITUDE``), and draws them in one gallery — the same "what goes
 into the water" the firmware plays in VOLLEY mode. Every volley starts already-strong;
-synthetic volleys then wind their amplitude gently down toward 80 % of that over the
-discharge.
+synthetic volleys then carry the fitted per-pulse amplitude envelope, which decays ~22 %
+across the discharge at the median (see ``docs/VOLLEY_GENERATIVE_SPEC.md``).
 
-    fakefish-gallery-volley [--firmware ...] [--out ...]
+The library holds ``N_SYNTH_VOLLEYS`` synthetic volleys — a sampling distribution, not a
+menu — so drawing all of them would be a metre of page. The gallery shows an evenly-spaced
+slice, keeping **every** real volley (there are only a handful, and they are the reference
+the synthetic ones are judged against) and thinning only the synthetic side.
+
+    fakefish-gallery-volley [--firmware ...] [--out ...] [--max-synth N]
 """
 
 from __future__ import annotations
@@ -55,6 +60,10 @@ def main(
         0.15, "--marker-show-s",
         help="pre-onset seconds to draw (clamped to at least the full marker burst)",
     ),
+    max_synth: int = typer.Option(
+        24, "--max-synth",
+        help="synthetic volleys to draw, evenly spaced by duration (0 = all of them)",
+    ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
     """Draw every volley-family item as an output-level-over-time gallery, each preceded by
@@ -82,7 +91,18 @@ def main(
         it["_dur"] = int(np.cumsum(it["ipi_samp"].astype(np.int64))[-1]) / hz
         it["_peak"] = hz / int(it["ipi_samp"][1:].min())
     vol.sort(key=lambda it: (KIND_ORDER[it["kind"]], it["_dur"]))
-    log.info("%d volley-family items", len(vol))
+    n_total = len(vol)
+    if max_synth > 0:
+        real = [it for it in vol if it["kind"] == ex.STIM_REAL_VOLLEY]
+        synth = [it for it in vol if it["kind"] == ex.STIM_SYNTH_VOLLEY]
+        if len(synth) > max_synth:
+            # Evenly spaced through the DURATION-sorted list, so the slice spans the
+            # population's shape rather than an arbitrary corner of it — duration is drawn
+            # jointly with start rate and decay, so it indexes the whole joint draw.
+            keep = np.round(np.linspace(0, len(synth) - 1, max_synth)).astype(int)
+            synth = [synth[i] for i in keep]
+        vol = real + synth
+    log.info("%d volley-family items (%d in the library)", len(vol), n_total)
 
     ncol = 4
     nrow = int(np.ceil(len(vol) / ncol))

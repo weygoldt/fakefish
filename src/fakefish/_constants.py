@@ -15,7 +15,7 @@ from fakefish.export_teensy_stimuli import PLAYBACK_RATE_HZ as RATE_HZ
 
 # ===== Absolute output levels (fraction of full scale) ==============================
 VOLLEY_AMPLITUDE = 0.9
-LOC_AMPLITUDE = 0.45
+LOC_AMPLITUDE = 0.225
 CAL_AMPLITUDE = 0.45
 MARKER_AMPLITUDE = 0.5
 

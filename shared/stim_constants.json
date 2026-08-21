@@ -38,9 +38,25 @@
       "Also emitted to C as SD_* for a future live surface that renders these on-device."
     ],
     "levels": {
-      "_comment": "Absolute output levels as a fraction of full scale (baked into the WAVs, NOT peak-normalised).",
+      "_comment": [
+        "Absolute output levels as a fraction of full scale (baked into the WAVs, NOT",
+        "peak-normalised).",
+        "",
+        "LOCALIZATION IS A QUARTER OF THE VOLLEY, NOT A HALF (changed 2026-08-21, with the",
+        "fitted volley model). The synthetic volleys now carry the MEASURED within-volley",
+        "amplitude envelope, which decays ~22 % across a volley at the median and reaches",
+        "~0.34 of the volley's own peak at the 5th percentile. At the old 2:1 ratio the tail",
+        "of a decaying volley landed on top of the localization level, which is exactly the",
+        "separation that ratio existed to provide. Dropping localization to 1/4 restores it",
+        "without clipping the envelope: the retired alternative was a VOLLEY_DECAY_FLOOR",
+        "that flattened the measured decay on 64 % of volleys.",
+        "",
+        "The absolute step between a volley and a resting discharge is NOT a measurement --",
+        "docs/VOLLEY_GENERATIVE_SPEC.md section 5 is explicit that it is confounded by",
+        "distance and clipping and must be treated as a knob. This is that knob."
+      ],
       "volley": 0.90,
-      "loc": 0.45,
+      "loc": 0.225,
       "calibration": 0.45,
       "pulse_marker": 0.5
     },
@@ -127,10 +143,16 @@
     "amp": {
       "_comment": [
         "The amplitude control sets the VOLLEY (max); localization is DERIVED as volley /",
-        "volley_amp_ratio (half at 2.0). Anchoring at the volley keeps the 2:1 ratio at every",
-        "pot position and needs no clamp. panel_volley_amp is the bench default with no transmitter."
+        "volley_amp_ratio (a quarter at 4.0). Anchoring at the volley keeps the ratio at every",
+        "pot position and needs no clamp. panel_volley_amp is the bench default with no transmitter.",
+        "",
+        "4.0, not 2.0, since 2026-08-21: the synthetic volleys carry the measured amplitude",
+        "envelope, whose tail reaches ~0.34 of the volley's peak. At 2:1 that tail sat at the",
+        "localization level. Mirrors sd_path.levels.loc -- see the note there for the full",
+        "reasoning. The pedestal (OUT_PEDESTAL_DUTY) is what makes a quarter-scale pulse still",
+        "leave the driver dead zone cleanly."
       ],
-      "volley_amp_ratio": 2.0,
+      "volley_amp_ratio": 4.0,
       "panel_volley_amp": 1.0,
       "master_min": 0.0,
       "master_max": 1.0

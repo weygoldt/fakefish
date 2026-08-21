@@ -20,7 +20,7 @@
 // Absolute output levels as a fraction of full scale (NOT peak-normalised): the
 // loc/volley/marker ratios are the experiment, so they must survive rendering.
 #define SD_LEVEL_VOLLEY       0.9f
-#define SD_LEVEL_LOC          0.45f
+#define SD_LEVEL_LOC          0.225f
 #define SD_LEVEL_CALIBRATION  0.45f
 #define SD_LEVEL_MARKER       0.5f
 
@@ -75,7 +75,7 @@
 
 // ===== RC path — amplitude =================================================
 // The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.
-#define VOLLEY_AMP_RATIO   2.0f
+#define VOLLEY_AMP_RATIO   4.0f
 #define MASTER_AMP_MIN     0.0f
 #define MASTER_AMP_MAX     1.0f
 #define PANEL_VOLLEY_AMP   1.0f // bench default (no transmitter)

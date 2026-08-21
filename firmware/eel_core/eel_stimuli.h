@@ -32,7 +32,7 @@ typedef struct {
   uint8_t         kind;       // StimKind
   uint8_t         group;      // per-source provenance id (reserved)
 } StimItem;
-#define N_STIM_ITEMS  34
+#define N_STIM_ITEMS  113
 extern const StimItem STIM_ITEMS[N_STIM_ITEMS];
 
 // ---- Per-item sine-marker lead-in gap ------------------------------------

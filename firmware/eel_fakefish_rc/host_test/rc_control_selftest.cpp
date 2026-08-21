@@ -110,8 +110,18 @@ static void test_trigger_boot() {
 static void test_amp_jitter() {
   CHECK(fabsf(rc_master_amp(0, RC_AMP_STEPS) - MASTER_AMP_MIN) < 1e-6f, "master lvl0 -> MIN");
   CHECK(fabsf(rc_master_amp(RC_AMP_STEPS - 1, RC_AMP_STEPS) - MASTER_AMP_MAX) < 1e-6f, "master top -> MAX");
-  CHECK(fabsf(rc_loc_amp(1.0f) - 0.5f) < 1e-6f, "loc == half the volley at full scale");
-  CHECK(fabsf(rc_loc_amp(0.4f) - 0.2f) < 1e-6f, "loc == volley / VOLLEY_AMP_RATIO");
+  // The SHIPPED ratio, pinned as a literal on purpose. VOLLEY_AMP_RATIO is generated from
+  // shared/stim_constants.json, so changing it there must also fail here — the same
+  // two-file-edit discipline the pulse-log golden enforces. It moved 2 -> 4 on 2026-08-21
+  // because the synthetic volleys now carry the measured amplitude envelope, whose tail
+  // reaches ~0.34 of a volley's own peak; at 2:1 that tail sat on the localization level.
+  CHECK(fabsf(VOLLEY_AMP_RATIO - 4.0f) < 1e-6f, "VOLLEY_AMP_RATIO is the shipped 4:1");
+  // Localization is DERIVED from the volley, so the ratio must hold at EVERY pot position,
+  // not just at full scale. The bug this pins against is the retired "loc = pot, volley =
+  // 2x pot clamped to 1.0", where the two CONVERGED once the pot passed half.
+  CHECK(fabsf(rc_loc_amp(1.0f) - 1.0f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio at full scale");
+  CHECK(fabsf(rc_loc_amp(0.4f) - 0.4f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio off full scale");
+  CHECK(rc_loc_amp(1.0f) > rc_loc_amp(0.4f), "loc tracks the volley, never converges to it");
   CHECK(fabsf(rc_jitter_cv(0, RC_JITTER_STEPS) - 0.0f) < 1e-6f, "jitter lvl0 -> 0 (perfectly even)");
   CHECK(fabsf(rc_jitter_cv(RC_JITTER_STEPS - 1, RC_JITTER_STEPS) - LOC_CV_MAX) < 1e-6f, "jitter top -> CV_MAX");
 }
