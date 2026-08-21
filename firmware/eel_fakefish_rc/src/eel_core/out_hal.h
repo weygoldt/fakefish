@@ -7,8 +7,8 @@
 // OUTPUT STAGE — two DRV8871 single-bridge drivers (one per electrode) on a 36 V rail, each
 // driven as a TRUE COMPLEMENTARY pair. Per board IN1 is held steadily HIGH and IN2 is PWM'd at
 // the COMPLEMENT of the wanted duty, so the bridge alternates DRIVE <-> BRAKE and never
-// coasts/floats: board A = pin 2 (IN1 HIGH) + pin 0 (IN2 PWM); board B = pin 3 (IN1 HIGH) +
-// pin 1 (IN2 PWM). +phase drives A while B sits at the pedestal; -phase drives B while A sits at
+// coasts/floats: board A = pin 2 (IN1 HIGH) + pin 22 (IN2 PWM); board B = pin 3 (IN1 HIGH) +
+// pin 23 (IN2 PWM). +phase drives A while B sits at the pedestal; -phase drives B while A sits at
 // the pedestal (bipolar differential across the dipole). Idle = BOTH boards at the same duty, so
 // the dipole sees 0 V either way: the DEAD-ZONE PEDESTAL while armed, a hard brake to GND while
 // disarmed — never floating. Pins, carrier, the pedestal and the guards live in config.h.

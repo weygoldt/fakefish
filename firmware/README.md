@@ -79,18 +79,18 @@ Each board is a **true complementary pair** — four Teensy pins, not two:
 
 | Board | IN1 (held HIGH) | IN2 (100 kHz PWM) | Electrode |
 |-------|-----------------|-------------------|-----------|
-| A (`+` phase) | pin **2** | pin **0** | A (on OUT1) |
-| B (`−` phase) | pin **3** | pin **1** | B (on OUT1) |
+| A (`+` phase) | pin **2** | pin **22** | A (on OUT1) |
+| B (`−` phase) | pin **3** | pin **23** | B (on OUT1) |
 
 ```
   Teensy pin 2 ── DRV8871 A IN1 (held HIGH) ──┐
-  Teensy pin 0 ── DRV8871 A IN2 (100 kHz PWM) ┴─ OUT1 ──[220Ω]──┬──[220Ω]──┬── electrode A
+  Teensy pin 22 ─ DRV8871 A IN2 (100 kHz PWM) ┴─ OUT1 ──[220Ω]──┬──[220Ω]──┬── electrode A
                                                              [220nF]    [220nF]
                                                                 │          │
                                                             star GND   star GND
 
   Teensy pin 3 ── DRV8871 B IN1 (held HIGH) ──┐
-  Teensy pin 1 ── DRV8871 B IN2 (100 kHz PWM) ┴─ OUT1 ──[220Ω]──┬──[220Ω]──┬── electrode B
+  Teensy pin 23 ─ DRV8871 B IN2 (100 kHz PWM) ┴─ OUT1 ──[220Ω]──┬──[220Ω]──┬── electrode B
                                                              [220nF]    [220nF]
                                                                 │          │
                                                             star GND   star GND
@@ -128,9 +128,17 @@ then `out_disarm()` to the braked idle. Call it first from `setup()`; never open
 The DRV8871 has internal dead-time, so antiphase IN1/IN2 is shoot-through-safe with **no
 software dead-time** — and here only IN2 ever toggles, with IN1 steady.
 
-- **Carrier: 100 kHz** on the IN2 pins (both true FlexPWM). Do not revert to the 585.9 kHz
-  Teensy default. `PWM_CARRIER_HZ` in `config.h` carries a `static_assert` that it stays
-  ≤ 100 kHz and that full 8-bit duty is still achievable there (150 MHz FlexPWM clock ÷ 256).
+- **Carrier: 100 kHz** on the IN2 pins (true FlexPWM on the 4.1, FTM0 on the 3.5). Do not revert
+  to the 585.9 kHz Teensy default. `PWM_CARRIER_HZ` in `config.h` carries a `static_assert` that
+  it stays ≤ 100 kHz and that full 8-bit duty is still achievable there (150 MHz FlexPWM clock
+  ÷ 256).
+- **The pinout is chosen to be identical on a Teensy 4.1 and a Teensy 3.5**, so one wiring
+  harness serves both. IN2 sits on **22/23** because pins 0/1 (used until 2026-08-21) have no
+  FTM channel at all on the 3.5's MK64FX512 and so cannot carry a carrier there; 22/23 are
+  FlexPWM4_0_A / FlexPWM4_1_A on the 4.1 and FTM0_CH0 / FTM0_CH1 on the 3.5, and are free on
+  both control surfaces. The full derivation is in `config.h`. **An already-built 4.1 board has
+  to have those two wires moved** — an un-rewired board runs, logs and blinks normally while
+  emitting nothing.
 - **Resolution:** 8-bit duty with first-order error-feedback **noise shaping** (~+3 in-band
   bits — measured +3.5 b at the repo's own 5 kHz band definition), running at the 50 kHz waveform
   sample rate — independent of the carrier, so raising the carrier does not touch it. Its
@@ -834,7 +842,7 @@ Hardware is bench-owned; none of this is ever claimed done by an agent.
 
 1. **Idle is braked, not floating.** With nothing playing *and nothing scheduled* (lever down —
    i.e. **disarmed**), scope one electrode single-ended to battery GND: it must sit **hard at 0 V**,
-   with no drift or slow leak. If it floats, IN2 is not actually driven — recheck the pin 0/1
+   with no drift or slow leak. If it floats, IN2 is not actually driven — recheck the pin 22/23
    wiring. While **armed**, the same probe reads the common-mode pedestal instead
    (`OUT_PEDESTAL_DUTY/255` of the rail, ~3 V at 21) — that is correct, not a fault; the
    *differential* reading across the electrodes is what must be 0 V.

@@ -27,12 +27,26 @@
 // duty PWM_DUTY_MAX -> IN2 LOW -> drive (OUT at rail); average OUT = duty/PWM_DUTY_MAX * rail (linear).
 // Idle / between pulses = duty 0 on BOTH boards = both electrodes actively braked to GND (not float).
 #define DRV_A_IN1_PIN    2                 // board A IN1 — held HIGH  -> DRV8871 A -> OUT1 -> electrode A
-#define DRV_A_IN2_PIN    0                 // board A IN2 — 100 kHz PWM (FlexPWM1_1)   [was: IN2 tied to GND]
+#define DRV_A_IN2_PIN    22                // board A IN2 — 100 kHz PWM (4.1 FlexPWM4_0_A / 3.5 FTM0_CH0)
 #define DRV_B_IN1_PIN    3                 // board B IN1 — held HIGH  -> DRV8871 B -> OUT1 -> electrode B
-#define DRV_B_IN2_PIN    1                 // board B IN2 — 100 kHz PWM (FlexPWM1_0)   [was: IN2 tied to GND]
-// IN2 on pins 0/1 (not 9/10): both are true FlexPWM (uniform with each board's own DC IN1), and 9/10
-// are taken by control surfaces (the RC panel's LOC/VOLLEY buttons; the button surface's E/F keys).
-// Pins 0/1 are the only thing this firmware takes off the otherwise unused hardware Serial1 (RX1/TX1).
+#define DRV_B_IN2_PIN    23                // board B IN2 — 100 kHz PWM (4.1 FlexPWM4_1_A / 3.5 FTM0_CH1)
+//
+// WHY 22/23. This pinout is deliberately one that works UNCHANGED on a Teensy 4.1 and a Teensy 3.5,
+// so one wiring harness serves both boards. Three constraints pick it:
+//   * PWM on BOTH parts. Pins 0/1 — which IN2 used until 2026-08-21 — are FlexPWM on the 4.1 but
+//     have no FTM channel at all on the 3.5 (MK64FX512), so they cannot carry the carrier there.
+//     Taking the two cores' PWM tables (cores/teensy4/pwm.c, cores/teensy3/pins_teensy.c) the pins
+//     that are PWM on both are 2,3,4,5,6,7,8,9,10,14,22,23,29,36,37.
+//   * NOT a QuadTimer on the 4.1. Pin 14 is QuadTimer3_2 there; every other candidate is FlexPWM,
+//     which is what keeps the two boards' carriers uniform with each other and with their DC IN1s.
+//   * Free on both control surfaces. 2..10 are taken (IN1s, the RC decode pins 4..7, the RC panel's
+//     buttons on 9..11, the button surface's keys on 5..10), which leaves 22, 23, 29, 36, 37 — and
+//     22/23 are the only adjacent pair on the top edge of both boards. It also hands hardware
+//     Serial1 (RX1/TX1 on pins 0/1) back, which the old pinout was the sole claimant of.
+//
+// !! THE BUILT 4.1 BOARD MUST BE REWIRED: IN2 moves from pins 0/1 to 22/23 (two wires). Firmware
+// flashed onto an un-rewired board will look alive — LED, logging, RC decode all fine — and put
+// NOTHING in the water, because it is modulating pins the drivers are not connected to.
 // The DRV8871's internal dead-time makes IN1/IN2 transitions shoot-through-safe, so NO software
 // dead-time is needed (we only ever toggle IN2 with IN1 held high).
 // PWM carrier: 100 kHz (raised from 50 kHz with the DRV8871 upgrade; the DRV8871 switches cleanly
