@@ -158,6 +158,16 @@ static void verify_case(const StimItem* it, int idx, float amp, int pol,
   uint32_t sounding[8];
   unsigned n_sounding = 0;
 
+  // Runaway guard, derived from the item rather than a wall-clock constant. It used to be
+  // a flat 60 s with the note "no case here is anywhere near that" — which stopped being
+  // true when the localization items started carrying the fitted rhythm's multi-second
+  // silences and grew past 80 s. A bound computed from the item's own cumulative IPI
+  // cannot go stale the next time the library changes shape.
+  uint32_t item_span = EOD_HV_LEN;
+  for (uint16_t i = 0; i < it->n; i++) item_span += it->ipi_samp[i];
+  const uint32_t runaway_cap =
+      (max_samples ? max_samples : item_span) * 2u + 4u * STIM_SAMPLE_RATE_HZ;
+
   for (;;) {
     int16_t a = 0, b = 0;
     int ra = eel_player_next(&p, &a);
@@ -215,8 +225,9 @@ static void verify_case(const StimItem* it, int idx, float amp, int pol,
           (unsigned)p.last_onset, (unsigned)o.last_onset);
     t++;
     g_samples++;
-    if (t > 60u * STIM_SAMPLE_RATE_HZ) {   // 60 s — no case here is anywhere near that
-      CHECK(0, "item %d %s: playback did not terminate within 60 s", idx, what);
+    if (t > runaway_cap) {
+      CHECK(0, "item %d %s: playback did not terminate within %u samples (%.1f s)",
+            idx, what, (unsigned)runaway_cap, (double)runaway_cap / STIM_SAMPLE_RATE_HZ);
     }
   }
   if (!loop && max_samples == 0) {

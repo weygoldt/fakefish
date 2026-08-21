@@ -168,23 +168,40 @@ def test_codegen_rejects_a_broken_model(params: dict) -> None:
         gc.validate_loc_model(bad)
 
 
-def test_the_table_floor_clears_the_scheduler_refractory(params: dict) -> None:
-    """locgen is a single-pulse scheduler; overlapping localization pulses would break it.
+def test_the_refractory_is_the_resting_volley_antimode(params: dict) -> None:
+    """``LOC_REFRACTORY_SAMP`` must BE the antimode, not an arbitrary safety margin.
 
-    The model's fastest interval at tempo 1 must stay well above ``LOC_REFRACTORY_SAMP``,
-    or the clamp in ``loc_rhythm_next_ipi_samp`` would stop being a safety net and start
-    shaping the distribution.
+    The model's interval table is clamped at the bottom to the 25 ms resting/volley
+    antimode, so the resting rhythm can never intrude into volley territory. But that
+    clamp lives in SCORE space and the rate knob is a pure TIME dilation, so any tick
+    tempo above the nominal 3.15 Hz scales the floor down with it — 4.4 ms at CH3's top
+    setting. The source analysis separates resting pulses from fast runs on exactly this
+    antimode, so an unfloored fast train would emit intervals that read as micro-bursts of
+    the device's own making. The refractory is what re-imposes it in absolute time.
+
+    It was 250 samples (5 ms) until 2026-08-21 — squarely inside volley territory.
     """
     from fakefish.export_teensy_stimuli import PLAYBACK_RATE_HZ
 
-    floor_samp = np.exp(params["marginal"]["log_ipi_knots"][0]) * PLAYBACK_RATE_HZ
     levels = (_res.FIRMWARE_DIR / "stim_levels.h").read_text()
     refractory = next(
         int(ln.split()[2].rstrip("u"))
         for ln in levels.splitlines()
         if ln.startswith("#define LOC_REFRACTORY_SAMP")
     )
-    assert floor_samp > 4 * refractory, (floor_samp, refractory)
+    antimode_samp = params["provenance"]["resting_min_ipi_ms"] / 1e3 * PLAYBACK_RATE_HZ
+    assert refractory == pytest.approx(antimode_samp, rel=1e-9), (refractory, antimode_samp)
+
+    # And it must still clear one EOD, or locgen's single-pulse scheduler breaks.
+    lib = (_res.FIRMWARE_DIR / "eel_stimuli.h").read_text()
+    eod_len = next(
+        int(ln.split()[2]) for ln in lib.splitlines() if ln.startswith("#define EOD_HV_LEN")
+    )
+    assert refractory > eod_len, (refractory, eod_len)
+
+    # At the nominal tempo the model never reaches it, so it only engages on a fast knob.
+    floor_samp = np.exp(params["marginal"]["log_ipi_knots"][0]) * PLAYBACK_RATE_HZ
+    assert floor_samp > refractory, (floor_samp, refractory)
 
 
 # ===== the golden: the C's oracle =====================================================

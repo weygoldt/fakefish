@@ -275,15 +275,16 @@ model was (CLAUDE.md invariant 11). It replaced a unit-mean lognormal draw, whic
 process and therefore has zero log-interval autocorrelation at every lag where a real eel has
 0.55 / 0.36 / 0.21 at lags 1 / 5 / 20.
 
-**What is left is a seam, not a bug.** The SD/button device's localization WAVs render from the
-localization *items* baked into the byte-frozen library, and those still come from the designed
-`LOC_SYNTH_RATES_HZ` ladder in `synthetic_volleys.py`. So the two devices currently tick
-differently on purpose.
+**The SD path is done too.** `generate_localization` now draws from the model, and the library
+was re-exported on 2026-08-21: `EOD_HV`, the 5 real volleys, both real localization exemplars and
+all 100 synthetic volleys came back byte-identical, and exactly the 6 synthetic localization items
+(107–112) moved. The library is at format **v4** (uint32 IPI, so multi-second silences fit) and
+the packet is 58.7 kB of a 131 kB budget.
 
-- [ ] Point `generate_localization` at `fakefish.loc_model` and **re-export the library**. This
-      needs the source recordings, which are not in this repo — see CLAUDE.md invariant 3 for the
-      four-step sequence, and verify items 0–6 and `EOD_HV` come back byte-identical afterwards.
-      Then `bash firmware/sync_core.sh`, and rebuild the card with `fakefish-build-card`.
+- [ ] **Rebuild the WAV card** with `fakefish-build-card` before the next outing — the committed
+      card content predates all of this. Note program D's 5 s lead gets only ~2 pulses from the
+      1 Hz rung now (a 1 Hz fish with the model's tail); pick a faster rung if that lead needs to
+      be denser.
 - [ ] **Bench:** confirm the ISR still closes an interval inside its 20 µs budget on the part you
       actually flash. The draw costs three `expf`, two Box–Muller pairs and eight PRNG words —
       once per *interval*, a few times a second, not per sample tick. Comfortable on a 4.1; a 3.5

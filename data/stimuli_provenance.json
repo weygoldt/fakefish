@@ -1,7 +1,7 @@
 {
-  "stim_format_version": 3,
-  "export_date_utc": "2026-08-21T13:16:16.863583+00:00",
-  "eeltracker_git_commit": "3315259e863d4a7aa94ec998a3ce9cdae4c53442",
+  "stim_format_version": 4,
+  "export_date_utc": "2026-08-21T18:27:33.165612+00:00",
+  "eeltracker_git_commit": "b0cb8f34f09a0f5f72bb3f380571f9624994f56b",
   "eods_root": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods",
   "alignment_json": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods/global_pulse_alignment_eel_eod.json",
   "alignment_json_sha256": "b31b2cdc2fd38fe04429fadf317d81b234cb4e630a5c65813c421b3fe9e369ba",
@@ -16,7 +16,7 @@
     "net_integral": 41.576658480510574,
     "pos_neg_area_ratio": 386.57906304951877
   },
-  "packet_bytes": 37431,
+  "packet_bytes": 60067,
   "flash_budget_bytes": 131072,
   "selection_criteria": {
     "volley_min_pulses": 8,

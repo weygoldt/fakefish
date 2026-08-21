@@ -579,13 +579,32 @@ Two golden-file gates, facing opposite directions, so neither side can move alon
 
 Regenerate the golden with `uv run python tests/test_loc_model.py --emit`.
 
-### The seam that is still open
+### Both devices, one model
 
-The **SD/button device does not use this model.** Its localization WAVs are rendered from the
-localization *items* baked into the byte-frozen library, which come from the designed
-`LOC_SYNTH_RATES_HZ` ladder in `synthetic_volleys.py`. Replacing that is a **library re-export**,
-which needs the source recordings this repo does not ship. Until then the two devices tick
-differently on purpose: the RC unit like a fitted eel, the WAV card on the ladder. See `TODO.md`.
+The SD/button device uses it too. Its localization WAVs render from the localization *items* in
+the library, and those items are now drawn from the same fitted rhythm — one draw per rung of the
+`LOC_SYNTH_RATES_HZ` tempo ladder, generated in `synthetic_volleys.py` and baked in by
+`fakefish-export`. There is no second way to generate a localization pulse in this repo.
+
+Two things had to move to let the model through unbent, and both are worth knowing:
+
+**The library's IPI field is `uint32` (format v4).** It was `uint16` — a ceiling of 65535 samples,
+1.31 s — which was not a tail limit but a core-of-the-distribution one: at the 1 Hz rung 35 % of
+the model's intervals are longer than that, and even at 10 Hz 1.9 % are. Clamping would have
+deformed every item at every rung, so the format holds the model rather than the model being bent
+to fit the format. It costs +2 bytes per pulse; the packet is 58.7 kB against a 131 kB budget.
+
+**A finite item cannot hold a labelled tempo, so each train is time-scaled onto its rung.** The
+model's components relax over 3 s, 96 s and 62 min, so a 60 s item — of which program B renders
+only the first 20 s — is far too short to average the slow ones out. Left alone a "5 Hz" rung
+realises anywhere in 1.8–10.3 Hz and the rungs come out in the wrong *order*. Since rate is a pure
+time dilation, scaling every time in a drawn train by one factor is exactly what the rate knob
+does, so the rung becomes exact by construction while CV2 and the autocorrelation — both
+scale-invariant — are untouched.
+
+One consequence of the rung being a *tempo*: a 3 Hz rung delivers about 1.9 pulses/s, not 3, and
+the 1 Hz rung gives program D's 5 s lead only ~2 pulses. That is a 1 Hz fish with the model's tail,
+not a defect; pick a faster rung if program D needs a denser lead.
 
 ---
 

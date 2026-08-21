@@ -184,17 +184,36 @@
         "knob is useful to about 1.5. It is not a jitter amount and does not blend toward a",
         "Poisson process -- the lag-1 autocorrelation stays around 0.52 across the whole range.",
         "",
-        "refractory_samp is the minimum IPI (5 ms @ 50 kHz); it MUST stay greater than",
-        "EOD_HV_LEN so localization pulses can never overlap -- that is what lets locgen use a",
-        "single-pulse scheduler instead of the overlap-add engine. It is now a pure safety",
-        "floor: the model's fastest possible interval is 27.9 ms (1394 samples) at tempo 1, so",
-        "it only engages if the rate knob is driven far past any real eel."
+        "refractory_samp is the minimum IPI. It MUST stay greater than EOD_HV_LEN so",
+        "localization pulses can never overlap -- that is what lets locgen use a single-pulse",
+        "scheduler instead of the overlap-add engine.",
+        "",
+        "IT IS THE RESTING/VOLLEY ANTIMODE, NOT AN ARBITRARY SAFETY MARGIN. 1250 samples =",
+        "25 ms, taken from the fitted model's own provenance.resting_min_ipi_ms. It was 250",
+        "(5 ms) until 2026-08-21, and 5 ms sits squarely INSIDE volley territory.",
+        "",
+        "Why that mattered once the rhythm became a model. The model's interval table is",
+        "clamped at the bottom to this same 25 ms antimode, precisely so the resting rhythm",
+        "can never intrude into volley territory (spec section 3). But that clamp lives in",
+        "SCORE space, while the rate knob is a pure TIME dilation -- so any CH3 setting above",
+        "the nominal 3.15 Hz tick scales the floor down with everything else. At CH3 = 10 Hz",
+        "the table's floor lands at 8.8 ms; at 20 Hz, 4.4 ms. The source analysis segments",
+        "resting pulses from fast runs on exactly this antimode, so those intervals would be",
+        "read as micro-bursts emitted by our own localization train -- contaminating the one",
+        "distinction the experiment rests on.",
+        "",
+        "Re-imposing it in absolute time costs a visible spike at exactly 25 ms in a fast",
+        "train, which is the honest artifact: it says the device does not emit resting",
+        "intervals inside volley territory. This is a LOWER clamp and is not in tension with",
+        "leaving the long silences alone -- the spec clamps both ends of the table and defends",
+        "the bottom one in these terms. It engages on nothing at or below the nominal tempo.",
+        "synthetic_volleys.generate_localization applies the same floor to the SD items."
       ],
       "min_hz": 1.0,
       "max_hz": 20.0,
       "panel_rate_hz": 5.0,
       "panel_randomness": 1.0,
-      "refractory_samp": 250
+      "refractory_samp": 1250
     }
   }
 }

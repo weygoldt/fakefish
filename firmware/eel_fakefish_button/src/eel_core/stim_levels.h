@@ -96,6 +96,12 @@
 // varies without touching how it varies over time.
 #define PANEL_RANDOMNESS   1.0f
 // Minimum IPI. MUST stay > EOD_HV_LEN so localization pulses can never overlap —
-// that invariant is what lets locgen.h use a single-pulse scheduler. A pure safety
-// floor now: the model's fastest interval is 27.9 ms, well above it.
-#define LOC_REFRACTORY_SAMP 250u  // 5 ms @ 50 kHz
+// that invariant is what lets locgen.h use a single-pulse scheduler.
+//
+// This is the RESTING/VOLLEY ANTIMODE, not an arbitrary margin. The model's interval
+// table is clamped to it in SCORE space, but rate is a pure TIME dilation, so any
+// tick tempo above the nominal 3.15 Hz scales that floor down with everything else
+// (4.4 ms at CH3 = 20 Hz). Since the source analysis separates resting pulses from
+// fast runs on exactly this antimode, an unfloored fast train would emit intervals
+// that read as micro-bursts of our own making.
+#define LOC_REFRACTORY_SAMP 1250u  // 25 ms @ 50 kHz

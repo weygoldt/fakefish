@@ -108,8 +108,11 @@ summed by the overlap-add engine.
   autocorrelation 0.55 at lag 1, 0.21 at lag 20) is what separates a fish from a random
   number generator. The model, its fitted numbers and its caveats are in
   [`docs/LOCALIZATION_GENERATIVE_SPEC.md`](docs/LOCALIZATION_GENERATIVE_SPEC.md); like the
-  volley model it is *vendored*, not fitted here. The SD card's localization WAVs still come
-  from the older designed rate ladder — closing that needs a library re-export (`TODO.md`).
+  volley model it is *vendored*, not fitted here. **Both devices use it** — the RC unit live,
+  and the SD card through the library's localization items, which are drawn from it one per
+  rung of a tempo ladder. A rung is a *tick tempo* (one over the median interval), so a 3 Hz
+  rung delivers ~1.9 pulses/s: the interval distribution is heavy-tailed and one long silence
+  eats half the average while contributing one interval to the median.
 - **Volley** — the high-rate discharge burst: the strike. Played at the higher level. Each of
   the 100 is one independent draw from a generative model **fitted to the 200 strongest hunting
   volleys in the FLONA 2025 dataset** (43 recordings, 16 sites) — start rate, duration and decay

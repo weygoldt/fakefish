@@ -142,7 +142,9 @@ static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM
 static_assert(PULSE_MARKER_IPI_SAMP >= EEL_PLAYER_MIN_IPI_SAMP,
               "PULSE_MARKER_IPI_SAMP is tighter than eel_player can mix — raise the marker's "
               "IPI, or widen EEL_PLAYER_MIN_IPI_SAMP and pay for it on every ISR tick");
-static uint16_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
+// uint32_t, matching StimItem::ipi_samp since library format v4 widened it (the
+// localization items now carry multi-second silences that a uint16 cannot hold).
+static uint32_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
 static StimItem   g_marker_item;
 
 // ===== pulse log (ISR-owned counters; the FILE is owned by loop()) ========

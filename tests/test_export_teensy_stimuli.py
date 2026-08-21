@@ -107,13 +107,27 @@ def test_ipi_first_zero_rest_positive():
 
 
 def test_ipi_samples_from_times_units_and_ceiling():
+    """Whole samples, uint32 since library format v4.
+
+    The field was uint16 until 2026-08-21, a ceiling of 65535 samples == 1.31 s. That was
+    not a tail limit but a core-of-the-distribution one once localization came from the
+    fitted rhythm: at a 1 Hz tick 35 % of its intervals are longer than that. A multi-second
+    silence must now round-trip intact rather than raise — or wrap, which is what the
+    parser's own leftover ``astype(np.uint16)`` did until the export's round-trip
+    self-check caught it.
+    """
     # 2 ms, 8 ms @ 50 kHz -> 100, 400 samples
     ipi = ex.ipi_samples_from_times(np.array([0.0, 0.002, 0.010]), 50000)
     assert ipi.tolist() == [0, 100, 400]
-    assert ipi.dtype == np.uint16
-    # a >1.31 s gap overflows uint16 and must raise
+    assert ipi.dtype == np.uint32
+    # A 20 s silence is measured behaviour and must survive as an exact sample count.
+    long_gap = ex.ipi_samples_from_times(np.array([0.0, 20.0]), 50000)
+    assert long_gap.tolist() == [0, 1_000_000]
+    # The uint32 ceiling is 23.9 hours at 50 kHz, so it is a corrupt-input check now.
     with pytest.raises(ValueError):
-        ex.ipi_samples_from_times(np.array([0.0, 2.0]), 50000)
+        ex.ipi_samples_from_times(np.array([0.0, 1e6]), 50000)
+    with pytest.raises(ValueError):
+        ex.ipi_samples_from_times(np.array([0.0, -1.0]), 50000)
 
 
 def test_rel_amp_to_u8():
@@ -201,7 +215,7 @@ def test_header_defines(waveform, tmp_path):
     assert f"#define EOD_HV_LEN  {waveform.n}" in h
     assert f"#define STIM_SAMPLE_RATE_HZ   {ex.PLAYBACK_RATE_HZ}" in h
     assert f"#define N_STIM_ITEMS  {len(items)}" in h
-    assert "#define STIM_FORMAT_VERSION   3" in h
+    assert "#define STIM_FORMAT_VERSION   4" in h
     assert "typedef struct" in h and "StimItem" in h
     assert "extern const uint16_t STIM_LEAD_GAP_SAMP[N_STIM_ITEMS];" in h
 

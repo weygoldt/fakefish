@@ -74,7 +74,16 @@ PLAYBACK_RATE_HZ = 50000
 # v3 adds STIM_LEAD_GAP_SAMP[] — the per-item deterministic lead-in gap (samples of
 # silence between the lead-in marker and the item's first pulse). The EOD waveform
 # and the StimItem table are byte-identical to v2; v3 is a strict superset.
-STIM_FORMAT_VERSION = 3
+#: Bumped for a BREAKING change to the emitted library's layout.
+#:
+#: v4 (2026-08-21) widened ``StimItem.ipi_samp`` from uint16 to uint32. The old ceiling
+#: was 65535 samples == 1.31 s at 50 kHz, which the fitted localization rhythm blows
+#: through routinely rather than exceptionally: at a 1 Hz tick 35 % of its intervals are
+#: longer than that, and even at 10 Hz it is 1.9 %. Those long silences are measured
+#: behaviour, not a tail to trim, so the format had to hold them rather than the model
+#: being bent to fit the format. Costs +2 bytes per pulse: the IPI table goes 24.6 -> 49.2
+#: kB, the packet 37.4 -> ~62 kB of a 131 kB budget.
+STIM_FORMAT_VERSION = 4
 
 # Per-item lead-in gap: each library item gets its OWN randomly-chosen-but-then-fixed
 # offset between the lead-in marker's end and its first pulse, drawn once here (deterministic,
@@ -1252,20 +1261,29 @@ class StimItemRec:
     ]  # uint8 (0..255 == 0..1.0), or None => uniform full-scale
 
 
-def ipi_samples_from_times(times_s: np.ndarray, playback_hz: int) -> np.ndarray:
-    """Absolute pulse times (s) -> wait-before-pulse in playback SAMPLES (uint16).
+#: Ceiling of the emitted IPI field. uint32 since format v4; it was uint16 (65535 samples,
+#: 1.31 s) until the fitted localization rhythm needed to express multi-second silences.
+IPI_SAMP_MAX = 0xFFFFFFFF
 
-    Onsets can only land on 50 kHz sample boundaries, so sample-counts are the
-    honest unit (20 us granularity). Raises if any interval exceeds the uint16
-    ceiling (65535 samples = 1.31 s at 50 kHz).
+
+def ipi_samples_from_times(times_s: np.ndarray, playback_hz: int) -> np.ndarray:
+    """Absolute pulse times (s) -> wait-before-pulse in playback SAMPLES (uint32).
+
+    Onsets can only land on 50 kHz sample boundaries, so sample-counts are the honest unit
+    (20 us granularity). Raises above the uint32 ceiling, which at 50 kHz is 23.9 hours and
+    so is a corrupt-input check rather than a real limit — unlike the uint16 ceiling this
+    replaced, which sat at 1.31 s and was a genuine constraint on what could be expressed.
     """
     d = np.diff(np.asarray(times_s, dtype=np.float64))
     samp = np.round(np.concatenate([[0.0], d * playback_hz])).astype(np.int64)
-    if samp.size and int(samp[1:].max(initial=0)) > 65535:
+    if samp.size and int(samp[1:].max(initial=0)) > IPI_SAMP_MAX:
         raise ValueError(
-            f"IPI {samp.max()} samp > 65535 ({samp.max() / playback_hz:.2f}s) exceeds uint16"
+            f"IPI {samp.max()} samp > {IPI_SAMP_MAX} "
+            f"({samp.max() / playback_hz:.2f}s) exceeds uint32"
         )
-    return samp.astype(np.uint16)
+    if samp.size and int(samp.min(initial=0)) < 0:
+        raise ValueError("pulse times must be non-decreasing")
+    return samp.astype(np.uint32)
 
 
 def rel_amp_to_u8(rel: np.ndarray) -> np.ndarray:
@@ -1369,7 +1387,7 @@ def emit_firmware(
     h.append("} StimKind;")
     h.append("typedef struct {")
     h.append(
-        "  const uint16_t* ipi_samp;   // length n; wait-before-pulse in samples; [0]=0"
+        "  const uint32_t* ipi_samp;   // length n; wait-before-pulse in samples; [0]=0"
     )
     h.append(
         "  const uint8_t*  rel_amp;    // length n; 0..255; NULL => all full-scale"
@@ -1412,7 +1430,7 @@ def emit_firmware(
         c.append(
             f"// item {i}: {STIM_KIND_NAMES[it.kind]} group={it.group} — {it.label}"
         )
-        c.append(f"static const uint16_t ITEM_{i}_IPI[{it.ipi_samp.size}] = {{")
+        c.append(f"static const uint32_t ITEM_{i}_IPI[{it.ipi_samp.size}] = {{")
         c.append(_c_int_array(it.ipi_samp))
         c.append("};")
         if it.rel_amp is not None:
@@ -1453,14 +1471,15 @@ def parse_firmware(source_path: Path) -> dict:
     def _named_arrays(src: str) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}
         pat = re.compile(
-            r"(?:static\s+)?const\s+(int16_t|uint16_t|uint8_t)\s+"
+            r"(?:static\s+)?const\s+(int16_t|uint32_t|uint16_t|uint8_t)\s+"
             r"(\w+)\s*\[[^\]]*\]\s*=\s*\{([^}]*)\}",
             re.S,
         )
         for m in pat.finditer(src):
             ctype, name, body = m.group(1), m.group(2), m.group(3)
             nums = [int(x) for x in re.findall(r"-?\d+", body)]
-            dt = {"int16_t": np.int16, "uint16_t": np.uint16, "uint8_t": np.uint8}[
+            dt = {"int16_t": np.int16, "uint32_t": np.uint32,
+                  "uint16_t": np.uint16, "uint8_t": np.uint8}[
                 ctype
             ]
             out[name] = np.array(nums, dtype=dt)
@@ -1480,7 +1499,11 @@ def parse_firmware(source_path: Path) -> dict:
             n, kind, group = int(toks[2]), int(toks[3]), int(toks[4])
             result["items"].append(
                 {
-                    "ipi_samp": arrays[ipi_name].astype(np.uint16),
+                    # NOT cast to a fixed width: the emitted type is the source of truth
+                    # (uint32 since format v4). Forcing uint16 here silently wrapped every
+                    # interval past 1.31 s modulo 65536 — a 20 s silence parsed back as
+                    # 0.6 s — which the export's own round-trip self-check then caught.
+                    "ipi_samp": arrays[ipi_name],
                     "rel_amp": None
                     if amp_name == "NULL"
                     else arrays[amp_name].astype(np.uint8),
@@ -1498,13 +1521,20 @@ def parse_firmware(source_path: Path) -> dict:
 
 
 def packet_bytes(waveform: Waveform, items: list["StimItemRec"]) -> int:
-    """Flash bytes the v3 library occupies (waveform int16 + uint16 IPI + uint8 amp +
-    the per-item uint16 lead-in gap array)."""
+    """Flash bytes the library occupies (waveform int16 + the IPI table + uint8 amp +
+    the per-item uint16 lead-in gap array).
+
+    Widths come from the arrays' own dtypes rather than being written out, because they
+    have changed: the IPI field was uint16 until format v4 widened it to uint32, and a
+    hard-coded ``* 2`` here would have silently under-reported the packet by 22 kB against
+    ``max_flash_bytes`` — the one number that is supposed to catch a library outgrowing
+    flash.
+    """
     b = waveform.n * 2
     for it in items:
-        b += it.ipi_samp.size * 2
+        b += it.ipi_samp.nbytes
         if it.rel_amp is not None:
-            b += it.rel_amp.size * 1
+            b += it.rel_amp.nbytes
     b += len(items) * STIM_ITEM_STRUCT_BYTES  # the StimItem descriptor table
     b += len(items) * 2  # STIM_LEAD_GAP_SAMP[] (uint16 per item)
     return b
@@ -1990,8 +2020,17 @@ def _append_synthetic_items(
             rel = rel_amp_to_u8(v.rel_amp)
             items.append(StimItemRec(v.label, STIM_SYNTH_VOLLEY, group, ipi_samp, rel))
         else:
-            times = _longest_gapfree(v.times_s, cfg.localization_max_gap_s)
-            ipi_samp = ipi_samples_from_times(times, hz)
+            # NO GAP-FREE TRIM ON A SYNTHETIC TRAIN. `_longest_gapfree` is a data-quality
+            # gate for REAL exemplars, where a multi-second hole is ambiguous — the fish may
+            # have swum out of range, or the tracker may simply have lost it — so the
+            # conservative reading is to keep only the unbroken stretch. A synthetic train
+            # has no such ambiguity: it comes from the fitted rhythm, whose long silences
+            # are measured behaviour and are the single most distinctive thing about it.
+            # Trimming here would delete exactly the feature the model was adopted for; it
+            # chopped a 37-pulse train to 14 before this was caught. (The trim's other
+            # stated reason, that a gap over 1.31 s could not fit a uint16 sample-IPI, went
+            # away with library format v4.)
+            ipi_samp = ipi_samples_from_times(v.times_s, hz)
             items.append(StimItemRec(v.label, STIM_LOCALIZATION, group, ipi_samp, None))
         group += 1
     return group
@@ -2034,9 +2073,15 @@ def _scene_times(cfg: Config, s: Scene) -> np.ndarray:
 def _longest_gapfree(times_s: np.ndarray, max_gap_s: float) -> np.ndarray:
     """Longest contiguous run of ``times`` with no inter-pulse gap beyond max_gap_s.
 
-    A localization exemplar with a multi-second silence isn't a steady train (and
-    a gap >1.31 s can't fit the uint16 sample-IPI), so we keep only the longest
-    unbroken stretch.
+    FOR REAL EXEMPLARS ONLY. A multi-second hole in a recorded track is ambiguous — the
+    fish may have gone quiet, swum out of range, or simply been lost by the tracker — and
+    those cannot be told apart from the track alone, so the conservative reading is to keep
+    only the unbroken stretch. Do NOT apply this to a synthetic train: the fitted rhythm's
+    long silences are measured behaviour, and trimming them deletes the most distinctive
+    thing the model produces (see the synthetic branch of ``_add_synthetic_items``).
+
+    (It used to carry a second reason — that a gap over 1.31 s could not fit the uint16
+    sample-IPI. That ceiling went away with library format v4.)
     """
     t = np.sort(np.asarray(times_s, dtype=np.float64))
     if t.size < 2:
