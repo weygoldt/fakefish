@@ -26,8 +26,12 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   order (IN1 HIGH → carrier → brake). `AMP_DEBUG 1` replaces all playback with a scope
   calibration routine. HAL functions are `static inline` on purpose — each sketch compiles
   its own copy into its own binary.
-- **L2 — sample producers.** `eel_player.{h,cpp}` (overlap-add engine, the C twin of
-  `export_teensy_stimuli.reconstruct_item`), `eel_stimuli.{h,cpp}` (the generated library),
+- **L2 — sample producers.** `eel_player.{h,cpp}` (additive mixer, the C twin of
+  `export_teensy_stimuli.reconstruct_item`; it sums the currently-sounding pulses on every
+  tick rather than stamping a whole EOD into a ring at each onset, so the ISR has no
+  per-onset spike — **do not reorder that summation**, it is bit-exact only oldest-first and
+  the host self-test cannot see the difference, see the note in `eel_player.cpp`),
+  `eel_stimuli.{h,cpp}` (the generated library),
   `sd_player.h` (SD WAV streaming runtime), `locgen.h` (live localization scheduler),
   `pulse_log.h` (per-pulse SD event log — the **mirror image** of `sd_player.h`: there the ISR
   pops samples `loop()` read from the card, here the ISR pushes records `loop()` writes to it;
@@ -290,11 +294,15 @@ fail; each must print `ok`:
    throughout.)
 2. **host self-tests** (pure logic, PC `g++ -std=c++17 -Wall -Wextra`) —
    `sd_player_selftest`, `pulse_log_selftest`, `rc_control_selftest`, `panel_control_selftest`,
-   `button_control_selftest` must each print exactly `OK`. **`eel_player_selftest` is a sample
-   DUMPER, not an assertion suite — it never prints `OK`**; it streams one item's samples for
-   diffing against the Python reference, and the gate only requires a clean build, exit 0 and
-   >1000 lines of output. This group also re-emits `tests/data/pulse_log_golden.csv` from
-   `pulse_log_selftest --emit` and fails on any diff (invariant 9).
+   `button_control_selftest` must each print exactly `OK`. `eel_player_selftest` is **both**:
+   `--verify` plays the whole library (both polarities, four amplitudes, and the windowed +
+   looping paths) against a frozen ORACLE — the ring-buffer overlap-add engine `eel_player`
+   used before it became a per-tick sum — and must print `OK`; with an item index instead it
+   is a sample DUMPER that streams one item for diffing against the Python reference, and the
+   gate only requires exit 0 and >1000 lines of output there. *(It was a dumper only until
+   2026-08-21, which meant no engine change could ever fail the gate.)* This group also
+   re-emits `tests/data/pulse_log_golden.csv` from `pulse_log_selftest --emit` and fails on
+   any diff (invariant 9).
 3. **Teensy compile, per sketch** — `arm-none-eabi-g++ -fsyntax-only -std=gnu++17 -Wall
    -Wextra` through each sketch's `host_test/_amalgam.cpp`, for `eel_fakefish_button`,
    `eel_fakefish_rc` and `rc_input_test`. Must be warning-free. `arduino-cli` is not installed

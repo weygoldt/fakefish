@@ -19,8 +19,7 @@ void eel_player_start_windowed(EelPlayer* p, const StimItem* item, float amplitu
   p->max_samples = max_samples;
   p->loop = loop;
   p->scale = amplitude * (float)polarity;
-  p->ring_pos = 0;
-  for (uint16_t i = 0; i < EOD_HV_LEN; i++) p->ring[i] = 0.0f;
+  p->n_act = 0;   // nothing sounding yet — O(1), and this runs inside the RC sample ISR
   p->active = (item->n > 0) ? 1 : 0;
 }
 
@@ -36,27 +35,67 @@ int eel_player_next(EelPlayer* p, int16_t* out) {
   if (!p->active) return 0;
   const StimItem* it = p->item;
 
-  // Add every pulse whose onset is the current sample (min IPI > 1 sample, so at
-  // most one fires per tick, but the loop is safe either way). Overlap-add the
-  // scaled waveform into the ring; overlapping pulses accumulate.
+  // 1. RETIRE BEFORE ADMITTING. Every pulse lasts exactly EOD_HV_LEN samples and
+  // onsets never decrease, so phases decrease along act[] and the finished ones are
+  // always a PREFIX — drop them from the front and close the gap. Doing this first is
+  // what makes EEL_MAX_ACTIVE_PULSES exactly ceil(EOD_HV_LEN / min IPI) instead of one
+  // more: a pulse whose last sample was the previous tick hands its slot straight to a
+  // pulse starting on this one.
+  while (p->n_act > 0 && p->act[0].phase >= EOD_HV_LEN) {
+    for (uint8_t i = 1; i < p->n_act; i++) p->act[i - 1] = p->act[i];
+    p->n_act--;
+  }
+
+  // 2. Admit every pulse whose onset is the current sample (min IPI > 1 sample, so at
+  // most one fires per tick, but the loop is safe either way). The per-pulse scale is
+  // resolved here, once, and held for the pulse's whole life.
+  //
+  // The bounds test can only fail if an item was handed to this engine with onsets
+  // closer together than EEL_PLAYER_MIN_IPI_SAMP, which the Python gate rules out for
+  // library items and a static_assert rules out for each runtime-built item. It is here
+  // so that a future violation is a missing pulse rather than a smashed stack — but a
+  // dropped pulse is still an artefact that looks like data, so the assertions are the
+  // real defence, not this test. The host self-test's oracle comparison would fail on
+  // any drop, sample-for-sample.
   while (p->k < it->n && p->t == p->next_onset) {
     float a = p->scale;
     if (it->rel_amp) a *= (float)it->rel_amp[p->k] * (1.0f / 255.0f);
-    for (uint16_t j = 0; j < EOD_HV_LEN; j++) {
-      uint16_t idx = p->ring_pos + j;
-      if (idx >= EOD_HV_LEN) idx -= EOD_HV_LEN;
-      p->ring[idx] += (float)EOD_HV[j] * a;
+    if (p->n_act < EEL_MAX_ACTIVE_PULSES) {
+      p->act[p->n_act].phase = 0;
+      p->act[p->n_act].amp   = a;
+      p->n_act++;
     }
     p->last_onset = p->t;
     p->k++;
     if (p->k < it->n) p->next_onset += it->ipi_samp[p->k];
   }
 
-  // Emit and clear the current ring slot, then advance.
-  int16_t s = clamp16(p->ring[p->ring_pos]);
-  p->ring[p->ring_pos] = 0.0f;
-  p->ring_pos++;
-  if (p->ring_pos >= EOD_HV_LEN) p->ring_pos = 0;
+  // 3. Sum this tick's taps, OLDEST PULSE FIRST, and advance each phase. Starting from
+  // 0.0f and taking the pulses in onset order reproduces the ring-buffer engine's
+  // accumulation exactly — it zeroed each slot on emit, then received contributions in
+  // onset order as each pulse stamped itself in — and that is what makes this rewrite
+  // bit-identical rather than merely close.
+  //
+  // DO NOT REORDER THIS LOOP ON THE STRENGTH OF A GREEN HOST GATE. On the Teensy this
+  // expression contracts to vfma.f32: ONE rounding, with the accumulator's earlier term
+  // already rounded and the incoming product not, so the sum is order-dependent even with
+  // only two terms. The host g++ build has no FMA — it multiplies then adds, two roundings
+  // — and with two terms that is plain commutative, so summing newest-first passes
+  // eel_player_selftest --verify with every sample identical. Measured under real FMA
+  // semantics across the whole library, at four amplitudes and both polarities: the float
+  // sum changes on 30 % of overlapping ticks, and 32 emitted samples move by 1 LSB. The
+  // self-test cannot defend this ordering; this comment is the defence.
+  //
+  // (The same contraction is why the rewrite is safe: old and new both emit exactly one
+  // vfma.f32 at -O2 for cortex-m7 and cortex-m4, in the same order, over the same values.)
+  float acc = 0.0f;
+  for (uint8_t i = 0; i < p->n_act; i++) {
+    EelActivePulse* q = &p->act[i];
+    acc += (float)EOD_HV[q->phase] * q->amp;
+    q->phase++;
+  }
+
+  int16_t s = clamp16(acc);
   p->t++;
 
   if (p->max_samples && p->t >= p->max_samples) {

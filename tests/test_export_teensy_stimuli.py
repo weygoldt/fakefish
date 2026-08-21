@@ -262,3 +262,82 @@ def test_cv2_zero_for_regular_and_high_for_alternating():
     assert np.allclose(ex.cv2_series(np.arange(0, 1.0, 0.1)), 0.0)
     times = np.cumsum([0.0] + [0.01, 0.09] * 10)
     assert np.median(ex.cv2_series(times)) > 0.5
+
+
+# --------------------------------------------------------------------------
+# the committed library must respect eel_player's declared onset floor
+# --------------------------------------------------------------------------
+# eel_player sizes its slot array from EEL_PLAYER_MIN_IPI_SAMP: how many pulses can be
+# sounding at once is ceil(EOD_HV_LEN / that), and that number is the engine's worst-case
+# per-tick work inside a 20 us ISR. C cannot check the item tables at compile time, so the
+# check lives here. The constant is deliberately NOT derived from the generated library --
+# tightening the library has to fail this test and make someone decide, rather than silently
+# widening the ISR's work. See firmware/eel_core/eel_player.h.
+
+
+def _engine_min_ipi_samp() -> int:
+    """EEL_PLAYER_MIN_IPI_SAMP, read straight out of the engine header."""
+    import re
+
+    from fakefish._resources import FIRMWARE_DIR
+
+    text = (FIRMWARE_DIR / "eel_player.h").read_text()
+    m = re.search(r"#define\s+EEL_PLAYER_MIN_IPI_SAMP\s+(\d+)u?", text)
+    assert m, "EEL_PLAYER_MIN_IPI_SAMP not found in firmware/eel_core/eel_player.h"
+    return int(m.group(1))
+
+
+def test_every_committed_item_respects_the_engine_onset_floor():
+    from fakefish._resources import DEFAULT_FIRMWARE
+
+    floor = _engine_min_ipi_samp()
+    parsed = ex.parse_firmware(DEFAULT_FIRMWARE)
+    tightest, where = None, None
+    for i, it in enumerate(parsed["items"]):
+        gaps = np.asarray(it["ipi_samp"][1:], dtype=np.int64)  # [0] is always 0
+        if gaps.size == 0:
+            continue
+        if tightest is None or gaps.min() < tightest:
+            tightest, where = int(gaps.min()), i
+    assert tightest is not None, "library has no multi-pulse item"
+    assert tightest >= floor, (
+        f"item {where} has onsets {tightest} samples apart, but eel_player declares "
+        f"EEL_PLAYER_MIN_IPI_SAMP == {floor}. Pulses would be DROPPED in the ISR. "
+        f"Raise the library's floor, or widen EEL_PLAYER_MIN_IPI_SAMP and accept the "
+        f"extra per-tick work."
+    )
+
+
+def test_synth_volley_floor_is_at_least_the_engine_floor():
+    """Catch a generator-side tightening before it can reach an export."""
+    from fakefish import synthetic_volleys as sv
+
+    assert sv.SYNTH_MIN_IPI_SAMP >= _engine_min_ipi_samp()
+
+
+def test_engine_slot_count_matches_the_library_it_must_render():
+    """The slot array is sized ceil(EOD_HV_LEN / floor); check that against the real data."""
+    import re
+
+    from fakefish._resources import DEFAULT_FIRMWARE, FIRMWARE_DIR
+
+    floor = _engine_min_ipi_samp()
+    eod_len = int(
+        re.search(
+            r"#define EOD_HV_LEN\s+(\d+)",
+            (FIRMWARE_DIR / "eel_stimuli.h").read_text(),
+        ).group(1)
+    )
+    slots = -(-eod_len // floor)  # ceil
+
+    # Independently: the most pulses that are ever sounding together in the library.
+    worst = 0
+    for it in ex.parse_firmware(DEFAULT_FIRMWARE)["items"]:
+        onsets = np.cumsum(np.asarray(it["ipi_samp"], dtype=np.int64))
+        for j, o in enumerate(onsets):
+            first = int(np.searchsorted(onsets, o - eod_len, side="right"))
+            worst = max(worst, j - first + 1)
+    assert worst <= slots, (
+        f"{worst} pulses sound together somewhere in the library but eel_player has "
+        f"{slots} slot(s)"
+    )

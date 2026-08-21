@@ -137,11 +137,23 @@ run_selftest "rc surface   panel_control_selftest" panel \
 run_selftest "btn surface  button_control_selftest" btn \
     firmware/eel_fakefish_button/host_test/button_control_selftest.cpp
 
-# eel_player_selftest is a sample DUMPER, not an assertion suite — it streams one item's
-# samples for diffing against the Python reference. Require a clean build, exit 0, and output.
+# eel_player_selftest is BOTH a sample dumper and an assertion suite, from one binary.
+#   --verify  plays the whole library (both polarities, four amplitudes, plus the windowed
+#             and looping paths) against a frozen ORACLE — the ring-buffer overlap-add
+#             engine eel_player used before it became a per-tick sum — and requires exact
+#             agreement. This is what makes a change to the engine fail the gate rather
+#             than only a human's before/after diff.
+#   <item>    streams one item's samples for diffing against the Python reference.
+# NOTE the assertion suite runs on a PC, which has no FMA; it therefore cannot see a change
+# to the SUMMATION ORDER, which does move samples on the Teensy. See eel_player.cpp.
 if out="$(g++ -std=c++17 -Wall -Wextra -I firmware/eel_core \
         firmware/eel_core/eel_player.cpp firmware/eel_core/eel_stimuli.cpp \
         firmware/eel_core/host_test/eel_player_selftest.cpp -lm -o "$TMP/eng" 2>&1)"; then
+  if out="$("$TMP/eng" --verify 2>&1)" && [ "${out##*$'\n'}" = "OK" ]; then
+    pass "eel_core     eel_player_selftest --verify (engine == oracle over the whole library)"
+  else
+    bad "eel_player_selftest --verify"; printf '%s\n' "$out" | head -20 | sed 's/^/       /'
+  fi
   n="$("$TMP/eng" 0 | wc -l)"
   if [ "$n" -gt 1000 ]; then
     pass "eel_core     eel_player_selftest (dumper: $n samples for item 0)"

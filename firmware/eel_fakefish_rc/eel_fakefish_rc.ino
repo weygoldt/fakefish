@@ -100,6 +100,16 @@ static uint32_t   g_volley_onset = 0;                // detect volley pulse onse
 static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM LED pattern
 
 // The marker StimItem: a short EOD burst at a fixed IPI, count = the volley/sham tag.
+//
+// This item is BUILT AT RUNTIME (setup(), below) rather than exported, so it is outside the
+// Python gate that holds every library item to eel_player's minimum onset spacing. A
+// runtime-built item has to carry that check itself, here, or a marker faster than the engine
+// can mix would drop pulses in the ISR — and the marker is the on-water ground truth for the
+// blind. At 500 samples (100 Hz) against a 131-sample EOD it is nowhere near the limit; the
+// assertion exists so that retuning the marker cannot quietly cross it.
+static_assert(PULSE_MARKER_IPI_SAMP >= EEL_PLAYER_MIN_IPI_SAMP,
+              "PULSE_MARKER_IPI_SAMP is tighter than eel_player can mix — raise the marker's "
+              "IPI, or widen EEL_PLAYER_MIN_IPI_SAMP and pay for it on every ISR tick");
 static uint16_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
 static StimItem   g_marker_item;
 
