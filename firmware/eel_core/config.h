@@ -44,9 +44,32 @@
 //     22/23 are the only adjacent pair on the top edge of both boards. It also hands hardware
 //     Serial1 (RX1/TX1 on pins 0/1) back, which the old pinout was the sole claimant of.
 //
-// !! THE BUILT 4.1 BOARD MUST BE REWIRED: IN2 moves from pins 0/1 to 22/23 (two wires). Firmware
-// flashed onto an un-rewired board will look alive — LED, logging, RC decode all fine — and put
-// NOTHING in the water, because it is modulating pins the drivers are not connected to.
+// !! THE BUILT 4.1 BOARD MUST BE REWIRED: IN2 moves from pins 0/1 to 22/23 (two wires).
+//
+// AN UN-REWIRED BOARD IS NOT INERT. IT SITS IN PERMANENT FULL-RAIL DC DRIVE.
+// (This warning used to say such a board would "put NOTHING in the water". That was wrong, and
+// dangerously so — it reads as a harmless no-op. Field-confirmed 2026-08-21: it cooked the
+// output filter's resistors within seconds of connecting the battery.)
+//
+// The mechanism: out_begin() holds IN1 HIGH and drives the carrier on 22/23. If the drivers'
+// IN2 is wired anywhere else, that pin is left in the Teensy's power-on default — a floating
+// input — and the DRV8871's internal pull-down on its logic inputs takes IN2 LOW. IN1 high +
+// IN2 low is the DRV8871's DRIVE state, so both bridges hold OUT1 at the 36 V rail
+// continuously, from the moment setup() runs. Not pulses: DC.
+//
+// It is also completely outside firmware control. Every command — including the log-fault
+// gate that is supposed to suppress all output — goes to pins the drivers cannot hear, so
+// nothing the firmware does will brake a bridge it is not wired to. A device in this state
+// looks entirely healthy from the LED, and pulling the SD card changes nothing.
+//
+// CHECK IN1/IN2 ORIENTATION TOO. Swapping them survives the idle state — the firmware writes
+// PWM_DUTY_MAX at silence, so a swapped pair still reads high/high and still brakes, which
+// means no heat and no smoke to warn you. During a pulse, though, the bridge drives OUT2
+// instead of OUT1, and the electrodes hang off OUT1. Swap BOTH bridges and the device is
+// silent: both sides do the same thing, so it is pure common mode and nothing appears across
+// the dipole. Swap only ONE and it is worse than silent — you get a real signal at INVERTED
+// polarity on that side, which works, looks fine, and quietly puts a sign error in every
+// recording. (Both failure modes field-confirmed on the same build, 2026-08-21.)
 // The DRV8871's internal dead-time makes IN1/IN2 transitions shoot-through-safe, so NO software
 // dead-time is needed (we only ever toggle IN2 with IN1 held high).
 // PWM carrier: 100 kHz (raised from 50 kHz with the DRV8871 upgrade; the DRV8871 switches cleanly
