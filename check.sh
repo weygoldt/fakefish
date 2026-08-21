@@ -49,22 +49,38 @@ run_selftest() {
 
 # -fsyntax-only compile of one sketch through its host_test/_amalgam.cpp. The Teensy headers go
 # in with -isystem so -Wall -Wextra reports OUR code, not the vendored libraries.
+#
+# The part is a parameter because the firmware is meant to build UNCHANGED for a Teensy 4.1
+# and a Teensy 3.5: the output stage's pinout was chosen to exist on both (config.h), and the
+# PWM source clock is derived per part. That is easy to break from either side — a 4.1-only
+# pin, or a constant pinned to the 4.1's clock — and neither shows up in a 4.1-only build. So
+# both parts are compiled here.
 syntax_check_sketch() {
-  local sketch="$1"
-  local out
-  if out="$("$TEENSY_GXX" -fsyntax-only -std=gnu++17 -Wall -Wextra \
-        -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16 \
-        -D__IMXRT1062__ -DARDUINO_TEENSY41 -DF_CPU=600000000 \
+  local sketch="$1" part="${2:-teensy41}"
+  local out core cpu label
+  case "$part" in
+    teensy41)
+      core=teensy4; label="4.1"
+      cpu="-mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16
+           -D__IMXRT1062__ -DARDUINO_TEENSY41 -DF_CPU=600000000" ;;
+    teensy35)
+      core=teensy3; label="3.5"
+      cpu="-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
+           -D__MK64FX512__ -DARDUINO_TEENSY35 -DF_CPU=120000000" ;;
+    *) bad "syntax_check_sketch: unknown part '$part'"; return ;;
+  esac
+  # shellcheck disable=SC2086
+  if out="$("$TEENSY_GXX" -fsyntax-only -std=gnu++17 -Wall -Wextra $cpu \
         -DUSB_SERIAL -DLAYOUT_US_ENGLISH -DARDUINO=10819 -DTEENSYDUINO=160 \
-        -isystem"$TEENSY_ROOT/cores/teensy4" \
+        -isystem"$TEENSY_ROOT/cores/$core" \
         -isystem"$TEENSY_ROOT/libraries/SD/src" \
         -isystem"$TEENSY_ROOT/libraries/SdFat/src" \
         -isystem"$TEENSY_ROOT/libraries/SPI" \
         -I"firmware/$sketch" \
         "firmware/$sketch/host_test/_amalgam.cpp" 2>&1)" && [ -z "$out" ]; then
-    pass "$sketch compiles (-fsyntax-only, -Wall -Wextra clean)"
+    pass "$sketch compiles for Teensy $label (-fsyntax-only, -Wall -Wextra clean)"
   else
-    bad "$sketch compiles"; printf '%s\n' "$out" | sed 's/^/       /'
+    bad "$sketch compiles for Teensy $label"; printf '%s\n' "$out" | sed 's/^/       /'
   fi
 }
 
@@ -170,9 +186,11 @@ step "3. Teensy compile (arm-none-eabi-g++ -fsyntax-only)"
 if [ ! -x "$TEENSY_GXX" ]; then
   bad "Teensy compiler not found at $TEENSY_GXX (set TEENSY_GXX / TEENSY_ROOT)"
 else
-  syntax_check_sketch eel_fakefish_button
-  syntax_check_sketch eel_fakefish_rc
-  syntax_check_sketch rc_input_test      # standalone bring-up diagnostic (bundles no core)
+  for part in teensy41 teensy35; do
+    syntax_check_sketch eel_fakefish_button "$part"
+    syntax_check_sketch eel_fakefish_rc     "$part"
+    syntax_check_sketch rc_input_test       "$part"   # bring-up diagnostic (bundles no core)
+  done
 fi
 
 # ===== 4. python ===========================================================

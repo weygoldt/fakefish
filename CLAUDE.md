@@ -4,8 +4,8 @@ Guidance for Claude Code (claude.ai/code) working in this repository.
 
 ## What this is
 
-Electric-fish EOD **playback**: **two** Teensy 4.1 dipole stimulators built on **one shared
-firmware core**, plus a Python toolchain that generates/renders/simulates the stimulus
+Electric-fish EOD **playback**: **two** Teensy dipole stimulators built on **one shared
+firmware core** (built on Teensy 4.1; the source also builds for a Teensy 3.5 — see L1), plus a Python toolchain that generates/renders/simulates the stimulus
 library. The repo was extracted from the `eeltracker` analysis package (main `aa3be6e`) to
 stand on its own — cloneable and flashable with no dependency on `eeltracker` or the field
 dataset.
@@ -21,7 +21,12 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
 - **L1 — output stage / HAL.** `firmware/eel_core/config.h` + `out_hal.h`. Two DRV8871
   single-bridge drivers (one per electrode) on a **36 V** rail, driven as a true
   complementary pair: IN1 held HIGH (pins 2/3), IN2 PWM'd at the *complement* of the wanted
-  duty (pins 0/1), 100 kHz carrier, 8-bit, LED on pin 13. Idle = both electrodes actively
+  duty (pins **22/23**), 100 kHz carrier, 8-bit, LED on pin 13. **That pinout is chosen so the
+  firmware builds unchanged for a Teensy 4.1 AND a Teensy 3.5** — pins 0/1, which IN2 used
+  until 2026-08-21, have no FTM channel on the 3.5 at all. The PWM source clock is likewise
+  derived per part (4.1: FlexPWM @ 150 MHz; 3.5: FTM off the compile-time `F_BUS`). `check.sh`
+  compiles every sketch for **both** parts, so a 4.1-only pin or constant fails the gate.
+  An already-built 4.1 board must have those two wires moved. Idle = both electrodes actively
   **braked to GND**, never coasting. `out_begin()` encapsulates the load-bearing bring-up
   order (IN1 HIGH → carrier → brake). `AMP_DEBUG 1` replaces all playback with a scope
   calibration routine. HAL functions are `static inline` on purpose — each sketch compiles
@@ -305,7 +310,8 @@ fail; each must print `ok`:
    any diff (invariant 9).
 3. **Teensy compile, per sketch** — `arm-none-eabi-g++ -fsyntax-only -std=gnu++17 -Wall
    -Wextra` through each sketch's `host_test/_amalgam.cpp`, for `eel_fakefish_button`,
-   `eel_fakefish_rc` and `rc_input_test`. Must be warning-free. `arduino-cli` is not installed
+   `eel_fakefish_rc` and `rc_input_test` — each compiled TWICE, once for the Teensy 4.1 and
+   once for the Teensy 3.5 (six checks). Must be warning-free. `arduino-cli` is not installed
    here, so this is a syntax check, not a link. Override `TEENSY_GXX` / `TEENSY_ROOT` if the
    Teensyduino toolchain lives elsewhere.
 4. **python** — `uv run pytest -q` (tests use `tmp_path`; no dataset) and `uv run ruff check .`.

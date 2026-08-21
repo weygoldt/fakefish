@@ -36,8 +36,11 @@
 #include "src/eel_core/sd_player.h"  // L2: SD WAV streaming — parse, ring buffer, random pick
 #include "button_control.h"          // L3: 6 program buttons (pins 5-10) + indicator LED
 
-#if !defined(__IMXRT1062__)
-#warning "eel_fakefish_button targets the Teensy 4.1 (i.MX RT1062) — select that board in Tools > Board"
+// Supported parts: Teensy 4.1 (i.MX RT1062) and Teensy 3.5 (MK64FX512). The output stage's
+// pinout is deliberately identical on both (see config.h), and config.h derives the PWM clock
+// per part, so the same source builds for either — anything else has not been checked.
+#if !defined(__IMXRT1062__) && !defined(__MK64FX512__)
+#warning "eel_fakefish_button targets the Teensy 4.1 or 3.5 — select one of those in Tools > Board"
 #endif
 
 static const int ISR_PERIOD_US = 1000000 / SAMPLE_RATE_HZ;  // 20 us @ 50 kHz (the card's WAV rate)

@@ -81,14 +81,27 @@ static_assert(PWM_CARRIER_HZ <= 100000.0f,
 //     dropping duty bits and degrading the low-voltage localization pulses. (F_BUS_ACTUAL is a
 //     runtime variable on Teensy 4.x, not a constant expression, so the ceiling is pinned as a
 //     documented constant here rather than read from it.)
-static constexpr float PWM_TIMER_CLOCK_HZ = 150000000.0f;  // Teensy 4.1 FlexPWM source (F_BUS_ACTUAL @ 600 MHz)
-#ifdef F_CPU  // Teensy build only (host g++ has no F_CPU); pin the 150 MHz assumption to the 600 MHz CPU.
+//     The source clock is a different thing on each part, so it is derived per part:
+//       * Teensy 4.1 (i.MX RT1062): FlexPWM runs off F_BUS_ACTUAL = 150 MHz at the stock 600 MHz.
+//         F_BUS_ACTUAL is a runtime variable there, not a constant expression, so the ceiling is
+//         pinned as a documented constant and the 600 MHz assumption is asserted.
+//       * Teensy 3.5 (MK64FX512): FTM runs off the bus clock, which Teensyduino DOES expose as the
+//         compile-time F_BUS (kinetis.h) — 60 MHz at the stock 120 MHz CPU. 100 kHz x 256 =
+//         25.6 MHz of that, so all 8 duty bits survive there too, with ~2.3x headroom instead of
+//         ~5.9x. Reading F_BUS rather than pinning a number means an overclocked or underclocked
+//         3.5 re-derives itself instead of silently dropping duty bits.
+#if defined(__IMXRT1062__)
+static constexpr float PWM_TIMER_CLOCK_HZ = 150000000.0f;  // FlexPWM source (F_BUS_ACTUAL @ 600 MHz)
 static_assert(F_CPU == 600000000,
               "PWM_TIMER_CLOCK_HZ assumes F_BUS_ACTUAL = 150 MHz (Teensy 4.1 @ 600 MHz); re-derive it "
               "for another CPU speed (F_BUS_ACTUAL = F_CPU / ceil(F_CPU / 150e6))");
+#elif defined(F_BUS)
+static constexpr float PWM_TIMER_CLOCK_HZ = (float)F_BUS;   // Teensy 3.x: FTM is clocked from the bus
+#else
+static constexpr float PWM_TIMER_CLOCK_HZ = 150000000.0f;   // host g++ (self-tests): no F_CPU/F_BUS
 #endif
 static_assert(PWM_CARRIER_HZ * (float)(1u << PWM_BITS) <= PWM_TIMER_CLOCK_HZ,
-              "PWM_CARRIER_HZ too high for full PWM_BITS resolution on Teensy 4.1 (FlexPWM @ 150 MHz)");
+              "PWM_CARRIER_HZ too high for full PWM_BITS duty resolution on this part's PWM clock");
 
 // ===== Driver dead-zone pedestal ===========================================
 // WHY THIS EXISTS. `analogWrite()` maps duty q to an IN2-LOW (= DRIVE) time of (q+1)/256 of the
