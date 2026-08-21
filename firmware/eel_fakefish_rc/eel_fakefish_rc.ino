@@ -316,10 +316,11 @@ static void onSampleTick() {
           uint16_t k = (uint16_t)(player.k - 1);
           // amp_m is "the amplitude applied to THIS pulse", so it must include the item's
           // PER-PULSE envelope, which eel_player_next() applies on top of the global scale
-          // (eel_player.cpp: `if (it->rel_amp) a *= rel_amp[k]/255`). Every one of the 18 volley
-          // items the RC device can draw carries such a table, running 255 down to 204 — so
-          // logging the global scale alone would overstate the tail of every volley by up to
-          // ~20 %, silently, in the file that is meant to be the exact ground truth.
+          // (eel_player.cpp: `if (it->rel_amp) a *= rel_amp[k]/255`). Every volley item the RC
+          // device can draw carries such a table, and since the envelope became the MEASURED one
+          // those tables run 255 down to as little as 22 — so logging the global scale alone
+          // would overstate the tail of a volley by up to ~12x, silently, in the file that is
+          // meant to be the exact ground truth.
           float applied = g_playback_volley_amp;
           if (player.item && player.item->rel_amp)
             applied *= (float)player.item->rel_amp[k] * (1.0f / 255.0f);
