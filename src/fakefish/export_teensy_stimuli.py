@@ -1553,13 +1553,28 @@ def scan(
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
     all_scenes: list[Scene] = []
+    n_seen = n_opened = 0
     for site, h5 in _iter_recordings(cfg):
+        n_seen += 1
         log.info("scanning %s / %s", site, h5.name)
         try:
             rec = open_recording(h5, site, cfg.original_hz_fallback)
+        except ImportError as exc:
+            # A MISSING DEPENDENCY IS A SETUP ERROR, NOT A BAD FILE. Skipping it per-file
+            # would skip EVERY file identically and then cheerfully write an empty
+            # manifest — from which `export` would regenerate an EMPTY stimulus library
+            # over the byte-frozen one, with nothing louder than a WARNING. Fail here.
+            raise RuntimeError(
+                f"cannot read recordings: {exc}. The regeneration path needs readers that "
+                f"are NOT in the default install — retry with the 'export' group:\n"
+                f"    uv run --group export fakefish-export scan -c <config>\n"
+                f"(nixio opens the NIX/HDF5 recordings; scikit-learn does the spatial "
+                f"clustering that separates fish)."
+            ) from exc
         except Exception as exc:  # pragma: no cover - defensive I/O
             log.warning("skip %s: %s", h5.name, exc)
             continue
+        n_opened += 1
         try:
             vs = detect_volleys(rec, cfg)
             ls = detect_localization(rec, cfg)
@@ -1571,6 +1586,19 @@ def scan(
         finally:
             rec.close()
 
+    # Refuse to write an empty manifest over a good one. `export` builds the byte-frozen
+    # library from this file, so an empty manifest silently produces an empty library —
+    # the one failure mode that destroys the shipped contract without erroring.
+    if n_seen and not n_opened:
+        raise RuntimeError(
+            f"opened 0 of {n_seen} recordings — refusing to overwrite the candidate "
+            f"manifest with an empty one. Check paths.eods_root in the config."
+        )
+    if n_seen and not all_scenes:
+        raise RuntimeError(
+            f"found 0 candidate scenes in {n_opened} recording(s) — refusing to overwrite "
+            f"the candidate manifest. Check the selection thresholds in the config."
+        )
     _write_manifests(cfg, all_scenes)
 
 
@@ -1946,7 +1974,11 @@ def _append_synthetic_items(
             synth_path,
         )
         return group
-    import synthetic_volleys as sv
+    # Deferred (function-level) on purpose: synthetic_volleys imports THIS module, so a
+    # top-level import would be circular. Package-qualified — the bare `import
+    # synthetic_volleys` this used to be only resolved back when these were flat scripts
+    # run from tools/, and raised ModuleNotFoundError once the toolchain became a package.
+    from fakefish import synthetic_volleys as sv
 
     for v in sv.load_synthetic(synth_path):
         if v.kind == "volley":

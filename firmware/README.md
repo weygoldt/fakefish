@@ -335,7 +335,7 @@ deliberate: it is not a code, and it can never be mistaken for the alternating l
 
 A short EOD burst at a fixed 100 Hz IPI, tagged by **pulse count**: `PULSE_MARKER_PULSES_VOLLEY`
 (2) then the discharge, or `PULSE_MARKER_PULSES_SHAM` (4) then silence. 100 Hz sits clearly above
-localization (≤ 20 Hz) and below the volley peak (~300–400 Hz). Polarity is **not** alternated —
+localization (≤ 20 Hz) and below the volley peak (~330 Hz sustained). Polarity is **not** alternated —
 the burst shares the single randomised polarity of the playback it precedes, so here it is the
 *count*, not a pattern, that carries the information.
 

@@ -134,7 +134,53 @@ Toolchain follow-up:
       It has a card mounted already. Not done now, on purpose — the button device's 36 V
       hardware does not exist yet (§1), so there is nothing to verify it on.
 
-## 6. Future control surfaces (documented slots, deliberately unbuilt)
+## 6. Volley peak rate — recalibrated 2026-08-21, one question left open
+
+**The synthetic volleys were ~18 % too SLOW at their peak, not too fast.** Measured against
+the 41 real volleys in `data/real_volley_population.npz`:
+
+| metric | real | synthetic (before) | synthetic (now) |
+|---|---|---|---|
+| median rate over the first 50 ms | 328.8 Hz | 268.5 Hz (0.82×) | **331.1 Hz (1.01×)** |
+| sustained peak (max of a 5-IPI rolling median) | 347.8 Hz | 283.3 Hz | — |
+| `1/min(IPI)` | 369.2 Hz | 365.0 Hz (1.0×) | — |
+
+**Root cause.** The calibration matched `1/min(IPI)`, which is an *extreme-value* statistic: its
+expected value grows with the number of intervals drawn. Simulated at the fitted jitter
+(CV 0.166) around a true 300 Hz, it reads 429 Hz over 37 intervals and 463 Hz over 125. Real
+volleys carry ~37, the synthetic ones ~125 — so matching on it compared unlike with unlike and
+forced the sustained rate down to compensate. The old code corrected with a single constant
+`PEAK_JITTER_INFLATION = 1.35`; the real population's raw/sustained ratio is **1.133**. The
+model's own decay fit already said `rate_peak_hz = 347.4`, agreeing with the sustained estimate
+to 0.1 % — the fit was right, only the *sampling* distribution was wrong.
+
+The peak is now measured with `sustained_peak_hz()` on both sides, sampled with no inflation
+factor, and capped at **381 Hz** — a physical ceiling, not a taste one: `EOD_HV` is 2.62 ms, so
+a sustained rate above 1/2.62 ms means the mean IPI is shorter than one pulse. Exactly 1 of 41
+real volleys sustains above that. The synthesis QC still reports **no overlap-clip**, and only
+1.6 % of synthetic IPIs sit on the 2.5 ms floor — against 1.6 % of real IPIs that go below it.
+
+Checked and deliberately NOT changed:
+
+- **The decay time constant.** Within-volley normalised decay matches through 200 ms (real
+  0.86 / 0.67 / 0.55 at 100 / 150 / 200 ms; synthetic 0.82 / 0.68 / 0.59). An absolute
+  comparison past 200 ms looks like a 1.4× mismatch, but that is a selection effect: a fast
+  volley is a short one, so only 20 of 41 real volleys still exist at 200 ms and only 4 at
+  400 ms. Retuning τ on that subsample would be fitting the bias.
+- **The duration ladder** `[0.6, 0.9, 1.2, 1.6, 2.0, 2.5] s`. Deliberate design
+  (`build_population`), and real durations are **not** usable ground truth here — the real
+  volleys are tracker *fragments* (median 0.20 s), so their length reflects segmentation, not
+  the animal.
+
+Left open:
+
+- [ ] **Are the synthetic volleys too LONG?** This is the one place the data genuinely cannot
+      answer, and it is the likeliest source of the "they feel too fast" impression: a
+      synthetic volley runs 0.58–2.50 s with 89–284 pulses, a real *fragment* 0.07–0.74 s with
+      20–89. If complete real discharges are that short, the duration ladder should come down —
+      but settling it needs volleys captured whole, not tracker fragments.
+
+## 7. Future control surfaces (documented slots, deliberately unbuilt)
 
 Adding one is a new folder under `firmware/`, not a fork — see "Adding a new surface" in
 `firmware/README.md`.
@@ -144,7 +190,7 @@ Adding one is a new folder under `firmware/`, not a fork — see "Adding a new s
 - [ ] **De-novo-synthesis handheld** — reuse `locgen` (already L2 core, exactly so this is
       possible) with a button surface instead of the RC decode layer.
 
-## 7. Smaller follow-ups
+## 8. Smaller follow-ups
 
 - [ ] `simulate_firmware.py`'s remaining commands (`dac`, `analyze`) were written to argue for
       the 585.9 kHz / 1-pole chain. The filter model is now correct everywhere, but some of the
@@ -157,7 +203,7 @@ Adding one is a new folder under `firmware/`, not a fork — see "Adding a new s
       the future tense and its §C9 "22 nF" figure was wrong — corrected in place). Delete it or
       move it to `docs/` at the owner's discretion.
 
-## 8. Not done here, by design
+## 9. Not done here, by design
 
 - **Nothing in this repo has been flashed, scoped or field-tested.** Firmware is bench-owned;
   the gate proves it compiles and that the pure logic behaves, nothing more.

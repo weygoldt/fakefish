@@ -83,16 +83,32 @@ SYNTH_NPZ = OUT_DIR / "synthetic_population.npz"
 # hundred Hz; anything much above ~400 Hz is TWO fish volleying together (the rates
 # add), a multi-fish artifact — NOT a single-fish stimulus. So:
 #  - the model is fit only on real volleys peaking below VOLLEY_MULTIFISH_PEAK_HZ, and
-#  - synthetic realised peaks are held to SYNTH_PEAK_TARGET_HI_HZ (300-400 Hz band).
-SYNTH_PEAK_TARGET_HI_HZ = 400.0   # realistic single-fish realised-peak ceiling
-SYNTH_PEAK_TARGET_LO_HZ = 300.0   # a proper volley reaches at least this
+#  - the sampled per-volley peak is held to the SUSTAINED band below.
 VOLLEY_MULTIFISH_PEAK_HZ = 450.0  # real peak above this = two fish, drop from the fit
-# A synthesised volley's REALISED peak is 1/min(IPI) over its fastest pulses, which
-# runs ABOVE 1/mean(IPI) = the sampled per-volley rate_peak (lognormal IPI jitter +
-# taking the min over the ~dozen fastest pulses). Empirically that inflation is ~1.35x,
-# so the sampled rate_peak distribution is DEFLATED by it — otherwise sampling from the
-# real *realised* peaks and then jittering double-counts and the synthetic peaks bloat.
-PEAK_JITTER_INFLATION = 1.35
+
+# PEAK RATE IS MEASURED AS A *SUSTAINED* RATE, NOT AS 1/min(IPI).
+#
+# 1/min(IPI) is an EXTREME-VALUE statistic: its expected value grows with the number of
+# intervals you draw. Simulating lognormal IPIs at the fitted jitter (CV 0.166) around a
+# true 300 Hz, 1/min(IPI) reports 429 Hz over 37 intervals but 463 Hz over 125. Real
+# volleys carry ~37 intervals and synthetic ones ~125, so calibrating the synthesis so
+# that 1/min(IPI) matches compares unlike with unlike — and silently forces the synthetic
+# SUSTAINED rate down to compensate.
+#
+# That is exactly what happened: the old code deflated the sampled peak by a constant
+# PEAK_JITTER_INFLATION = 1.35 (removed). Measured on the real population the raw/sustained
+# ratio is 1.133, not 1.35, and the resulting synthetic volleys ran at 283 Hz sustained
+# against the real 348 Hz — 18 % slow — while their 1/min(IPI) matched almost exactly.
+#
+# So the peak is now measured with sustained_peak_hz() on both sides, and the sampled
+# distribution is used AS IS with no inflation factor: generate_volley()'s `rate_peak` is
+# the instantaneous rate at t=0, which is the same quantity sustained_peak_hz() measures.
+SUSTAINED_PEAK_WINDOW = 5         # intervals a "peak" must hold for, to not be one outlier
+SYNTH_PEAK_SUSTAINED_LO_HZ = 300.0  # a proper volley reaches at least this
+# Ceiling set by PHYSICS, not by taste: EOD_HV is 131 samples = 2.62 ms at 50 kHz, so a
+# sustained rate above 1/2.62 ms = 382 Hz means the MEAN IPI is shorter than one EOD and
+# the pulses overlap permanently. Exactly 1 of 41 real volleys sustains above that.
+SYNTH_PEAK_SUSTAINED_HI_HZ = 381.0
 # hard IPI floor (ms): no pulse faster than this. 2.5 ms == a 400 Hz ceiling, which is
 # >= the 2 ms field minimum AND hard-caps the realised peak at the single-fish
 # ceiling — a 2.0 ms floor would let the fastest jittered pulse reach 500 Hz. The
@@ -258,6 +274,30 @@ def load_population(path: Path) -> list[RealVolley]:
 # ==========================================================================
 
 
+def sustained_peak_hz(ipi_ms: np.ndarray, k: int = SUSTAINED_PEAK_WINDOW) -> float:
+    """Peak pulse rate that the volley actually HELD, in Hz.
+
+    The max of a ``k``-interval rolling median of the instantaneous rate. A peak that
+    only one interval reaches is a detection artifact (or one lucky jitter draw), not a
+    physiological burst — and ``1/min(IPI)`` reports exactly that, with a bias that grows
+    with the number of intervals drawn. This estimator is insensitive to both, which is
+    what makes it comparable between real volleys (~37 intervals) and synthetic ones
+    (~125). See the SUSTAINED_PEAK_WINDOW block at the top of this module.
+
+    It is also the quantity ``generate_volley`` samples: ``rate_peak`` is the
+    instantaneous rate at t=0, so real and synthetic are measured on the same footing.
+    """
+    ipi = np.asarray(ipi_ms, dtype=float)
+    ipi = ipi[ipi > 0]
+    if ipi.size == 0:
+        return float("nan")
+    rate = 1000.0 / ipi
+    if rate.size < k:
+        return float(np.median(rate))
+    win = np.lib.stride_tricks.sliding_window_view(rate, k)
+    return float(np.median(win, axis=1).max())
+
+
 def flag_missed_pulses(ipi_ms: np.ndarray, factor: float = 1.8) -> np.ndarray:
     """Boolean mask of IPIs that are missed-pulse artifacts (a doubled interval).
 
@@ -390,11 +430,11 @@ class VolleyModel:
     reflects that uncertainty rather than freezing one value.
 
     Between-volley variability: each synthetic volley draws its own ``rate_peak``
-    (lognormal from the real single-fish peak distribution — DEFLATED by
-    ``PEAK_JITTER_INFLATION`` and capped so the realised peak stays in the realistic
-    300-400 Hz band) and ``tau`` (around the fitted value). Real volleys peaking above
-    ``VOLLEY_MULTIFISH_PEAK_HZ`` are two fish volleying at once (rates add) and are
-    excluded — a single eel does not discharge at >400 Hz.
+    (lognormal from the real single-fish SUSTAINED peak distribution — see
+    ``sustained_peak_hz``, applied with no inflation factor and capped to the
+    ``SYNTH_PEAK_SUSTAINED_*`` band) and ``tau`` (around the fitted value). Real volleys
+    peaking above ``VOLLEY_MULTIFISH_PEAK_HZ`` are two fish volleying at once (rates add)
+    and are excluded — a single eel does not discharge at >400 Hz.
 
     Every synthetic volley starts already-strong (the onset voltage ramp and
     localization prelude are deliberately not synthesised — see the module docstring)
@@ -409,12 +449,12 @@ class VolleyModel:
     tau_s: float
     ipi_jitter_cv: float  # multiplicative lognormal jitter on each IPI
 
-    # between-volley variability (DEFLATED single-fish peaks; see PEAK_JITTER_INFLATION).
-    # peak_lo/hi are on the SAMPLED rate_peak; realised = ~PEAK_JITTER_INFLATION x that.
+    # between-volley variability, on the SUSTAINED peak (see sustained_peak_hz). These
+    # are the rate the volley HOLDS at onset, in Hz — not 1/min(IPI), and not deflated.
     peak_log_mu: float = 0.0
     peak_log_sigma: float = 0.0
-    peak_lo_hz: float = 200.0  # sampled rate_peak floor -> ~300 Hz realised
-    peak_hi_hz: float = 300.0  # sampled rate_peak cap  -> ~400 Hz realised
+    peak_lo_hz: float = 300.0  # sustained rate_peak floor
+    peak_hi_hz: float = 381.0  # sustained rate_peak cap (one EOD per IPI; see module top)
     tau_lo_s: float = 0.2
     tau_hi_s: float = 0.6
     # the volley-tail rate the decay approaches (a biological PRIOR, not fit — all real
@@ -439,8 +479,13 @@ class VolleyModel:
         return (rp - re) * np.exp(-t / ta) + re
 
 
-def fit_model(pop: list[RealVolley], loc_ipi_ms: np.ndarray) -> VolleyModel:
-    """Fit the rate-decay (robust, all points) and localization params.
+def fit_volley_params(pop: list[RealVolley]) -> dict:
+    """Fit the volley-side model parameters from the real population alone.
+
+    Split out from :func:`fit_model` so it can be re-run from the cached population
+    (``data/real_volley_population.npz``) without the source recordings or the
+    unshipped candidates file — see the ``refit-peaks`` command. The localization
+    parameters are the only ones that need anything beyond this cache.
 
     Uses a robust (soft-L1) loss on ALL clean+artifact points rather than
     one-sided deletion of high-IPI outliers, so missed-pulse spikes are
@@ -460,7 +505,8 @@ def fit_model(pop: list[RealVolley], loc_ipi_ms: np.ndarray) -> VolleyModel:
         trend = ex._moving_median(v.ipi_ms, max(3, (v.ipi_ms.size // 6) | 1))
         good = ~flag_missed_pulses(v.ipi_ms)
         cvs.append(np.std((v.ipi_ms[good] - trend[good]) / trend[good]))
-        peaks.append(v.peak_rate_hz)
+        # The SUSTAINED peak, not the stored 1/min(IPI) — see sustained_peak_hz().
+        peaks.append(sustained_peak_hz(v.ipi_ms))
     ts = np.concatenate(ts)
     rates = np.concatenate(rates)
     peaks = np.asarray(peaks, dtype=float)
@@ -479,28 +525,35 @@ def fit_model(pop: list[RealVolley], loc_ipi_ms: np.ndarray) -> VolleyModel:
         f_scale=50.0,
         maxfev=40000,
     )
+    # `peaks` are the real single-fish SUSTAINED peaks (_good_volleys already dropped
+    # multi-fish >450 Hz and late-peak fragments). No inflation factor is applied: the
+    # sampled rate_peak IS a sustained rate (the generator's instantaneous rate at t=0),
+    # so it is the same quantity, measured the same way, on both sides. Clipping into the
+    # band BEFORE taking the log keeps the weak partial fragments in the fit as band-edge
+    # mass instead of dragging the mean down to a rate no real volley sustains.
+    peak_lo = SYNTH_PEAK_SUSTAINED_LO_HZ
+    peak_hi = SYNTH_PEAK_SUSTAINED_HI_HZ
+    log_pk = np.log(np.clip(peaks, peak_lo, peak_hi))
+    return {
+        "rate_peak_hz": float(rp),
+        "rate_end_hz": RATE_END_NOMINAL,
+        "tau_s": float(tau),
+        "ipi_jitter_cv": float(np.clip(np.median(cvs), 0.05, 0.5)),
+        "peak_log_mu": float(np.mean(log_pk)),
+        "peak_log_sigma": float(np.std(log_pk)),
+        "peak_lo_hz": float(peak_lo),
+        "peak_hi_hz": float(peak_hi),
+        "min_ipi_ms": SYNTH_MIN_IPI_MS,
+        "tau_lo_s": float(tau * 0.6),
+        "tau_hi_s": float(tau * 1.7),
+    }
+
+
+def fit_model(pop: list[RealVolley], loc_ipi_ms: np.ndarray) -> VolleyModel:
+    """Fit the full model: the volley-side parameters plus the localization ones."""
     log_ipi = np.log(loc_ipi_ms)
-    # peaks are the real single-fish REALISED peaks (_good_volleys already dropped
-    # multi-fish >450 Hz and late-peak fragments). The synthesis inflates the sampled
-    # rate_peak by ~PEAK_JITTER_INFLATION, so DEFLATE the sampled distribution by it and
-    # cap it at the realistic band, giving realised synthetic peaks that match the real
-    # single-fish ones (300-400 Hz) instead of the old ~1.5x-bloated cloud.
-    infl = PEAK_JITTER_INFLATION
-    log_pk = np.log(peaks) - np.log(infl)
-    peak_lo = max(float(np.min(peaks)), SYNTH_PEAK_TARGET_LO_HZ) / infl
-    peak_hi = min(float(np.max(peaks)), SYNTH_PEAK_TARGET_HI_HZ) / infl
     return VolleyModel(
-        rate_peak_hz=float(rp),
-        rate_end_hz=RATE_END_NOMINAL,
-        tau_s=float(tau),
-        ipi_jitter_cv=float(np.clip(np.median(cvs), 0.05, 0.5)),
-        peak_log_mu=float(np.mean(log_pk)),
-        peak_log_sigma=float(np.std(log_pk)),
-        peak_lo_hz=float(peak_lo),
-        peak_hi_hz=float(peak_hi),
-        min_ipi_ms=SYNTH_MIN_IPI_MS,
-        tau_lo_s=float(tau * 0.6),
-        tau_hi_s=float(tau * 1.7),
+        **fit_volley_params(pop),
         loc_log_mu=float(np.mean(log_ipi)),
         loc_log_sigma=float(np.std(log_ipi)),
         loc_median_hz=float(1000.0 / np.exp(np.median(log_ipi))),
@@ -637,7 +690,13 @@ def generate_localization(
 def build_population(model: VolleyModel, seed: int = 0) -> list[SyntheticVolley]:
     """A population of synthetic volleys (varied body lengths, all starting
     already-strong) + localization trains. Labels carry the played duration."""
-    rng = np.random.default_rng(seed)
+    # INDEPENDENT RNG STREAMS for the two families. They used to share one generator, so
+    # the localization trains consumed whatever draws were left after the volleys — and any
+    # change to the volley model (which changes how many draws a volley takes) silently
+    # re-rolled every localization train too, even though not one localization parameter had
+    # moved. Separate streams keep a volley-side change confined to the volleys.
+    rng_vol = np.random.default_rng(seed)
+    rng_loc = np.random.default_rng(seed + 1_000_000)
     # Body lengths start at 0.6 s (not 0.3): with tau ~0.3 s a 0.3 s body is cut off
     # after ~1 tau — the rate decay never substantially completes, so it plays
     # "truncated". From 0.6 s up the rate decay is substantially complete, and the
@@ -646,13 +705,13 @@ def build_population(model: VolleyModel, seed: int = 0) -> list[SyntheticVolley]
     out: list[SyntheticVolley] = []
     for L in body_lengths:
         for rep in range(3):
-            v = generate_volley(model, L, rng, "")
+            v = generate_volley(model, L, rng_vol, "")
             v.label = f"synth_volley_body{L:.1f}s_tot{v.times_s[-1]:.1f}s_{rep}"
             out.append(v)
     # a set of localization trains spanning the resting/exploring rate range (1-10 Hz),
     # one per target average rate.
     for r in LOC_SYNTH_RATES_HZ:
-        out.append(generate_localization(model, 60.0, rng, f"synth_loc_{r:g}hz", rate_hz=r))
+        out.append(generate_localization(model, 60.0, rng_loc, f"synth_loc_{r:g}hz", rate_hz=r))
     return out
 
 
@@ -1035,6 +1094,45 @@ def analyze(
         model.loc_median_hz,
     )
     plot_model_fit(pop, model, FIG_DIR / "model_fit.png")
+
+
+@app.command("refit-peaks")
+def refit_peaks(
+    verbose: int = typer.Option(2, "--verbose", "-v", count=True),
+) -> None:
+    """Re-fit the VOLLEY-side model parameters from the cached real population.
+
+    Unlike ``analyze`` this needs **no source recordings** and no candidates file — it
+    reads ``data/real_volley_population.npz``, which is versioned. The localization
+    parameters are carried over from the existing model unchanged, because they are the
+    only ones that cannot be derived from that cache.
+
+    Use it after changing how the peak rate is measured (``sustained_peak_hz``) or the
+    ``SYNTH_PEAK_SUSTAINED_*`` band. Follow with ``synthesize`` and then
+    ``fakefish-export`` to carry the change into the firmware library.
+    """
+    configure_logging(verbose)
+    pop = load_population(POP_CACHE)
+    old = load_model(MODEL_JSON)
+    fitted = fit_volley_params(pop)
+    new = VolleyModel(
+        **fitted,
+        loc_log_mu=old.loc_log_mu,
+        loc_log_sigma=old.loc_log_sigma,
+        loc_median_hz=old.loc_median_hz,
+    )
+    save_model(new, MODEL_JSON)
+    log.info("re-fit from %d cached real volleys (localization params carried over)", len(pop))
+    for f in ("rate_peak_hz", "tau_s", "ipi_jitter_cv", "peak_log_mu",
+              "peak_log_sigma", "peak_lo_hz", "peak_hi_hz"):
+        o, n = getattr(old, f), getattr(new, f)
+        mark = "" if abs(n - o) < 1e-9 else "   <-- CHANGED"
+        log.info("  %-16s %10.4f -> %10.4f%s", f, o, n, mark)
+    log.info(
+        "sampled peak median %.1f Hz -> %.1f Hz",
+        float(np.exp(old.peak_log_mu)),
+        float(np.exp(new.peak_log_mu)),
+    )
 
 
 @app.command()

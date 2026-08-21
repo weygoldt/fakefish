@@ -120,7 +120,10 @@
 // ===== Volley snippet selection (from the stored library) ==================
 // The synthetic volleys (kind 1, STIM_ITEMS indices 7..24) carry the decaying-rate envelope.
 // A volley random-picks one of these per fire. Pin FIRST + COUNT=1 for a reproducible volley.
-// (Library volleys peak ~300-400 Hz; a slower canonical volley is a data/export task.)
+// Their peak rate is calibrated against the real recorded volleys: 331 Hz over the first
+// 50 ms against the real population's 328 Hz. (Before 2026-08-21 they ran ~18 % slow, because
+// the calibration matched 1/min(IPI) — an extreme-value statistic that reads higher the more
+// pulses you draw, and these carry ~4x more than a real volley. See synthetic_volleys.py.)
 #define RC_VOLLEY_ITEM_FIRST 7
 #define RC_VOLLEY_ITEM_COUNT 18
 

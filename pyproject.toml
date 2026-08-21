@@ -18,6 +18,22 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+# ONLY the library-REGENERATION path needs these, and only alongside the source
+# recordings (which are not shipped): `fakefish-export scan/export` and
+# `fakefish-synth-volleys analyze`. Flashing, `fakefish-build-card`, the galleries,
+# `fakefish-pulse-log` and the whole `make check` gate run without them.
+#
+#   uv run --group export fakefish-export scan -c data/stimuli_config.yaml
+#
+# They are a separate group rather than a hard dependency because scikit-learn is a
+# heavy install that the 99% case never touches. They are DECLARED rather than left
+# implicit because without them the scan silently skipped every recording and wrote an
+# empty manifest, from which `export` would regenerate an EMPTY stimulus library over
+# the byte-frozen one (see the ImportError guard in export_teensy_stimuli.scan).
+export = [
+    "nixio>=1.5",          # opens the NIX/HDF5 pulse recordings
+    "scikit-learn>=1.3",   # KMeans + silhouette: the spatial clustering that separates fish
+]
 
 [project.scripts]
 # Codegen: shared/stim_constants.json -> stim_levels.h + _constants.py (no dataset needed):

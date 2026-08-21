@@ -103,8 +103,11 @@ summed by the overlap-add engine.
 
 - **Localization** — a slow, jittered train (≤ 20 Hz), the discharge an eel emits while
   cruising and probing. Played at the lower level.
-- **Volley** — the high-rate discharge burst (peaking ~300–400 Hz) with a decaying-rate
-  envelope: the strike. Played at the higher level. The **level ratio between the two is the
+- **Volley** — the high-rate discharge burst with a decaying-rate envelope: the strike. Played
+  at the higher level. Its peak is calibrated against the real recorded population — **~330 Hz
+  held over the first 50 ms**, decaying with τ ≈ 0.31 s — and the synthetic volleys are
+  measured against the real ones on a *sustained* rate, never on `1/min(IPI)` (see
+  [`TODO.md`](TODO.md) §6). The **level ratio between volley and localization is the
   experiment**, so the SD WAVs are absolute-scaled, never peak-normalised.
 - **Localize → strike** — a localization lead, a short gap, then the volley (SD program D);
   one marker and one polarity span the whole sequence.
