@@ -50,7 +50,7 @@
 #include <IntervalTimer.h>
 #include "src/eel_core/config.h"        // L1: output stage, sample clock, LED pin
 #include "src/eel_core/stim_levels.h"   // generated playback constants (PULSE_MARKER_*, PANEL_*)
-#include "src/eel_core/out_hal.h"       // L1: out_begin/out_write/out_silence (+ AMP_DEBUG)
+#include "src/eel_core/out_hal.h"       // L1: out_begin/out_write/out_arm/out_disarm (+ AMP_DEBUG)
 #include "src/eel_core/eel_stimuli.h"   // L2: EOD_HV[] + STIM_ITEMS[] (volley snippets)
 #include "src/eel_core/eel_player.h"    // L2: shared overlap-add engine (marker + volley playback)
 #include "src/eel_core/locgen.h"        // L2: live localization scheduler
@@ -160,7 +160,7 @@ static inline bool trig_pending() { return g_trig_seq != g_trig_seen; }
 
 // ----- ISR-side state transitions (single owner) --------------------------
 static inline void begin_loc() {
-  out_silence();
+  out_arm();                                     // bridges live at the pedestal for the whole train
   locgen_reset(&loc, draw_loc_ipi(), g_loc_amp, rand_polarity());
   src = SRC_LOC;
   g_playing = true;
@@ -176,7 +176,7 @@ static inline void begin_loc() {
 // request that is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM
 // buttons pass through unchanged, so the bench stays deterministic.
 static inline void begin_marker(int kind) {
-  out_silence();
+  out_arm();                                     // ...and for the marker + whatever follows it
   if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
   const int requested = kind;                    // BEFORE the blinded draw — see log_trig_code
   if (kind == RC_TRIG_RANDOM)
@@ -204,7 +204,7 @@ static inline void begin_marker(int kind) {
   plog_push(&g_plog, &r);
 }
 static inline void begin_volley_burst() {
-  out_silence();
+  out_arm();                                     // already armed by the marker; harmless and explicit
   uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
   eel_player_start_item(&player, &STIM_ITEMS[idx], g_playback_volley_amp, g_playback_pol);   // latched amp + marker's polarity
   g_volley_onset = 0xFFFFFFFFu;
@@ -214,7 +214,7 @@ static inline void begin_volley_burst() {
   src = SRC_VOLLEY;
 }
 static inline void begin_sham() {   // no water output — just the distinct LED pattern
-  out_silence();
+  out_arm();                                     // a sham holds the pedestal exactly like a volley does
   g_sham_phase = 0;
   src = SRC_SHAM;
   // A sham emits NOTHING into the water, so without this row the trial is invisible in the log.
@@ -224,7 +224,7 @@ static inline void begin_sham() {   // no water output — just the distinct LED
   plog_push(&g_plog, &r);
 }
 static inline void go_idle() {
-  out_silence();
+  out_disarm();                                  // nothing playing, nothing scheduled -> hard brake, no drain
   if (src == SRC_LOC) log_event(PLOG_LOCOFF);
   src = SRC_IDLE;
   g_playing = false;

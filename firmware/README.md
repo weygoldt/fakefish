@@ -23,7 +23,7 @@ project overview is in the [top-level README](../README.md).
 
 | Layer | Owns | Files |
 |-------|------|-------|
-| **L1 — output HAL** | one signed `int16` → two DRV8871 half-bridges: pins, carrier, noise shaping, the braked idle, boot order | `eel_core/config.h`, `eel_core/out_hal.h` |
+| **L1 — output HAL** | one signed `int16` → two DRV8871 half-bridges: pins, carrier, noise shaping, the dead-zone pedestal, the braked idle, boot order | `eel_core/config.h`, `eel_core/out_hal.h` |
 | **L2 — sample producers** | what the samples *are* | `eel_core/eel_player.{h,cpp}`, `sd_player.h`, `locgen.h`, `eel_stimuli.{h,cpp}` |
 | **L3 — control surfaces** | what the *operator* does, and the ISR that ties L2 to L1 | `eel_fakefish_button/`, `eel_fakefish_rc/` |
 
@@ -37,7 +37,7 @@ on the next sync.
 firmware/
   eel_core/                    canonical shared core (edit HERE)
     config.h                   L1  pins, carrier, sample clock, LED, AMP_DEBUG
-    out_hal.h                  L1  out_begin / out_write / out_brake / out_silence / shape
+    out_hal.h                  L1  out_begin / out_write / out_arm / out_disarm / out_silence
     stim_levels.h              GENERATED from shared/stim_constants.json — do not edit
     eel_player.{h,cpp}         L2  overlap-add engine (marker + volley)
     eel_stimuli.{h,cpp}        L2  generated stimulus library (byte-frozen)
@@ -114,14 +114,16 @@ linear. The previous build grounded IN2 and PWM'd IN1 alone, so the PWM low phas
 slow leak-through-water tail, which no real EOD does) plus single-ended bleedthrough that a
 floating node cannot filter. Braking to ground on the off phase removes both.
 
-**Idle is an explicit brake, not a float.** `out_silence()` commands duty 0 on both boards
-*and* zeroes the noise shaper; it is never "both inputs low" (that would coast). Use it — not a
-bare `out_brake()` — at every gap boundary, or residual shaper error leaks stray duty into the
-silence.
+**Idle is an explicit brake, not a float.** It is never "both inputs low" (that would coast).
+Use `out_silence()` — not a bare `out_brake()` — at every gap boundary, or residual shaper error
+leaks stray duty into the silence. `out_silence()` zeroes the shaper and emits differential zero;
+what that means single-ended depends on the armed state (duty 0 when disarmed, the pedestal when
+armed), which is covered in
+[The driver dead zone](#the-driver-dead-zone--why-both-bridges-idle-at-a-pedestal).
 
 **Bring-up order is load-bearing** and is encapsulated in `out_begin()`: hold both IN1 HIGH
 first (so each bridge's high side is defined before its IN2 modulates it), then set the carrier,
-then brake. Call it first from `setup()`; never open-code it.
+then `out_disarm()` to the braked idle. Call it first from `setup()`; never open-code it.
 
 The DRV8871 has internal dead-time, so antiphase IN1/IN2 is shoot-through-safe with **no
 software dead-time** — and here only IN2 ever toggles, with IN1 steady.
@@ -130,9 +132,11 @@ software dead-time** — and here only IN2 ever toggles, with IN1 steady.
   Teensy default. `PWM_CARRIER_HZ` in `config.h` carries a `static_assert` that it stays
   ≤ 100 kHz and that full 8-bit duty is still achievable there (150 MHz FlexPWM clock ÷ 256).
 - **Resolution:** 8-bit duty with first-order error-feedback **noise shaping** (~+3 in-band
-  bits), running at the 50 kHz waveform sample rate — independent of the carrier, so raising the
-  carrier does not touch it. Its quantisation noise is high-passed toward the 25 kHz
-  sample-Nyquist, where the output filter is already 35.7 dB down.
+  bits — measured +3.5 b at the repo's own 5 kHz band definition), running at the 50 kHz waveform
+  sample rate — independent of the carrier, so raising the carrier does not touch it. Its
+  quantisation noise is high-passed toward the 25 kHz sample-Nyquist, where the output filter is
+  already 35.7 dB down. The **bottom** of the duty range is not usable as-is — see
+  [The driver dead zone](#the-driver-dead-zone--why-both-bridges-idle-at-a-pedestal).
 
 ---
 
@@ -217,6 +221,172 @@ Nothing either device emits is out of band any more.
   response equals the single-ended one **while they are matched**. Mismatch is the mechanism by
   which the common-mode pedestal (below) leaks differential; at ±10 % it is a few per cent and
   benign. The retired single bridging cap was immune to this by construction.
+
+---
+
+### A better network for the next build — three sections, same resistance
+
+**Not built. This is a design for whenever a board is next opened up or made from scratch**, and it
+is the recommended layout for the hand-held unit's 36 V stage, which does not exist yet (`TODO.md`
+§1) and therefore costs nothing extra to build this way.
+
+**The problem with the present network is its topology, not its cutoff.** The two sections are
+identical and unbuffered, so the second loads the first and the pole pair splits **6.9 : 1** —
+1.256 kHz and 8.609 kHz, Q = 1/3. A 2-pole's stopband is set by the *geometric mean* of its poles
+(3.29 kHz here) while its passband droop is set by the *lower* one. So the network pays the droop
+of a 1.23 kHz filter and collects only the stopband of a 3.29 kHz one. That gap is pure waste, and
+a third section recovers most of it **at the same total series resistance and the same dissipation**.
+
+```
+ DRV8871 OUT1 ──[220Ω 2W]──┬──[110Ω]──┬──[110Ω]──┬── electrode
+                        [150nF]     [100nF]    [100nF]
+                           │           │          │
+                       star GND    star GND   star GND
+```
+
+| position | part | why this value |
+|---|---|---|
+| R1 | **220 Ω**, 2 W metal oxide axial | unchanged — the *only* resistor that gets hot (see below) |
+| C1 | **150 nF** film, 100 V | |
+| R2, R3 | **110 Ω**, 0.25 W metal film 1 % | ≤ 7 mW each; two 220 Ω in parallel also works |
+| C2, C3 | **100 nF** film, 100 V | |
+
+Two resistor values, two capacitor values, all E6/E24, six parts per channel. **Film (MKT/MKP) is
+mandatory, not a preference:** each shunt sits at a large mean DC on a single-ended 36 V rail, and
+class-2 ceramic's DC-bias derating would make the filter *amplitude-dependent* — which would break
+the property (invariant 4) that marker / localization / volley level **ratios** survive the chain.
+
+**What it buys**, open circuit — which is the operating case in the poorly-conducting blackwater the
+field site sits in, where the load barely damps the network at all:
+
+| | present 220 Ω/220 nF ×2 | three-section | |
+|---|---|---|---|
+| rejection @ 100 kHz | −59.35 dB (24.7 mV) | **−60.71 dB (21.1 mV)** | better |
+| RMS pulse shape residual | 4.77 % | **2.93 %** | −39 % |
+| pulse peak loss | −0.52 dB | **−0.31 dB** | better |
+| 10–90 % rise (409.6 µs true) | 454.4 µs (+10.9 %) | **440.0 µs (+7.4 %)** | better |
+| FWHM change | +5.3 % | +3.2 % | better |
+| group delay | 137 µs | 106 µs | better |
+| −3 dB, open / into 1 kΩ | 1228 / 2117 Hz | 1644 / 2726 Hz | — |
+| total series R per channel | 440 Ω | **440 Ω** | unchanged |
+| worst-case dissipation in R1 | 1.47 W | **1.47 W** | unchanged |
+
+**The one debit, stated so it is not discovered later.** Matched at 100 kHz, a three-section ladder
+is *shallower* in the 10–50 kHz mid-band than the two-section it replaces (−17.6 vs −21.8 dB at
+10 kHz; −30.9 vs −35.7 dB at 25 kHz), and that is where the noise shaper puts its energy. Measured
+on a real 20 Hz / level-0.45 localization train through the bit-exact `shape()`: total shaper
+leakage at the electrode rises **0.704 → 1.039 LSB rms (−85.9 → −82.5 dB re pulse peak)**. The
+in-band 0–1 kHz part barely moves (0.198 → 0.205 LSB); all the extra sits at 5–25 kHz, an order of
+magnitude above the EOD band and trivially removed in analysis. Above 200 kHz the three-section is
+*better* (−78.2 vs −71.4 dB).
+
+**Why not the obvious alternatives.**
+
+- **Just raise the cutoff** (swap the caps for 150 nF): halves the shape error, but spends 6.6 dB
+  of stopband and lands at −52.7 dB, *below* the −55 dB the recording requires. Only safe once the
+  recorder's anti-alias response is measured, which it has not been.
+- **Impedance-stagger the two existing sections** (R2/R1 = C1/C2 = k): this genuinely does move the
+  corner 1228 → 1975 Hz at unchanged stopband — but Q → 0.5 needs large k, and total series
+  resistance is R1(1+k). Keeping the resistance down instead means dropping R1, and carrier
+  dissipation is `V²·d(1−d)/R1` — **independent of C**. The tidy-looking 22 Ω/2.2 µF + 220 Ω/220 nF
+  version needs **21.9 W** in position 1. Thermally impossible.
+- **A fourth section:** 1.08 % vs 1.14 % at Rtot 880 Ω. Three is the knee.
+- **A series inductor** would beat everything here (+4.6 dB of delivered field, 21× less shape
+  error, no heat), but it is a fourth part type, needs matching across channels, can peak with
+  ±20 % tolerance, and is an antenna next to a preamp. Deliberately not recommended.
+- **A differential bridging cap across the electrodes:** leaves +29.7 dB of unfiltered *common-mode*
+  carrier (753 mV vs 24.7 mV). Decisive against a single-ended recording grid. This is why the one
+  the retired direct-pin stage used was not carried over.
+
+**Do not simply add a third RC to the untouched network.** Bolting 110 Ω + 100 nF onto the existing
+220 Ω/220 nF ×2 gives −76.4 dB at 100 kHz — 17 dB nobody needs — and drags the corner down to
+908 Hz, **doubling** the shape error to 7.66 %. The capacitors have to be retuned with it.
+
+---
+
+## The driver dead zone — why both bridges idle at a pedestal
+
+**This is the largest amplitude-dependent error in the chain, and it is bigger than anything the
+output filter does.** It was found by ear before it was found on paper: the pulses audibly change
+character as the amplitude control comes down, and below roughly one-sixteenth of full scale the
+device goes silent.
+
+**The mechanism.** `analogWrite()` maps duty `q` to an IN2-LOW (= DRIVE) time of `(q+1)/256` of the
+carrier period. At 100 kHz that period is 10 µs, so:
+
+| duty code | 0 | 1 | 4 | 8 | 11 | 21 | 32 |
+|---|---|---|---|---|---|---|---|
+| commanded drive pulse | 39 ns | 78 ns | 195 ns | 352 ns | 469 ns | 859 ns | 1289 ns |
+
+The DRV8871 needs a minimum input pulse width to respond at all — **400 ns typical, 800 ns
+guaranteed** (SLVSCY9B, Recommended Operating Conditions footnote 1). Codes below ~11 (typical) or
+~21 (guaranteed) are therefore unreliable. The flanks and the negative pre-potential of every EOD
+sit exactly there, so as the amplitude drops a growing share of each pulse is silently deleted: the
+pulse is **hollowed out from the bottom while its peak still arrives at the right height**, which
+is why it changes timbre rather than simply getting quieter. Simulated delivered-vs-ideal RMS shape
+error, bridge dropping sub-threshold pulses, `q_min = 21`:
+
+| amplitude | 0.90 | 0.45 | 0.25 | 0.125 | 0.0625 |
+|---|---|---|---|---|---|
+| **without pedestal** | 3.3 % | 6.9 % | 12.9 % | 32 % | **silent** |
+| **with pedestal** | **0.04 %** | **0.07 %** | **0.11 %** | **0.28 %** | **0.51 %** |
+
+**The fix.** Both boards are held at `OUT_PEDESTAL_DUTY` (config.h) whenever the device is armed to
+emit, and the signal rides on top. The offset is identical on both electrodes, so it is pure common
+mode and cancels across the dipole — the water is driven by `V_A − V_B` — while no channel is ever
+commanded below the pedestal. `out_write()` scales the signal into the `OUT_SIGNAL_DUTY_MAX` codes
+above the pedestal, so full scale still reaches the rail exactly.
+
+**Armed, not permanent.** While the pedestal is on the bridges switch continuously and the first
+filter resistor dissipates ~0.45 W per channel *between* pulses as well as during them. So L1
+exposes `out_arm()` / `out_disarm()`, and a surface arms only while something is actually going
+into the water:
+
+| surface | arms at | disarms at |
+|---|---|---|
+| `eel_fakefish_rc` | `begin_loc`, `begin_marker`, `begin_volley_burst`, `begin_sham` | `go_idle` |
+| `eel_fakefish_button` | `start_playback` | end of stream / SD fault |
+
+With the lever down and nothing playing the device is **disarmed**: duty 0 on both boards, hard
+brake, zero dissipation and zero battery drain — exactly as before this feature existed. A sham
+holds the pedestal for its full duration just as a volley does, so the two are electrically
+indistinguishable in common mode.
+
+`out_silence()` is now armed-aware and that is load-bearing: **do not "simplify" it back to an
+unconditional brake**, or every zero-valued sample inside a playback becomes a common-mode step.
+
+**What it costs.** 8.2 % (0.74 dB) of headroom at `OUT_PEDESTAL_DUTY = 21` — less than one click of
+the RC amplitude control (0.60 dB at mid-scale). And while armed, single-ended idle is no longer a
+hard 0 V but `21/255` of the rail, common mode, differentially zero; the star ground is not in the
+water, so that pedestal has no return path through it.
+
+### ⚠ Bench job not yet done: measure the real threshold
+
+**`OUT_PEDESTAL_DUTY = 21` is the datasheet-*guaranteed* 800 ns bound, chosen to be safe on any
+device without measuring.** A typical part is fine at **11**, which would halve both the headroom
+and the power cost. Measuring it is a ten-minute job and worth doing:
+
+- [ ] Set `AMP_DEBUG 1` in `eel_core/config.h` and change `AMP_DEBUG_SWEEP_LEVELS` to walk the
+      *bottom* of the range finely — `{ 0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 21, 24, 32 }`.
+      The routine bypasses the noise shaper and prints the commanded duty, so a scope reading maps
+      straight onto the number the firmware sent.
+- [ ] Probe one electrode single-ended to battery ground. Find **the lowest duty code that produces
+      any output at all**, and **the lowest code from which output is linear in duty**. The second
+      is the one that matters — set `OUT_PEDESTAL_DUTY` a couple of codes above it.
+- [ ] While there, check duty 0 really is a hard 0 V (it commands a 39 ns pulse, which the driver
+      should ignore — that is what makes the disarmed brake work) and read the intercept of the
+      duty→volts line: `t_DEAD = 220 ns` is 2.2 % of the period, worth up to 5.6 duty codes of
+      systematic offset, and it is not modelled anywhere in this chain.
+- [ ] Confirm by ear afterwards: the pulse should keep its character all the way down the amplitude
+      range instead of thinning out and vanishing.
+
+Until that is done the firmware is conservative, not wrong — it simply spends a little more
+headroom and idle power than a measured value would need. Setting `OUT_PEDESTAL_DUTY` to 0 disables
+the feature and restores the previous behaviour exactly.
+
+The pure half of the mapping is host-tested by `eel_core/host_test/out_hal_selftest.cpp`, which
+sweeps the real `EOD_HV` at every level the devices use and asserts that no sample is ever
+commanded into `(0, OUT_PEDESTAL_DUTY)`.
 
 ---
 
@@ -662,16 +832,22 @@ samples and never `OK`. `pulse_log_selftest` has a second mode, `--emit`, which 
 
 Hardware is bench-owned; none of this is ever claimed done by an agent.
 
-1. **Idle is braked, not floating.** With nothing playing, scope one electrode single-ended to
-   battery GND: it must sit **hard at 0 V**, with no drift or slow leak. If it floats, IN2 is not
-   actually driven — recheck the pin 0/1 wiring.
+1. **Idle is braked, not floating.** With nothing playing *and nothing scheduled* (lever down —
+   i.e. **disarmed**), scope one electrode single-ended to battery GND: it must sit **hard at 0 V**,
+   with no drift or slow leak. If it floats, IN2 is not actually driven — recheck the pin 0/1
+   wiring. While **armed**, the same probe reads the common-mode pedestal instead
+   (`OUT_PEDESTAL_DUTY/255` of the rail, ~3 V at 21) — that is correct, not a fault; the
+   *differential* reading across the electrodes is what must be 0 V.
 2. **Duty → volts is linear and reaches the rail.** Set `AMP_DEBUG 1` in `eel_core/config.h`,
    re-flash, and read the Serial sweep against the scope. This replaces normal operation with a
    self-contained calibration routine and never starts the sample ISR.
-3. **Measure the filter**, don't trust the marking — see the DC-bias caveat above.
-4. **Set `MASTER_GAIN` on the scope** before going near an animal. A discharge reaches at most
+3. **Measure the driver's minimum pulse width and set `OUT_PEDESTAL_DUTY`** — the one bench job
+   this firmware ships with a deliberately conservative guess for. Full procedure in
+   [The driver dead zone](#the-driver-dead-zone--why-both-bridges-idle-at-a-pedestal).
+4. **Measure the filter**, don't trust the marking — see the DC-bias caveat above.
+5. **Set `MASTER_GAIN` on the scope** before going near an animal. A discharge reaches at most
    ~36 V — the rail — so a `0.90` volley pulse is ~32 V and a `0.45` localization pulse ~16 V.
-5. **Check the pulse marker** survives into your recorder: that the six alternating pulses at 10 Hz
+6. **Check the pulse marker** survives into your recorder: that the six alternating pulses at 10 Hz
    resolve individually and that the alternation is unambiguous against real fish. That is a
    *detection* question, not a level-budget one, and only a recording settles it (`TODO.md` §2).
-6. **RC device:** flash `rc_input_test` first, confirm all four channels, and redo `RC_CAL_*`.
+7. **RC device:** flash `rc_input_test` first, confirm all four channels, and redo `RC_CAL_*`.

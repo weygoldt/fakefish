@@ -110,6 +110,10 @@ run_selftest "eel_core     sd_player_selftest"     sdp \
     firmware/eel_core/host_test/sd_player_selftest.cpp
 run_selftest "eel_core     pulse_log_selftest"     plog \
     firmware/eel_core/host_test/pulse_log_selftest.cpp
+# The L1 duty mapping + the driver dead-zone pedestal. Needs eel_stimuli.cpp because it sweeps the
+# REAL EOD_HV at every level the devices use, asserting no sample ever lands in the dead zone.
+run_selftest "eel_core     out_hal_selftest"       outhal \
+    firmware/eel_core/host_test/out_hal_selftest.cpp firmware/eel_core/eel_stimuli.cpp
 
 # The pulse-log GOLDEN is the single artifact shared by the firmware writer and the Python
 # reader: this binary emits it through the real formatters, and tests/test_pulse_log.py parses

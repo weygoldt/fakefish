@@ -11,7 +11,10 @@ The hand-held SD player **migrated off** its old direct-pin ~5.7 Vpp stage onto 
 36 V DRV8871 stage. That hardware **has to be built** before the sketch can be bench-tested.
 
 - [ ] Build the 36 V DRV8871 output stage for the hand-held unit (2× DRV8871, IN1 on pins 2/3
-      held high, IN2 on pins 0/1, plus the per-channel 2-pole RC).
+      held high, IN2 on pins 0/1, plus the per-channel output filter). **Build the filter as the
+      3-section network** in `firmware/README.md` → "A better network for the next build"
+      (`220 Ω/150 nF → 110 Ω/100 nF → 110 Ω/100 nF`), not as a copy of the RC unit's 2-section
+      one: same parts cost and same dissipation, 39 % less pulse distortion. See §4.
 - [ ] **Do not flash `eel_fakefish_button` onto the old direct-pin hardware.** A discharge now
       reaches the **36 V rail** instead of the old stage's ~5.7 Vpp — still roughly a six-fold jump.
 - [ ] Re-scope the absolute output and set `MASTER_GAIN` before the device goes near an animal.
@@ -76,6 +79,29 @@ toolchain prints is therefore ~11× low: `fakefish-build-card`'s mV CLI, and the
 Fractions of full scale, the level *ratios*, and every WAV on the card are unaffected — this is
 purely the human-readable mV annotation.
 
+## 3b. Set `OUT_PEDESTAL_DUTY` from a measurement, not from the datasheet bound
+
+The driver dead zone is **implemented and documented** (`firmware/README.md` → "The driver dead
+zone"): both bridges now idle at `OUT_PEDESTAL_DUTY` while armed, so no sample is ever commanded
+into the DRV8871's minimum-pulse-width gap. This removed a level-dependent distortion worth
+3-32 % RMS shape error (and outright silence below ~1/16 amplitude) that was first noticed **by
+ear** — the pulses changed character as the RC amplitude control came down.
+
+The shipped value **21** is the datasheet-*guaranteed* 800 ns bound, chosen to be safe without
+measuring. A typical part is fine at **11**, halving both costs (headroom 8.2 % → 4.3 %, armed
+idle dissipation ~0.45 W → ~0.24 W per channel).
+
+- [ ] **Measure the real threshold** with the `AMP_DEBUG` sweep walking the bottom of the range
+      (`{ 0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 21, 24, 32 }`). Find the lowest code that
+      produces output *and* the lowest code from which output is linear; set `OUT_PEDESTAL_DUTY` a
+      couple above the second. Procedure in `firmware/README.md`.
+- [ ] While there, read the **duty→volts intercept**: `t_DEAD = 220 ns` is 2.2 % of the carrier
+      period, worth up to 5.6 duty codes of systematic offset, and is not modelled anywhere.
+- [ ] **Confirm disarmed idle is still hard 0 V** single-ended (it commands a 39 ns pulse the
+      driver should ignore) and that battery drain with the lever down is unchanged.
+- [ ] **Confirm by ear**: the pulse should keep its character all the way down the amplitude range
+      instead of thinning out and vanishing.
+
 ## 4. Verify the filter on the bench, not on paper
 
 Every filter figure in `firmware/README.md` is analysis of the described network with ideal
@@ -90,6 +116,20 @@ components. The most likely reason a measurement disagrees:
       `R_diff/(R_diff + 880)`, which is a bigger effect than anything the filter does to the EOD.
 - [ ] Confirm idle really is braked (hard 0 V single-ended, no slow leak), and that duty → volts
       is linear to the rail. `AMP_DEBUG 1` in `eel_core/config.h` automates this sweep.
+- [ ] **A better 3-section network is designed and documented but NOT built** —
+      `firmware/README.md` → "A better network for the next build". `220 Ω/150 nF → 110 Ω/100 nF →
+      110 Ω/100 nF` per channel: same total series resistance, same dissipation, *more* carrier
+      rejection (−60.7 vs −59.4 dB) and **39 % less pulse shape error** (2.93 % vs 4.77 %
+      open-circuit). The present network's problem is that its two identical unbuffered sections
+      load each other and split the poles 6.9:1, so it pays the passband droop of a 1.23 kHz filter
+      and collects only the stopband of a 3.29 kHz one. **Build the hand-held unit's stage (§1)
+      this way from the start** — it does not exist yet, so it costs nothing extra. Retrofitting
+      the RC unit is optional and lower priority than §3b.
+- [ ] **Measure the recorder's anti-alias response at 100 kHz.** Every carrier-rejection
+      requirement rests on it and it is documented nowhere: with a 2-pole AA the requirement is
+      −55 dB (the present network has 4.9 dB spare), with a 1-pole AA it is −69 dB and the present
+      network is 10 dB short. Inject a 100 kHz tone at a grid electrode, look for the folded
+      4 kHz line.
 
 ## 5. Pulse logging — bench verification and the aligner
 

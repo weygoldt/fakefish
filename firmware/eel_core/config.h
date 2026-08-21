@@ -76,6 +76,59 @@ static_assert(F_CPU == 600000000,
 static_assert(PWM_CARRIER_HZ * (float)(1u << PWM_BITS) <= PWM_TIMER_CLOCK_HZ,
               "PWM_CARRIER_HZ too high for full PWM_BITS resolution on Teensy 4.1 (FlexPWM @ 150 MHz)");
 
+// ===== Driver dead-zone pedestal ===========================================
+// WHY THIS EXISTS. `analogWrite()` maps duty q to an IN2-LOW (= DRIVE) time of (q+1)/256 of the
+// carrier period. At PWM_CARRIER_HZ = 100 kHz that period is 10 us, so duty 0 commands a 39 ns
+// drive pulse, duty 4 commands 195 ns, duty 11 commands 469 ns. The DRV8871 needs a MINIMUM INPUT
+// PULSE WIDTH to respond at all — datasheet SLVSCY9B, Recommended Operating Conditions footnote 1:
+// "The voltages applied to the inputs should have at least 800 ns of pulse width to ensure
+// detection. Typical devices require at least 400 ns." Duty codes below ~11 (typical part) or
+// ~21 (guaranteed) are therefore UNRELIABLE — the bridge may ignore them outright.
+//
+// The consequence is not a small linearity error, it is a LEVEL-DEPENDENT one. The flanks and the
+// negative pre-potential of every EOD sit at low duty, so as the amplitude control comes down a
+// growing fraction of each pulse falls under the threshold and is silently deleted: the pulse is
+// hollowed out from the bottom while its PEAK still arrives at the right height. Simulated
+// delivered-vs-ideal RMS shape error with the bridge dropping sub-threshold pulses (q_min = 21):
+//
+//     amp 0.90 -> 3.3 %   0.45 -> 6.9 %   0.25 -> 12.9 %   0.125 -> 32 %   0.0625 -> SILENT
+//
+// That is larger than everything the output filter does to the pulse, and unlike the filter it
+// VARIES WITH THE AMPLITUDE SETTING — which breaks the assumption that the marker / localization /
+// volley level RATIOS survive the chain. It is audible: the pulse changes character as the pot
+// comes down, then stops entirely, which is how it was first noticed.
+//
+// THE FIX. Hold BOTH boards at a small non-zero duty whenever the device is armed to emit, and
+// ride the signal on top of it. The offset is IDENTICAL on both electrodes, so it is pure common
+// mode and cancels in the water (the field is driven by V_A - V_B); no channel is ever commanded
+// below OUT_PEDESTAL_DUTY, so nothing enters the dead zone at any amplitude. Same simulation, with
+// the pedestal: 0.90 -> 0.04 %, 0.45 -> 0.07 %, 0.25 -> 0.11 %, 0.125 -> 0.28 %, 0.0625 -> 0.51 %.
+//
+// WHAT IT COSTS.
+//   1. HEADROOM. The signal is scaled into the OUT_SIGNAL_DUTY_MAX codes left above the pedestal,
+//      so full scale drops by OUT_PEDESTAL_DUTY/PWM_DUTY_MAX — 8.2 % (0.74 dB) at 21. That is less
+//      than one click of the RC amplitude control (0.60 dB at mid-scale).
+//   2. POWER. While armed the bridges switch continuously, so the first output-filter resistor
+//      dissipates V_rail^2 * d(1-d) / R1 ~ 0.45 W per channel even BETWEEN pulses. That is why the
+//      pedestal is ARMED rather than permanent — see out_arm()/out_disarm() in out_hal.h. With
+//      nothing playing and localization off the firmware disarms, commanding duty 0 on both boards
+//      = hard brake = zero dissipation and zero battery drain, exactly as before this feature.
+//   3. IDLE IS NO LONGER HARD 0 V SINGLE-ENDED *WHILE ARMED*. It is +OUT_PEDESTAL_DUTY/PWM_DUTY_MAX
+//      of the rail, common mode on both electrodes, differentially zero. The star ground is not in
+//      the water, so that pedestal has no return path through the water. Disarmed idle is still a
+//      hard brake. Do not "simplify" out_silence() back to an unconditional brake — that would put
+//      a common-mode step at every zero-valued sample inside a playback.
+//
+// TUNING THIS NUMBER IS A BENCH JOB AND IT HAS NOT BEEN DONE. 21 is the datasheet-GUARANTEED
+// 800 ns bound, chosen because it is safe on any device without measuring. A typical part would be
+// fine at 11, which would halve both the headroom and the power cost. Setting it to 0 disables the
+// feature entirely and restores the previous behaviour exactly. See firmware/README.md ->
+// "The driver dead zone" for the AMP_DEBUG sweep that measures the real threshold on a given board.
+#define OUT_PEDESTAL_DUTY     21
+#define OUT_SIGNAL_DUTY_MAX   ((int)PWM_DUTY_MAX - OUT_PEDESTAL_DUTY)   // 234 — codes left for signal
+static_assert(OUT_PEDESTAL_DUTY >= 0 && OUT_PEDESTAL_DUTY < (int)PWM_DUTY_MAX / 2,
+              "OUT_PEDESTAL_DUTY must leave most of the duty range for signal (0 disables it)");
+
 // ===== Indicator LED =======================================================
 // Shared by every surface (the Teensy 4.1 built-in LED, plus an external one on the same pin).
 // What it MEANS is surface-specific — the button device holds it solid while a WAV streams, the

@@ -8,9 +8,10 @@
 // driven as a TRUE COMPLEMENTARY pair. Per board IN1 is held steadily HIGH and IN2 is PWM'd at
 // the COMPLEMENT of the wanted duty, so the bridge alternates DRIVE <-> BRAKE and never
 // coasts/floats: board A = pin 2 (IN1 HIGH) + pin 0 (IN2 PWM); board B = pin 3 (IN1 HIGH) +
-// pin 1 (IN2 PWM). +phase drives A while B is braked to GND; -phase drives B while A is braked
-// (bipolar differential across the dipole). Idle / between pulses = BOTH boards braked to GND
-// (actively 0 V, NOT floating). Pins, carrier and guards live in config.h.
+// pin 1 (IN2 PWM). +phase drives A while B sits at the pedestal; -phase drives B while A sits at
+// the pedestal (bipolar differential across the dipole). Idle = BOTH boards at the same duty, so
+// the dipole sees 0 V either way: the DEAD-ZONE PEDESTAL while armed, a hard brake to GND while
+// disarmed — never floating. Pins, carrier, the pedestal and the guards live in config.h.
 //
 // SIGN == POLARITY. The sign of the sample selects which electrode drives, so flipping the sign
 // of a whole playback flips the dipole — that is how both surfaces randomise polarity per
@@ -34,14 +35,47 @@
 // that band is set by the sample rate, independent of the carrier.
 static volatile int32_t err_a = 0, err_b = 0;
 
-static inline int shape(int32_t mag, volatile int32_t* err) {
+// `qmax` is the largest duty code the caller may use. It is PWM_DUTY_MAX (255) when there is no
+// pedestal and OUT_SIGNAL_DUTY_MAX (234) when there is, so that pedestal + signal still lands
+// exactly on 255 at full scale. The residual is carried from the CLAMPED q on purpose — that is
+// the anti-windup property that stops a clipped sample from bleeding error into the next one.
+static inline int shape(int32_t mag, volatile int32_t* err, int qmax) {
   int32_t v = mag + *err;
   int32_t q = (v + 64) >> 7;          // round to nearest of 128 (full 8-bit: 32767 -> 255)
   if (q < 0) q = 0;
-  if (q > 255) q = 255;
+  if (q > qmax) q = qmax;
   *err = v - (q << 7);                // carry the residual into the next sample
   return (int)q;
 }
+
+// ===== The duty mapping (pure; no Arduino dependency) ======================
+// One channel's signed-magnitude sample -> the duty code actually commanded, INCLUDING the
+// dead-zone pedestal (config.h explains why it exists). Split out from out_write() so the whole
+// mapping is host-testable — see firmware/eel_core/host_test/out_hal_selftest.cpp.
+//
+// Setting OUT_PEDESTAL_DUTY to 0 reduces this EXACTLY to the pre-pedestal behaviour by
+// construction: the scale becomes mag*255/255 (the identity) and qmax becomes 255. That is the
+// documented way to disable the feature.
+static inline int32_t out_scale_to_headroom(int32_t mag) {
+  return (mag * (int32_t)OUT_SIGNAL_DUTY_MAX) / (int32_t)PWM_DUTY_MAX;
+}
+static inline int out_duty_for(int32_t mag, volatile int32_t* err) {
+  return OUT_PEDESTAL_DUTY + shape(out_scale_to_headroom(mag), err, OUT_SIGNAL_DUTY_MAX);
+}
+
+// ===== Armed state =========================================================
+// ARMED means "a stimulus is going into the water right now, or may within this playback" — the
+// bridges are held live at the pedestal so no sample can land in the driver's dead zone.
+// DISARMED means "nothing is playing and nothing is scheduled" — both bridges braked hard to GND,
+// zero dissipation, zero battery drain. A control surface (L3) arms at every playback/train start
+// and disarms when it returns to idle; it is deliberately NOT armed permanently, because the
+// pedestal costs ~0.45 W per channel in the first output-filter resistor while it is on.
+static volatile bool s_out_armed = false;
+static inline bool out_armed() { return s_out_armed; }
+
+// The duty BOTH boards are held at while emitting nothing. Pure, so the armed -> idle-duty
+// mapping is host-testable even though the analogWrite() that applies it is not.
+static inline int out_idle_duty() { return s_out_armed ? OUT_PEDESTAL_DUTY : 0; }
 
 // ===== Arduino glue (analogWrite / GPIO) ===================================
 #ifdef ARDUINO
@@ -56,26 +90,53 @@ static inline void drive_board(uint8_t in2_pin, int duty) {
   analogWrite(in2_pin, (int)PWM_DUTY_MAX - duty);
 }
 
+// The far board is held at the PEDESTAL, not at zero — out_duty_for(0) == OUT_PEDESTAL_DUTY — so
+// the braked side never sits in the driver's dead zone either. Both boards carry the same pedestal,
+// so it is common mode and cancels across the dipole; only the difference reaches the water.
 static inline void out_write(int16_t s) {
-  int32_t mag_a = (s > 0) ?  s : 0;   // positive phase -> board A drives (OUT1), board B braked to GND
-  int32_t mag_b = (s < 0) ? -s : 0;   // negative phase -> board B drives (OUT1), board A braked to GND
-  drive_board(DRV_A_IN2_PIN, shape(mag_a, &err_a));
-  drive_board(DRV_B_IN2_PIN, shape(mag_b, &err_b));
+  int32_t mag_a = (s > 0) ?  s : 0;   // positive phase -> board A drives (OUT1), board B at pedestal
+  int32_t mag_b = (s < 0) ? -s : 0;   // negative phase -> board B drives (OUT1), board A at pedestal
+  drive_board(DRV_A_IN2_PIN, out_duty_for(mag_a, &err_a));
+  drive_board(DRV_B_IN2_PIN, out_duty_for(mag_b, &err_b));
 }
 
 // Idle / silence: BOTH boards actively BRAKED to GND (IN1 high + IN2 high = duty 0), NOT coast. This
 // is the explicit idle state — never "both inputs low" (that would float the electrodes Hi-Z).
+// UNCONDITIONAL and ARMED-BLIND: prefer out_silence() (armed-aware) or out_disarm() (which also
+// clears the armed flag). This stays as the primitive both are built on, and as an escape hatch
+// for a surface that must guarantee 0 V regardless of state.
 static inline void out_brake() {
   drive_board(DRV_A_IN2_PIN, 0);   // duty 0 -> IN2 high -> brake OUT to GND
   drive_board(DRV_B_IN2_PIN, 0);
 }
 
-// Brake both boards AND zero the shaper. Use THIS (not bare out_brake()) at every gap/silence
-// boundary: a shaper left holding residual error leaks stray duty into the silence.
+// Emit NOTHING (differentially) AND zero the shaper. Use THIS (not bare out_brake()) at every
+// gap/silence boundary: a shaper left holding residual error leaks stray duty into the silence.
+//
+// What "nothing" means depends on the armed state, and that is the whole point:
+//   ARMED    -> both boards held at OUT_PEDESTAL_DUTY. Differentially zero, but the bridges stay
+//               live, so the next pulse's flanks do not have to climb out of the dead zone.
+//   DISARMED -> both boards braked hard to GND. Zero volts, zero dissipation, zero drain.
+// Making this unconditional again would put a common-mode step at every zero-valued sample inside
+// a playback — which is exactly what the pedestal exists to avoid.
 static inline void out_silence() {
   err_a = 0; err_b = 0;
-  out_brake();
+  const int p = out_idle_duty();
+  drive_board(DRV_A_IN2_PIN, p);
+  drive_board(DRV_B_IN2_PIN, p);
 }
+
+// ARM before anything reaches the water; DISARM on the way back to idle. An L3 surface calls
+// out_arm() at the top of every playback/train start (in place of the out_silence() that used to
+// be there) and out_disarm() when it returns to idle. Both zero the shaper, so they are drop-in
+// replacements for out_silence() at those seams.
+//
+// The arm transition is a common-mode step of OUT_PEDESTAL_DUTY/PWM_DUTY_MAX of the rail on BOTH
+// electrodes at once. It cancels differentially except through channel-to-channel component
+// mismatch (~2 % of the step, i.e. well under 0.2 % of a full-scale pulse), and the output filter
+// smooths it over ~100 us. It is placed at a playback boundary, never inside a pulse train.
+static inline void out_arm()    { s_out_armed = true;  out_silence(); }
+static inline void out_disarm() { s_out_armed = false; out_silence(); }
 
 // Bring the output stage up. Call FIRST from setup(), before anything else can emit.
 // ORDER IS LOAD-BEARING: hold both IN1 HIGH first so each bridge's high side is defined before its
@@ -87,7 +148,7 @@ static inline void out_begin() {
   analogWriteResolution(PWM_BITS);
   analogWriteFrequency(DRV_A_IN2_PIN, PWM_CARRIER_HZ);   // 100 kHz carrier on each board's IN2
   analogWriteFrequency(DRV_B_IN2_PIN, PWM_CARRIER_HZ);
-  out_silence();                                         // idle: both electrodes ACTIVELY braked to GND
+  out_disarm();                                          // idle: DISARMED, both electrodes braked to GND
 }
 
 // ===== Bench amplitude debug (compile flag AMP_DEBUG in config.h) ==========
