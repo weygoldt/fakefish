@@ -193,6 +193,26 @@ Verified after the change: peak still matches (0.99× real over the first 50 ms)
 reports no overlap-clip, packet 12628 B of a 131072 B budget, and the 6 synthetic localization
 trains came out **byte-identical** — confirming the decoupled RNG streams do what they claim.
 
+### This calibration is INTERMEDIATE
+
+Both numbers above rest on the 41 volleys in `data/real_volley_population.npz`. The owner is
+preparing volley statistics over the **full** dataset, which will supersede them. What to keep
+and what to redo when that lands:
+
+- **Keep the method.** Measure the peak as a *sustained* rate (`sustained_peak_hz`), never as
+  `1/min(IPI)` — that is what went wrong before, and a bigger sample makes an extreme-value
+  statistic *worse*, not better.
+- **Redo the numbers**: `uv run fakefish-synth-volleys refit-peaks` re-fits from the cached
+  population with no recordings needed, so refreshing the peak is cheap once the population
+  file is updated. Then `synthesize` → `fakefish-export export` → `sync_core.sh`.
+- **Revisit the duration ladder against real statistics.** It is currently set from field
+  observation (0.1–4 s), because the recorded volleys are fragments. Real duration statistics
+  from complete discharges would replace that judgement call with data — including whether the
+  ~20 s tail deserves representation, and whether the draw should stay uniform-per-octave or be
+  weighted toward the short volleys that dominate in nature (more reps at the short end of
+  `body_lengths`, rather than 3 everywhere).
+- [ ] Re-run both calibrations when the full-dataset volley statistics are available.
+
 ## 7. Future control surfaces (documented slots, deliberately unbuilt)
 
 Adding one is a new folder under `firmware/`, not a fork — see "Adding a new surface" in
