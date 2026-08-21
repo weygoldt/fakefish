@@ -1,7 +1,7 @@
 // pulse_log.h — L2 sample-side companion: per-pulse EVENT LOGGING to the SD card.
 //
 // WHY. The RC device live-synthesises its stimuli, and its localization train is built to be
-// indistinguishable from a real cruising eel — single-polarity EOD pulses at 1..20 Hz with
+// indistinguishable from a real cruising eel — single-polarity EOD pulses at 0.5..20 Hz with
 // lognormal jitter. Volley/sham TRIALS are identifiable in a recording (the count-coded pulse
 // marker tags them), but a localization pulse is not. Without a log, every analysis of a
 // recording made during playback must treat an unknown subset of pulses as possibly ours.

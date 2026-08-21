@@ -88,7 +88,13 @@
 // measured eel ticks at LOC_NOMINAL_TICK_HZ (3.15 Hz). Under the retired lognormal a
 // setting of 5 Hz meant 5 pulses/s on average; it now means the fish ticks at 5 Hz,
 // which delivers about 3.3 pulses/s once the heavy tail is included.
-#define LOC_RATE_MIN_HZ    1.0f
+//
+// The ladder between these two is LOGARITHMIC (rc_rate_to_hz), so every rung is the same
+// RATIO from its neighbours. A linear one spent ~85 % of the throttle's travel above
+// anything a real eel does and pushed the slow settings into the sliver of travel just
+// above the fail-safe cutoff. Geometric spacing puts the measured eel at mid-throttle
+// (sqrt(0.5 * 20.0) = 3.16 Hz) and gives ~0.1 Hz steps near 1 Hz.
+#define LOC_RATE_MIN_HZ    0.5f
 #define LOC_RATE_MAX_HZ    20.0f
 #define PANEL_RATE_HZ      5.0f
 // CH5 bench default. 1.0 IS the measured eel (0 = metronome, useful to ~1.5). This is

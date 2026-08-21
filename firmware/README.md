@@ -519,8 +519,17 @@ Four properties are **measurements, not modelling choices**, and none should be 
 
 | | old (lognormal) | now (fitted) |
 |---|---|---|
-| CH3 | mean pulses/s, 1–20 Hz | **tick tempo** (1/median), 1–20 Hz |
+| CH3 | mean pulses/s, 1–20 Hz linear | **tick tempo** (1/median), 0.5–20 Hz **logarithmic** |
 | CH5 | jitter CV, 0–0.8 | **randomness**, 0–1.5 (1.0 = the measured eel) |
+
+**The CH3 ladder is logarithmic**, so every rung is the same *ratio* from the next (~21 % at 20
+steps over 0.5–20 Hz) rather than the same number of Hz. It was linear 1–20 Hz until 2026-08-22,
+which spent about 85 % of the throttle's travel above anything a real eel does and squeezed the
+whole biological range into the bottom rungs — and put 1 Hz inside the ~6 % of travel between the
+fail-safe cutoff and the enable threshold, so the slow settings were effectively unreachable. A
+field log confirmed it: the operator never got below 4 Hz. Geometric spacing gives six rungs below
+1.5 Hz where the old ladder had one, ~0.1 Hz steps near 1 Hz, and lands the measured eel at almost
+exactly mid-throttle (√(0.5 × 20) = 3.16 Hz against a nominal 3.153).
 
 **CH3's meaning changed and the number did not.** A setting of 5 Hz used to mean five pulses per
 second on average; it now means the fish *ticks* at 5 Hz, which at randomness 1.0 delivers about
@@ -691,7 +700,7 @@ same binary runs on the bench with no transmitter.
 
 | Control | Pin | Does |
 |---|---|---|
-| CH3 throttle | 4 | localization on/off (debounced, hysteretic) + **tick tempo** 1–20 Hz |
+| CH3 throttle | 4 | localization on/off (debounced, hysteretic) + **tick tempo** 0.5–20 Hz, log ladder |
 | CH4 stick | 5 | one-shot: throw high = run one **blinded trial**; throw low does **nothing**; re-arms at centre |
 | CH5 pot | 6 | localization **randomness** (0 = metronome, 1.0 = the measured eel, to 1.5) |
 | CH6 pot | 7 | amplitude → volley level; localization derived at a quarter |
@@ -886,6 +895,16 @@ replaced (median CV2 ~0.42 at randomness 1.0, and a heavy tail that the old 4×-
 cut off), so alignment got better rather than worse. The randomness that makes the stimulus
 biologically realistic also makes it uniquely identifiable. Detection precision is not the limit:
 an EOD is ~800 µs FWHM, so each peak localises to well under a millisecond.
+
+**Rate is only controllable on average, and less so as CH5 rises.** The state relaxes in
+wall-clock time, so when the rhythm wanders to the fast side the intervals shorten, which means
+*less* relaxation per pulse, which keeps it fast. Over tens of thousands of pulses it averages to
+the commanded tempo; over a two-minute window at randomness 1.5 the realised rate can sit several
+times off it and feel stuck. Measured in the field (2026-08-22): commanded 4 Hz at randomness 1.5
+produced a run that opened correctly at 1940/259/133/211 ms, took a genuine 4.3 s silence, then
+collapsed to a near-constant 38 ms for fifty pulses. That is the model, not a fault — the same
+short-window scatter that makes a synthetic localization item need time-scaling onto its rung. If
+an experiment needs the *rate* controlled rather than the texture, run CH5 low.
 
 **What CH5 at 0 actually costs.** An exact metronome has no fingerprint — sliding the log by any
 whole interval fits as well as the true offset, so the localization train stops being usable for

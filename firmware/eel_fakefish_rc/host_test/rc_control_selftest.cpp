@@ -50,6 +50,30 @@ static void test_throttle() {
         "rate lvl0 -> tempo = min_hz / nominal");
   CHECK(fabsf(loc_rhythm_rate_for_hz(LOC_NOMINAL_TICK_HZ) - 1.0f) < 1e-6f,
         "the measured eel's tick tempo IS rate 1.0");
+
+  // THE LADDER IS GEOMETRIC, and that is the point of it — a linear ladder put ~85 % of the
+  // throttle above anything biological and made the slow end unreachable. Pin the shape:
+  // every rung the same RATIO from the next.
+  float r0 = rc_rate_to_hz(1, RC_RATE_STEPS) / rc_rate_to_hz(0, RC_RATE_STEPS);
+  for (int i = 1; i + 1 < RC_RATE_STEPS; i++) {
+    float ri = rc_rate_to_hz(i + 1, RC_RATE_STEPS) / rc_rate_to_hz(i, RC_RATE_STEPS);
+    CHECK(fabsf(ri / r0 - 1.0f) < 1e-3f, "rate ladder rungs are not a constant ratio apart");
+  }
+  CHECK(r0 > 1.0f, "the rate ladder must increase");
+
+  // The measured eel should land near mid-throttle, which is what makes the useful range
+  // usable. Geometric mean of the endpoints, within one rung.
+  float mid = rc_rate_to_hz((RC_RATE_STEPS - 1) / 2, RC_RATE_STEPS);
+  CHECK(mid > LOC_NOMINAL_TICK_HZ / r0 && mid < LOC_NOMINAL_TICK_HZ * r0,
+        "the measured eel's tempo should sit within one rung of mid-throttle");
+
+  // ...and the low end must actually be controllable: the step at ~1 Hz is what the field
+  // log said was impossible with the old 1 Hz-per-step linear ladder.
+  for (int i = 0; i + 1 < RC_RATE_STEPS; i++) {
+    float lo = rc_rate_to_hz(i, RC_RATE_STEPS), hi = rc_rate_to_hz(i + 1, RC_RATE_STEPS);
+    if (lo <= 1.0f && hi >= 1.0f)
+      CHECK(hi - lo < 0.25f, "the rung containing 1 Hz is coarser than 0.25 Hz");
+  }
 }
 
 static void test_throttle_gate() {
