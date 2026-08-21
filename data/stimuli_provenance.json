@@ -1,7 +1,7 @@
 {
   "stim_format_version": 3,
-  "export_date_utc": "2026-08-21T07:20:27.951117+00:00",
-  "eeltracker_git_commit": "f49e3aba1fa2d9eee2fe942b43c7d5d747ce3b65",
+  "export_date_utc": "2026-08-21T07:31:51.766154+00:00",
+  "eeltracker_git_commit": "d6f93f3b2923d933a528b382e42c8dd0f477a963",
   "eods_root": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods",
   "alignment_json": "/mnt/data1/efish/fielddata/flona2025_workspace/flona2025_eods/global_pulse_alignment_eel_eod.json",
   "alignment_json_sha256": "b31b2cdc2fd38fe04429fadf317d81b234cb4e630a5c65813c421b3fe9e369ba",
@@ -16,7 +16,7 @@
     "net_integral": 41.576658480510574,
     "pos_neg_area_ratio": 386.57906304951877
   },
-  "packet_bytes": 13546,
+  "packet_bytes": 12628,
   "flash_budget_bytes": 131072,
   "selection_criteria": {
     "volley_min_pulses": 8,
@@ -93,171 +93,192 @@
       },
       {
         "index": 7,
-        "label": "synth_volley_body0.6s_tot0.6s_0",
+        "label": "synth_volley_body0.10s_tot0.10s_0",
         "kind": "synth_volley",
         "gap_samp": 8115,
         "gap_ms": 162.3
       },
       {
         "index": 8,
-        "label": "synth_volley_body0.6s_tot0.6s_1",
+        "label": "synth_volley_body0.10s_tot0.10s_1",
         "kind": "synth_volley",
         "gap_samp": 3621,
         "gap_ms": 72.42
       },
       {
         "index": 9,
-        "label": "synth_volley_body0.6s_tot0.6s_2",
+        "label": "synth_volley_body0.10s_tot0.10s_2",
         "kind": "synth_volley",
         "gap_samp": 4484,
         "gap_ms": 89.68
       },
       {
         "index": 10,
-        "label": "synth_volley_body0.9s_tot0.9s_0",
+        "label": "synth_volley_body0.20s_tot0.20s_0",
         "kind": "synth_volley",
         "gap_samp": 9981,
         "gap_ms": 199.62
       },
       {
         "index": 11,
-        "label": "synth_volley_body0.9s_tot0.9s_1",
+        "label": "synth_volley_body0.20s_tot0.20s_1",
         "kind": "synth_volley",
         "gap_samp": 6264,
         "gap_ms": 125.28
       },
       {
         "index": 12,
-        "label": "synth_volley_body0.9s_tot0.9s_2",
+        "label": "synth_volley_body0.20s_tot0.20s_2",
         "kind": "synth_volley",
         "gap_samp": 5649,
         "gap_ms": 112.98
       },
       {
         "index": 13,
-        "label": "synth_volley_body1.2s_tot1.2s_0",
+        "label": "synth_volley_body0.35s_tot0.35s_0",
         "kind": "synth_volley",
         "gap_samp": 4368,
         "gap_ms": 87.36
       },
       {
         "index": 14,
-        "label": "synth_volley_body1.2s_tot1.2s_1",
+        "label": "synth_volley_body0.35s_tot0.35s_1",
         "kind": "synth_volley",
         "gap_samp": 9995,
         "gap_ms": 199.9
       },
       {
         "index": 15,
-        "label": "synth_volley_body1.2s_tot1.2s_2",
+        "label": "synth_volley_body0.35s_tot0.35s_2",
         "kind": "synth_volley",
         "gap_samp": 4705,
         "gap_ms": 94.1
       },
       {
         "index": 16,
-        "label": "synth_volley_body1.6s_tot1.6s_0",
+        "label": "synth_volley_body0.65s_tot0.64s_0",
         "kind": "synth_volley",
         "gap_samp": 8019,
         "gap_ms": 160.38
       },
       {
         "index": 17,
-        "label": "synth_volley_body1.6s_tot1.6s_1",
+        "label": "synth_volley_body0.65s_tot0.65s_1",
         "kind": "synth_volley",
         "gap_samp": 8839,
         "gap_ms": 176.78
       },
       {
         "index": 18,
-        "label": "synth_volley_body1.6s_tot1.6s_2",
+        "label": "synth_volley_body0.65s_tot0.65s_2",
         "kind": "synth_volley",
         "gap_samp": 9382,
         "gap_ms": 187.64
       },
       {
         "index": 19,
-        "label": "synth_volley_body2.0s_tot2.0s_0",
+        "label": "synth_volley_body1.20s_tot1.19s_0",
         "kind": "synth_volley",
         "gap_samp": 4859,
         "gap_ms": 97.18
       },
       {
         "index": 20,
-        "label": "synth_volley_body2.0s_tot2.0s_1",
+        "label": "synth_volley_body1.20s_tot1.16s_1",
         "kind": "synth_volley",
         "gap_samp": 3863,
         "gap_ms": 77.26
       },
       {
         "index": 21,
-        "label": "synth_volley_body2.0s_tot2.0s_2",
+        "label": "synth_volley_body1.20s_tot1.19s_2",
         "kind": "synth_volley",
         "gap_samp": 3257,
         "gap_ms": 65.14
       },
       {
         "index": 22,
-        "label": "synth_volley_body2.5s_tot2.5s_0",
+        "label": "synth_volley_body2.20s_tot2.20s_0",
         "kind": "synth_volley",
         "gap_samp": 7986,
         "gap_ms": 159.72
       },
       {
         "index": 23,
-        "label": "synth_volley_body2.5s_tot2.5s_1",
+        "label": "synth_volley_body2.20s_tot2.18s_1",
         "kind": "synth_volley",
         "gap_samp": 9768,
         "gap_ms": 195.36
       },
       {
         "index": 24,
-        "label": "synth_volley_body2.5s_tot2.5s_2",
+        "label": "synth_volley_body2.20s_tot2.20s_2",
         "kind": "synth_volley",
         "gap_samp": 6288,
         "gap_ms": 125.76
       },
       {
         "index": 25,
-        "label": "synth_loc_1hz",
-        "kind": "localization",
+        "label": "synth_volley_body4.00s_tot3.99s_0",
+        "kind": "synth_volley",
         "gap_samp": 7125,
         "gap_ms": 142.5
       },
       {
         "index": 26,
-        "label": "synth_loc_2hz",
-        "kind": "localization",
+        "label": "synth_volley_body4.00s_tot3.99s_1",
+        "kind": "synth_volley",
         "gap_samp": 7326,
         "gap_ms": 146.52
       },
       {
         "index": 27,
-        "label": "synth_loc_3hz",
-        "kind": "localization",
+        "label": "synth_volley_body4.00s_tot3.98s_2",
+        "kind": "synth_volley",
         "gap_samp": 3817,
         "gap_ms": 76.34
       },
       {
         "index": 28,
-        "label": "synth_loc_5hz",
+        "label": "synth_loc_1hz",
         "kind": "localization",
         "gap_samp": 9231,
         "gap_ms": 184.62
       },
       {
         "index": 29,
-        "label": "synth_loc_7hz",
+        "label": "synth_loc_2hz",
         "kind": "localization",
         "gap_samp": 2657,
         "gap_ms": 53.14
       },
       {
         "index": 30,
-        "label": "synth_loc_10hz",
+        "label": "synth_loc_3hz",
         "kind": "localization",
         "gap_samp": 6352,
         "gap_ms": 127.04
+      },
+      {
+        "index": 31,
+        "label": "synth_loc_5hz",
+        "kind": "localization",
+        "gap_samp": 4314,
+        "gap_ms": 86.28
+      },
+      {
+        "index": 32,
+        "label": "synth_loc_7hz",
+        "kind": "localization",
+        "gap_samp": 9751,
+        "gap_ms": 195.02
+      },
+      {
+        "index": 33,
+        "label": "synth_loc_10hz",
+        "kind": "localization",
+        "gap_samp": 5461,
+        "gap_ms": 109.22
       }
     ]
   },

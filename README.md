@@ -95,8 +95,8 @@ trap.
 
 ## What goes into the water
 
-The library is a mean eel EOD waveform (`EOD_HV`, 131 samples @ 50 kHz) plus **timing**: 31
-items of inter-pulse intervals and per-pulse relative amplitudes — 5 real volleys, 18
+The library is a mean eel EOD waveform (`EOD_HV`, 131 samples @ 50 kHz) plus **timing**: 34
+items of inter-pulse intervals and per-pulse relative amplitudes — 5 real volleys, 21
 synthesised volleys, 8 localization trains (`uv run fakefish-render info` lists them). A
 stimulus is that waveform replayed on those intervals; pulses that out-run the EOD length are
 summed by the overlap-add engine.
@@ -105,10 +105,11 @@ summed by the overlap-add engine.
   cruising and probing. Played at the lower level.
 - **Volley** — the high-rate discharge burst with a decaying-rate envelope: the strike. Played
   at the higher level. Its peak is calibrated against the real recorded population — **~330 Hz
-  held over the first 50 ms**, decaying with τ ≈ 0.31 s — and the synthetic volleys are
-  measured against the real ones on a *sustained* rate, never on `1/min(IPI)` (see
-  [`TODO.md`](TODO.md) §6). The **level ratio between volley and localization is the
-  experiment**, so the SD WAVs are absolute-scaled, never peak-normalised.
+  held over the first 50 ms**, decaying with τ ≈ 0.31 s — measured on a *sustained* rate, never
+  on `1/min(IPI)`. Durations are a log-spaced ladder from **0.1 s to 4 s**, set from field
+  observation rather than from the recorded volleys, which are tracker *fragments* (see
+  [`TODO.md`](TODO.md) §6 for both calibrations). The **level ratio between volley and
+  localization is the experiment**, so the SD WAVs are absolute-scaled, never peak-normalised.
 - **Localize → strike** — a localization lead, a short gap, then the volley (SD program D);
   one marker and one polarity span the whole sequence.
 - **Sham** (RC only) — the coded marker fires and the LED shows it, but **nothing** goes into

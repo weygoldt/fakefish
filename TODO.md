@@ -134,7 +134,7 @@ Toolchain follow-up:
       It has a card mounted already. Not done now, on purpose — the button device's 36 V
       hardware does not exist yet (§1), so there is nothing to verify it on.
 
-## 6. Volley peak rate — recalibrated 2026-08-21, one question left open
+## 6. Volley peak rate and duration — recalibrated 2026-08-21
 
 **The synthetic volleys were ~18 % too SLOW at their peak, not too fast.** Measured against
 the 41 real volleys in `data/real_volley_population.npz`:
@@ -172,13 +172,26 @@ Checked and deliberately NOT changed:
   volleys are tracker *fragments* (median 0.20 s), so their length reflects segmentation, not
   the animal.
 
-Left open:
+**Duration — settled 2026-08-21 by field observation, not by the recorded population.** The
+owner's call, and it resolves the question this section previously left open:
 
-- [ ] **Are the synthetic volleys too LONG?** This is the one place the data genuinely cannot
-      answer, and it is the likeliest source of the "they feel too fast" impression: a
-      synthetic volley runs 0.58–2.50 s with 89–284 pulses, a real *fragment* 0.07–0.74 s with
-      20–89. If complete real discharges are that short, the duration ladder should come down —
-      but settling it needs volleys captured whole, not tracker fragments.
+- real volleys run from short bursts up to **~20 s**;
+- the recorded population is **truncated** by the tracker, and
+- **biased short**, because genuinely long volleys are rare;
+- so its duration distribution is evidence about the *tracker*, not the animal, and must not
+  set the ladder. (Its *rate* is trustworthy and does set the peak — that is the distinction.)
+
+The ladder is now **log-spaced from 0.1 s to 4 s** (7 lengths × 3 draws = 21 volleys, items
+7–27; `RC_VOLLEY_ITEM_COUNT` 18 → 21). Log rather than linear because the range spans 40×, so
+linear steps would spend nearly every item on the long end; log steps give equal resolution per
+octave and keep the rare long volleys from crowding out the short strong bursts. The short end
+sits deliberately **below one τ**, so a 0.1 s volley barely decays and plays as a brief burst
+held near peak — previously excluded as "truncated", but that is a real discharge and the
+strong-event end of the range this experiment cares about.
+
+Verified after the change: peak still matches (0.99× real over the first 50 ms), synthesis QC
+reports no overlap-clip, packet 12628 B of a 131072 B budget, and the 6 synthetic localization
+trains came out **byte-identical** — confirming the decoupled RNG streams do what they claim.
 
 ## 7. Future control surfaces (documented slots, deliberately unbuilt)
 

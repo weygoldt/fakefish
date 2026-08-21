@@ -697,16 +697,32 @@ def build_population(model: VolleyModel, seed: int = 0) -> list[SyntheticVolley]
     # moved. Separate streams keep a volley-side change confined to the volleys.
     rng_vol = np.random.default_rng(seed)
     rng_loc = np.random.default_rng(seed + 1_000_000)
-    # Body lengths start at 0.6 s (not 0.3): with tau ~0.3 s a 0.3 s body is cut off
-    # after ~1 tau — the rate decay never substantially completes, so it plays
-    # "truncated". From 0.6 s up the rate decay is substantially complete, and the
-    # longest bodies wind all the way down into the localization band.
-    body_lengths = [0.6, 0.9, 1.2, 1.6, 2.0, 2.5]
+    # Body lengths span 0.1 s to 4 s, LOG-SPACED (each step ~1.85x the last).
+    #
+    # The range comes from the owner's field observation, not from the recorded population:
+    # real volleys run from short bursts up to ~20 s, and the volleys in
+    # real_volley_population.npz (median 0.20 s) are TRACKER FRAGMENTS — truncated, and
+    # biased short because genuinely long volleys are rare. So their duration distribution
+    # is evidence about the tracker, not about the animal, and must not set this ladder.
+    # (Their RATE is trustworthy and does set the peak — see sustained_peak_hz.)
+    #
+    # Log spacing, not linear: the range spans 40x, so linear steps would spend almost every
+    # item on the long end. Log steps give equal resolution per octave, which also keeps the
+    # rare long volleys from crowding out the short strong bursts that dominate in nature.
+    #
+    # The short end is deliberately BELOW one tau (~0.31 s): a 0.1 s body is cut off after
+    # ~0.3 tau, so its rate barely decays and it plays as a short burst held near peak. That
+    # used to be excluded as "truncated" (the ladder started at 0.6 s), but a brief
+    # full-rate burst is a real and common discharge, and it is the strong-event end of the
+    # range the experiment cares about.
+    body_lengths = [0.1, 0.2, 0.35, 0.65, 1.2, 2.2, 4.0]
     out: list[SyntheticVolley] = []
     for L in body_lengths:
         for rep in range(3):
             v = generate_volley(model, L, rng_vol, "")
-            v.label = f"synth_volley_body{L:.1f}s_tot{v.times_s[-1]:.1f}s_{rep}"
+            # 2 dp on the body length: the log-spaced ladder has 0.35 s and 0.65 s steps,
+            # which 1 dp would round to "0.3"/"0.7" and misreport in the provenance.
+            v.label = f"synth_volley_body{L:.2f}s_tot{v.times_s[-1]:.2f}s_{rep}"
             out.append(v)
     # a set of localization trains spanning the resting/exploring rate range (1-10 Hz),
     # one per target average rate.

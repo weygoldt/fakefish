@@ -118,14 +118,20 @@
 #define RC_AMP_STEPS      16               // quantise amplitude (8-bit duty loses shape at low amp)
 
 // ===== Volley snippet selection (from the stored library) ==================
-// The synthetic volleys (kind 1, STIM_ITEMS indices 7..24) carry the decaying-rate envelope.
+// The synthetic volleys (kind 1, STIM_ITEMS indices 7..27) carry the decaying-rate envelope.
 // A volley random-picks one of these per fire. Pin FIRST + COUNT=1 for a reproducible volley.
-// Their peak rate is calibrated against the real recorded volleys: 331 Hz over the first
-// 50 ms against the real population's 328 Hz. (Before 2026-08-21 they ran ~18 % slow, because
+//
+// Their peak RATE is calibrated against the real recorded volleys: ~327 Hz over the first
+// 50 ms against the real population's 329 Hz. (Before 2026-08-21 they ran ~18 % slow, because
 // the calibration matched 1/min(IPI) — an extreme-value statistic that reads higher the more
 // pulses you draw, and these carry ~4x more than a real volley. See synthetic_volleys.py.)
+//
+// Their DURATIONS are a log-spaced ladder from 0.1 s to 4 s (7 lengths x 3 draws = 21 items),
+// set from field observation rather than from the recorded population: the recorded volleys
+// are tracker FRAGMENTS, truncated and biased short. A throw therefore draws a duration
+// uniformly across that ladder, i.e. roughly uniform per OCTAVE of volley length.
 #define RC_VOLLEY_ITEM_FIRST 7
-#define RC_VOLLEY_ITEM_COUNT 18
+#define RC_VOLLEY_ITEM_COUNT 21
 
 // ===== Conditioning ========================================================
 #define RC_QUANT_HYST     0.30f            // quantiser boundary hysteresis (fraction of a step)

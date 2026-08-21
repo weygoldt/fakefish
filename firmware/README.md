@@ -274,7 +274,7 @@ direct-pin stage and still has to be **scoped** before it goes near an animal.
   onset. It can be a trivial phase counter rather than an overlap-add engine only because
   localization is ≤ 20 Hz and `LOC_REFRACTORY_SAMP` exceeds `EOD_HV_LEN`, so pulses can never
   overlap — a `static_assert` in `locgen.h` enforces exactly that.
-- **`eel_stimuli`** — the generated library: `EOD_HV` (131 samples @ 50 kHz) plus 31 items.
+- **`eel_stimuli`** — the generated library: `EOD_HV` (131 samples @ 50 kHz) plus 34 items.
   Byte-frozen; regenerated only by `fakefish-export`.
 - **`pulse_log`** — the **mirror image of `sd_player`**: where that one has the ISR *pop* samples
   `loop()` read from the card, this one has the ISR *push* event records that `loop()` writes to
