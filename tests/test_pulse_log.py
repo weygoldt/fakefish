@@ -33,7 +33,7 @@ def test_golden_exists():
 
 
 def test_header_provenance(golden):
-    assert golden.format_version == 1
+    assert golden.format_version == 2
     assert golden.sample_rate_hz == 50000
     assert golden.file_index == 7
     assert golden.rtc_valid is True
@@ -203,10 +203,16 @@ def test_blinded_is_none_on_non_trial_rows(golden):
 # ===== settings ============================================================
 def test_settings_are_milli_units(golden):
     loc = golden.pulses("LOC")[0]
-    assert loc.amp_m == 450 and loc.amp == pytest.approx(0.45)
+    # 0.225 == master 0.90 / VOLLEY_AMP_RATIO 4: the golden's synthetic session now
+    # uses the shipped ratio, where it predated the 2:1 -> 4:1 change.
+    assert loc.amp_m == 225 and loc.amp == pytest.approx(0.225)
     assert loc.master_m == 900 and loc.master_amp == pytest.approx(0.90)
-    assert loc.cv_m == 200 and loc.cv == pytest.approx(0.20)
-    assert loc.rate_ipi == 10000  # a mean IPI in whole samples == 5 Hz at 50 kHz
+    assert loc.rand_m == 1000 and loc.randomness == pytest.approx(1.0)
+    # The nominal MEDIAN interval in whole samples: a 5 Hz tick tempo at 50 kHz. Median,
+    # not mean — the rate knob anchors the tick tempo, and on a heavy-tailed interval
+    # distribution the two differ by about a factor of two.
+    assert loc.tick_ipi == 10000
+    assert golden.tick_hz(loc) == pytest.approx(5.0)
     assert loc.pol == -1
 
 
@@ -214,8 +220,8 @@ def test_every_pulse_row_carries_its_own_settings(golden):
     """Self-contained rows: a truncated file stays interpretable to its last row."""
     for r in golden.pulses():
         assert r.master_m is not None
-        assert r.cv_m is not None
-        assert r.rate_ipi is not None
+        assert r.rand_m is not None
+        assert r.tick_ipi is not None
         assert r.amp_m is not None
 
 
@@ -408,7 +414,7 @@ def test_missing_format_version_rejected():
 
 
 def test_wrong_columns_rejected():
-    text = f"{pl.MAGIC}\n#format_version=1\n#sample_rate_hz=50000\nseq,tick,event\n"
+    text = f"{pl.MAGIC}\n#format_version=2\n#sample_rate_hz=50000\nseq,tick,event\n"
     with pytest.raises(pl.PulseLogError, match="unexpected column row"):
         pl.parse_text(text)
 
@@ -445,7 +451,7 @@ def test_iter_logs_accepts_lowercase(tmp_path):
 
 
 # ===== helpers =============================================================
-def _synthetic_log(rows: list[str], version: int = 1) -> str:
+def _synthetic_log(rows: list[str], version: int = 2) -> str:
     """Build a minimal well-formed log around ``rows``."""
     head = [
         pl.MAGIC,

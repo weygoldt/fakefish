@@ -5,10 +5,10 @@
 // with the same binary and no transmitter, by three panel buttons for the bench (panel_control.h).
 // Both input sources are OR-ed. It LIVE-GENERATES its stimuli over the mean-EOD waveform (EOD_HV):
 //
-//   CH3 throttle  -> localization ON/OFF (dead-band) + RATE 0..20 Hz (a continuous train)
+//   CH3 throttle  -> localization ON/OFF (dead-band) + TICK TEMPO 1..20 Hz (a resting train)
 //   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws volley
 //                    or sham); throw low does NOTHING
-//   CH5 pot       -> localization JITTER          CH6 pot -> AMPLITUDE (sets volley/max; loc = half)
+//   CH5 pot       -> localization RANDOMNESS      CH6 pot -> AMPLITUDE (sets volley/max; loc = quarter)
 //
 // A VOLLEY and a SHAM both begin with a coded PULSE MARKER preamble (a short EOD burst, tagged by
 // pulse count) so the recording can tell them apart; the volley then plays the discharge, the
@@ -27,10 +27,26 @@
 // sample producers:
 //   L1  src/eel_core/out_hal.h + config.h   the DRV8871 complementary output stage (36 V, 100 kHz)
 //   L2  src/eel_core/eel_player.{h,cpp}     overlap-add engine (marker + volley)
-//       src/eel_core/locgen.h               live localization scheduler
+//       src/eel_core/locgen.h               renders the localization pulse
+//       src/eel_core/loc_rhythm.h           the FITTED resting rhythm — decides when
 //       src/eel_core/eel_stimuli.{h,cpp}    the generated stimulus library
 // src/eel_core/ is a COMMITTED COPY of firmware/eel_core/, produced by firmware/sync_core.sh —
 // that is what makes this sketch self-contained for the IDE / arduino-cli / rsync-to-bench.
+//
+// THE RESTING RHYTHM IS A FITTED MODEL, NOT A RANDOM DRAW. Between trials this device ticks
+// along like a resting eel, and since 2026-08-21 that means a model fitted to 99 010 measured
+// resting intervals rather than the unit-mean lognormal it used before. The difference is not
+// cosmetic: a lognormal is a RENEWAL process, so its consecutive log-intervals are uncorrelated
+// at every lag, while a real eel's correlate 0.55 at lag 1 and still 0.21 at lag 20. The fish's
+// discharge rate WANDERS, over a few seconds and over a minute, and reproducing that wander is
+// the whole point — it is what makes a recording sound like a fish instead of a random number
+// generator. See src/eel_core/loc_rhythm.h and docs/LOCALIZATION_GENERATIVE_SPEC.md.
+//
+// The model also carries a burst hazard — the fish's own decision to fire a fast run, about 1
+// in 49 resting pulses. It is DELIBERATELY not wired up. This surface runs a blinded trial
+// design in which a marker's pulse count is the trial record, so a spontaneous burst would be
+// an unmarked volley in the water, and one landing inside a sham would destroy the no-stimulus
+// control. Every volley this device emits is operator-requested.
 //
 // PULSE LOGGING. Every pulse this device emits — localization, marker and volley alike — is
 // logged to the SD card with its exact sample tick, one row per pulse, never summarised. That
@@ -53,7 +69,8 @@
 #include "src/eel_core/out_hal.h"       // L1: out_begin/out_write/out_arm/out_disarm (+ AMP_DEBUG)
 #include "src/eel_core/eel_stimuli.h"   // L2: EOD_HV[] + STIM_ITEMS[] (volley snippets)
 #include "src/eel_core/eel_player.h"    // L2: shared overlap-add engine (marker + volley playback)
-#include "src/eel_core/locgen.h"        // L2: live localization scheduler
+#include "src/eel_core/locgen.h"        // L2: renders one localization pulse
+#include "src/eel_core/loc_rhythm.h"    // L2: the fitted resting rhythm (when the next one is)
 #include "src/eel_core/pulse_log.h"     // L2: per-pulse SD event log (ISR pushes, loop() writes)
 #include "panel_control.h"              // L3: three panel buttons + the LED feedback vocabulary
 #include "rc_control.h"                 // L3: 4-channel RC decode + conditioning
@@ -74,8 +91,12 @@ static volatile bool     g_loc_enabled = false;    // CH3 throttle above dead-ba
 static volatile uint32_t g_trig_seq    = 0;        // bumped once per trigger throw (one trial)
 static volatile int      g_trig_kind   = RC_TRIG_NONE;  // RC_TRIG_RANDOM (lever) or an explicit
                                                         // RC_TRIG_VOLLEY / _SHAM (panel buttons)
-static volatile float    g_rate_ipi_samp = 0.0f;   // mean localization IPI (samples) for the set rate
-static volatile float    g_cv          = 0.0f;     // localization jitter (coefficient of variation)
+static volatile float    g_rate_tempo  = 0.0f;     // localization rate knob: a TEMPO MULTIPLIER
+                                                   // (1.0 == the measured eel's 3.15 Hz tick)
+static volatile uint32_t g_tick_ipi_samp = 0;      // the nominal MEDIAN IPI for that tempo, in
+                                                   // samples — carried in the log so a row can be
+                                                   // read back as a rate without the firmware
+static volatile float    g_randomness  = 0.0f;     // localization randomness (0 = metronome, 1 = eel)
 static volatile float    g_volley_amp  = 0.0f;     // volley (max) amplitude 0..1 — the amplitude control sets THIS
 static volatile float    g_loc_amp     = 0.0f;     // localization amplitude = volley / VOLLEY_AMP_RATIO (always half)
 static volatile bool     g_link_up     = false;    // CH3 (throttle) delivering edges
@@ -91,7 +112,15 @@ static volatile bool     g_log_ok      = false;    // the SD event log is health
 enum Source { SRC_IDLE, SRC_LOC, SRC_MARKER, SRC_VOLLEY, SRC_SHAM };
 static volatile Source src = SRC_IDLE;
 static EelPlayer  player;                           // marker + volley engine (touched ONLY in the ISR)
-static LocGen     loc;                               // localization scheduler (ISR only)
+static LocGen     loc;                               // localization pulse renderer (ISR only)
+static LocRhythm  rhythm;                            // the fitted resting rhythm (ISR only)
+// Tick of the last localization ONSET, 64-bit so the difference below cannot wrap. The rhythm
+// relaxes in WALL-CLOCK time, so every draw must be told how long it has actually been since
+// the previous pulse — including time spent on a marker, a volley, or with the throttle at
+// rest. Feeding back the interval the model last *scheduled* would be wrong twice over: a
+// trial preempts the localization train part-way through an interval that is then never
+// realised, and the time the trial itself took would go unbooked.
+static uint64_t   g_loc_last_onset = 0;
 static uint32_t   g_trig_seen = 0;                   // last consumed trigger seq (ISR only)
 static int        g_post_marker = RC_TRIG_NONE;      // what follows the marker: VOLLEY burst / SHAM
 static int8_t     g_playback_pol = 1;                // polarity shared by a marker + its volley
@@ -113,7 +142,9 @@ static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM
 static_assert(PULSE_MARKER_IPI_SAMP >= EEL_PLAYER_MIN_IPI_SAMP,
               "PULSE_MARKER_IPI_SAMP is tighter than eel_player can mix — raise the marker's "
               "IPI, or widen EEL_PLAYER_MIN_IPI_SAMP and pay for it on every ISR tick");
-static uint16_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
+// uint32_t, matching StimItem::ipi_samp since library format v4 widened it (the
+// localization items now carry multi-second silences that a uint16 cannot hold).
+static uint32_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
 static StimItem   g_marker_item;
 
 // ===== pulse log (ISR-owned counters; the FILE is owned by loop()) ========
@@ -143,8 +174,8 @@ static inline void led_service() { if ((int32_t)(g_tick - g_led_off_at) >= 0) di
 static inline void log_fill(PlogRec* r, uint8_t ev) {
   plog_rec_init(r, ev, plog_tick_value(&g_tick64));
   r->master_m = plog_milli(g_volley_amp);
-  r->cv_m     = plog_milli(g_cv);
-  r->rate_ipi = (uint32_t)(g_rate_ipi_samp + 0.5f);
+  r->rand_m   = plog_milli(g_randomness);
+  r->tick_ipi = g_tick_ipi_samp;
 }
 static inline void log_event(uint8_t ev) { PlogRec r; log_fill(&r, ev); plog_push(&g_plog, &r); }
 
@@ -163,11 +194,26 @@ static inline uint8_t log_trig_code(int kind) {
 
 // ----- random helpers (called ONLY from the ISR -> single-caller, no lock) --
 static inline int8_t rand_polarity() { return random(2) ? (int8_t)1 : (int8_t)-1; }
+// Beyond this the state has relaxed to its offset anyway (the slowest component's time
+// constant is 62 minutes), and the cap is what keeps the elapsed sample count inside a uint32.
+#define LOC_ELAPSED_CAP_SAMP ((uint32_t)SAMPLE_RATE_HZ * 3600u * 4u)   // 4 hours
+
+// Samples since the last localization onset — the true elapsed time the rhythm ages by. At the
+// first pulse of a power-on this is simply the uptime, which is the right answer: the fish was
+// resting quietly before the throttle was pushed.
+static inline uint32_t loc_elapsed_samp() {
+  uint64_t now = plog_tick_value(&g_tick64);
+  uint64_t d   = (now > g_loc_last_onset) ? (now - g_loc_last_onset) : 0;
+  return (d > (uint64_t)LOC_ELAPSED_CAP_SAMP) ? LOC_ELAPSED_CAP_SAMP : (uint32_t)d;
+}
+
+// One interval from the fitted rhythm. The knobs are latched HERE, at the boundary, so a
+// mid-interval control change never alters the pulse already in flight — the same rule locgen
+// follows for ipi/amp. Setting them every draw costs one table lookup and one divide.
 static inline uint32_t draw_loc_ipi() {
-  float u1 = (float)(random(1, 1000001)) * 1e-6f;   // (0,1]
-  float u2 = (float)(random(1000000)) * 1e-6f;
-  float z  = rc_std_normal(u1, u2);
-  return rc_ipi_samples(g_rate_ipi_samp, g_cv, z, LOC_REFRACTORY_SAMP);
+  loc_rhythm_set_knobs(&rhythm, g_rate_tempo, g_randomness);
+  return loc_rhythm_next_ipi_samp(&rhythm, loc_elapsed_samp(),
+                                  (uint32_t)SAMPLE_RATE_HZ, LOC_REFRACTORY_SAMP);
 }
 static inline bool trig_pending() { return g_trig_seq != g_trig_seen; }
 
@@ -184,10 +230,15 @@ static inline void begin_loc() {
 //
 // THE BLINDED DRAW HAPPENS HERE. The RC lever requests RC_TRIG_RANDOM ("run a trial") and this
 // is where it becomes a volley or a sham — in the ISR, at the moment of playback. Two reasons
-// it lives here rather than in loop(): random() is called from the ISR elsewhere (polarity,
-// localization jitter) and must stay single-caller, and drawing at playback time means a
-// request that is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM
-// buttons pass through unchanged, so the bench stays deterministic.
+// it lives here rather than in loop(): random() is called from the ISR elsewhere (polarity, the
+// volley item pick) and must stay single-caller, and drawing at playback time means a request
+// that is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM buttons pass
+// through unchanged, so the bench stays deterministic.
+//
+// The localization rhythm is deliberately NOT on this stream — it runs its own generator (see
+// loc_rhythm.h). Sharing one would make the blinded sequence depend on how many localization
+// pulses happened to precede a throw, so the operator's rate knob would silently reach into
+// which trials came out volleys.
 static inline void begin_marker(int kind) {
   out_arm();                                     // ...and for the marker + whatever follows it
   if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
@@ -381,6 +432,7 @@ static void onSampleTick() {
       if (s == 0) out_silence(); else out_write(s);
       if (onset) {
         led_flash();
+        g_loc_last_onset = plog_tick_value(&g_tick64);   // the rhythm ages from HERE
         // THE REASON THIS FEATURE EXISTS. A localization pulse is deliberately built to look
         // exactly like a real cruising eel, so this row is the only thing that will ever
         // distinguish it from biology in a recording. No item: locgen synthesises the pulse
@@ -427,6 +479,12 @@ static void log_header_hook(PulseLog* L) {
   plog_header_kv(L, "volley_item_count", RC_VOLLEY_ITEM_COUNT);
   plog_header_kv(L, "trial_p_volley_milli", plog_milli(TRIAL_P_VOLLEY));
   plog_header_kv(L, "loc_refractory_samp", LOC_REFRACTORY_SAMP);
+  // The resting rhythm, so a log can be interpreted without the firmware source: which
+  // model produced the localization intervals, and what the two knob columns mean.
+  plog_header_kv(L, "loc_rhythm_fitted", 1);          // 0 == the retired lognormal draw
+  plog_header_kv(L, "loc_nominal_tick_milli_hz", (uint64_t)(LOC_NOMINAL_TICK_HZ * 1000.0f + 0.5f));
+  plog_header_kv(L, "loc_randomness_max_milli", plog_milli(LOC_RANDOMNESS_MAX));
+  plog_header_kv(L, "loc_rate_anchor_median", 1);     // tick tempo held, not pulse dose
 }
 
 void setup() {
@@ -449,9 +507,18 @@ void setup() {
   g_marker_item.kind = 0;
   g_marker_item.group = 0;
 
-  // Panel defaults so a bench unit (no transmitter) has a rate/jitter/amplitude.
-  g_rate_ipi_samp = (float)SAMPLE_RATE_HZ / PANEL_RATE_HZ;
-  g_cv = PANEL_CV;
+  // Panel defaults so a bench unit (no transmitter) has a rate/randomness/amplitude.
+  g_rate_tempo    = loc_rhythm_rate_for_hz(PANEL_RATE_HZ);
+  g_tick_ipi_samp = (uint32_t)((float)SAMPLE_RATE_HZ / PANEL_RATE_HZ + 0.5f);
+  g_randomness    = PANEL_RANDOMNESS;
+  // The rhythm gets its OWN generator, seeded from random(), rather than sharing it. Sharing
+  // would make the blinded volley/sham sequence depend on how many localization pulses happened
+  // to be emitted first, which is precisely the kind of hidden coupling a blinded design must
+  // not have. loc_rhythm_init also burns in LOC_BURN_IN intervals: a cold state starts
+  // noticeably slow, because the components' stationary distribution is defined in continuous
+  // time while the model is observed at its own pulse times.
+  loc_rhythm_init(&rhythm, ((uint32_t)random(65536) << 16) ^ (uint32_t)random(65536),
+                  g_rate_tempo, g_randomness);
   g_volley_amp = PANEL_VOLLEY_AMP;
   g_loc_amp    = rc_loc_amp(PANEL_VOLLEY_AMP);   // localization = half the volley
 
@@ -550,8 +617,8 @@ void loop() {
   static bool     primed = false;
   static bool     rc_loc_state = false;
   static uint32_t thr_on_count = 0;   // consecutive above-CH3_ON_THRESH decode ticks (throttle-on debounce)
-  static float    u_thr = 0.0f, u_trig = 0.5f, u_jit = 0.0f, u_amp = 0.0f;
-  static int      rate_level = 0, jit_level = 0, amp_level = 0;
+  static float    u_thr = 0.0f, u_trig = 0.5f, u_rnd = 0.0f, u_amp = 0.0f;
+  static int      rate_level = 0, rnd_level = 0, amp_level = 0;
   static RcTrigger trig = {};
   static bool     trig_prev_present = false;
 
@@ -560,7 +627,7 @@ void loop() {
 
     bool thr_present  = rc_present_ms(RC_IDX_THROTTLE, now_ms);   // the primary / failsafe channel
     bool trig_present = rc_present_ms(RC_IDX_TRIGGER,  now_ms);
-    bool jit_present  = rc_present_ms(RC_IDX_JITTER,   now_ms);
+    bool rnd_present  = rc_present_ms(RC_IDX_RANDOM,   now_ms);
     bool amp_present  = rc_present_ms(RC_IDX_AMP,      now_ms);
     bool trig_acquired = trig_present && !trig_prev_present;   // CH4 absent -> present edge
     trig_prev_present = trig_present;
@@ -570,7 +637,7 @@ void loop() {
       g_rc_ever = true;
       float raw_thr  = rc_unit(rc_get_width_us(RC_IDX_THROTTLE), RC_CAL[RC_IDX_THROTTLE]);
       float raw_trig = rc_unit(rc_get_width_us(RC_IDX_TRIGGER),  RC_CAL[RC_IDX_TRIGGER]);
-      float raw_jit  = rc_unit(rc_get_width_us(RC_IDX_JITTER),   RC_CAL[RC_IDX_JITTER]);
+      float raw_rnd  = rc_unit(rc_get_width_us(RC_IDX_RANDOM),   RC_CAL[RC_IDX_RANDOM]);
       float raw_amp  = rc_unit(rc_get_width_us(RC_IDX_AMP),      RC_CAL[RC_IDX_AMP]);
 
       if (!primed) {
@@ -580,20 +647,20 @@ void loop() {
         primed = true;
         u_thr = raw_thr;
         if (trig_present) u_trig = raw_trig;
-        if (jit_present)  u_jit  = raw_jit;
+        if (rnd_present)  u_rnd  = raw_rnd;
         if (amp_present)  u_amp  = raw_amp;
         trig = {};
         rate_level = rc_quantize_hyst(rc_throttle_frac(u_thr), rate_level, RC_RATE_STEPS,   0.0f);
-        jit_level  = rc_quantize_hyst(u_jit,  jit_level,  RC_JITTER_STEPS, 0.0f);
+        rnd_level  = rc_quantize_hyst(u_rnd,  rnd_level,  RC_RANDOM_STEPS, 0.0f);
         amp_level  = rc_quantize_hyst(u_amp,  amp_level,  RC_AMP_STEPS,    0.0f);
       } else {
         u_thr = rc_ema(u_thr, raw_thr, RC_EMA_ALPHA);
         if (trig_acquired) { u_trig = raw_trig; trig = {}; }   // CH4 re-acquired mid-run: snap + arm from truth
         else if (trig_present) u_trig = rc_ema(u_trig, raw_trig, RC_EMA_ALPHA);
-        if (jit_present)  u_jit  = rc_ema(u_jit,  raw_jit,  RC_EMA_ALPHA);
+        if (rnd_present)  u_rnd  = rc_ema(u_rnd,  raw_rnd,  RC_EMA_ALPHA);
         if (amp_present)  u_amp  = rc_ema(u_amp,  raw_amp,  RC_EMA_ALPHA);
         rate_level = rc_quantize_hyst(rc_throttle_frac(u_thr), rate_level, RC_RATE_STEPS,   RC_QUANT_HYST);
-        jit_level  = rc_quantize_hyst(u_jit,  jit_level,  RC_JITTER_STEPS, RC_QUANT_HYST);
+        rnd_level  = rc_quantize_hyst(u_rnd,  rnd_level,  RC_RANDOM_STEPS, RC_QUANT_HYST);
         amp_level  = rc_quantize_hyst(u_amp,  amp_level,  RC_AMP_STEPS,    RC_QUANT_HYST);
       }
 
@@ -602,9 +669,13 @@ void loop() {
       // CH3_ON_DEBOUNCE_TICKS ticks; disable is immediate below CH3_OFF_DEADBAND.
       rc_loc_state = rc_throttle_gate(raw_thr, rc_loc_state, &thr_on_count,
                                       CH3_ON_THRESH, CH3_OFF_DEADBAND, CH3_ON_DEBOUNCE_TICKS);
-      g_rate_ipi_samp = rc_rate_to_ipi_samp(rate_level, RC_RATE_STEPS);
-      // CH5: jitter (pot; jit_level held on CH5 loss -> g_cv holds)
-      g_cv = rc_jitter_cv(jit_level, RC_JITTER_STEPS);
+      // CH3 rate. The ladder is a TICK TEMPO (1/median interval), so the tempo multiplier and
+      // the nominal median IPI the log carries are two views of the same setting.
+      float tick_hz   = rc_rate_to_hz(rate_level, RC_RATE_STEPS);
+      g_rate_tempo    = loc_rhythm_rate_for_hz(tick_hz);
+      g_tick_ipi_samp = (uint32_t)((float)SAMPLE_RATE_HZ / tick_hz + 0.5f);
+      // CH5: randomness (pot; rnd_level held on CH5 loss -> g_randomness holds)
+      g_randomness = rc_randomness(rnd_level, RC_RANDOM_STEPS);
       // CH6: amplitude pot -> VOLLEY (max) level; localization is derived as half the volley
       float amp = rc_master_amp(amp_level, RC_AMP_STEPS);
       g_volley_amp = amp;

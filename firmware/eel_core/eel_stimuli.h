@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>  // NULL
 
-#define STIM_FORMAT_VERSION   3
+#define STIM_FORMAT_VERSION   4
 #define STIM_SAMPLE_RATE_HZ   50000
 
 // ---- EOD waveform (device-agnostic) --------------------------------------
@@ -26,7 +26,7 @@ typedef enum {
   STIM_REAL_VOLLEY=0, STIM_SYNTH_VOLLEY=1, STIM_LOCALIZATION=2
 } StimKind;
 typedef struct {
-  const uint16_t* ipi_samp;   // length n; wait-before-pulse in samples; [0]=0
+  const uint32_t* ipi_samp;   // length n; wait-before-pulse in samples; [0]=0
   const uint8_t*  rel_amp;    // length n; 0..255; NULL => all full-scale
   uint16_t        n;          // number of pulses
   uint8_t         kind;       // StimKind

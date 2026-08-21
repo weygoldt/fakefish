@@ -98,6 +98,7 @@ SYNTH_NPZ = OUT_DIR / "synthetic_population.npz"
 
 # The fitted parameters, vendored verbatim (see the module docstring).
 VOLLEY_MODEL_JSON = OUT_DIR / "volley_model_params.json"
+LOC_MODEL_JSON = OUT_DIR / "loc_model_params.json"
 
 # Everything the library fires is a `strong` volley: the extreme hunting volleys the
 # source analysis selected for (~393 Hz start, ~0.47 s, ~88 pulses). That is what a
@@ -159,21 +160,53 @@ VOLLEY_PEAK_MAX_IPI_MS = 10.0
 VOLLEY_MULTIFISH_PEAK_HZ = 450.0
 SUSTAINED_PEAK_WINDOW = 5  # intervals a "peak" must hold for, to not be one outlier
 
-# Synthetic localization: a set of standalone resting/exploring trains spanning the
-# realistic 1-10 Hz range, one per target average rate. Each is lognormally jittered
-# (LOC_SYNTH_CV) with IPIs clamped under LOC_MAX_IPI_S so a low-rate (1 Hz) train
-# neither overflows the uint16 sample-IPI (65535 samp = 1.31 s) nor gets chopped by
-# the gap-free trim (localization_max_gap_s = 1.2 s).
+# Synthetic localization: standalone resting trains, one per rung of a designed tempo
+# ladder, drawn from the FITTED resting rhythm (``fakefish.loc_model``, vendored from
+# eeltracker — CLAUDE.md invariant 11, spec in docs/LOCALIZATION_GENERATIVE_SPEC.md).
 #
-# THIS IS THE SEAM FOR A PROPER LOCALIZATION MODEL. It is a designed rate ladder, not a
-# fit: the old in-repo lognormal fit was retired with the old volley fit, and the volley
-# model deliberately does not cover localization (its own §1.3 — one call is one volley).
-# Its §2.3 measures ~3.2 Hz between volleys but labels that an UPPER BOUND, contaminated
-# by imperfectly-separated neighbours, so it is not used. When a fitted localization model
-# lands, it replaces this ladder the same way volley_model.py replaced the volley fit.
+# THE SEAM IS CLOSED. Until 2026-08-21 these came from a lognormal draw around a target
+# average rate, clamped under 1.15 s so they fit a uint16 sample-IPI. That is a RENEWAL
+# process — every interval independent, so zero log-interval autocorrelation at every lag,
+# where a real eel gives 0.55 / 0.36 / 0.21 at lags 1 / 5 / 20. The fitted model is now the
+# ONLY way this repo generates localization pulses, on both devices: the RC unit runs it
+# live (firmware/eel_core/loc_rhythm.h), and these items carry it onto the WAV card.
+#
+# Two things had to move to let the model through unbent:
+#
+#   * The uint16 sample-IPI ceiling (65535 samp = 1.31 s) was NOT a tail problem, it was a
+#     core-of-the-distribution problem: at a 1 Hz tick 35 % of the model's intervals exceed
+#     it, and even at 10 Hz 1.9 % do. Clamping would have deformed every item at every
+#     rung. ``StimItem.ipi_samp`` is uint32 as of library format v4 instead (+24.6 kB, a
+#     packet of ~62 kB against a 131 kB budget).
+#   * ``LOC_MAX_IPI_S`` is gone with it. Long silences are measured behaviour — 1.5 % of
+#     real resting intervals exceed 5 s, and the pulses bracketing a real 30 s silence are
+#     exactly as loud as the rest of the recording, so the fish stopped rather than swam
+#     away. Do not clamp them back.
+#
+# The LADDER survives the model swap because it is an experimental-design choice, not a
+# fit: the card offers a range of localization tempos and the operator picks one by picking
+# a WAV. What changed is the meaning of a rung. It used to be an average pulse rate; it is
+# now a TICK TEMPO (one over the median interval), because that is what the model's rate
+# knob anchors and what the RC device's CH3 ladder means. The two surfaces therefore label
+# rates the same way. A 3 Hz rung delivers ~1.9 pulses/s, not 3.
 LOC_SYNTH_RATES_HZ = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
-LOC_SYNTH_CV = 0.3
-LOC_MAX_IPI_S = 1.15
+
+#: Randomness the shipped items are drawn at. 1.0 IS the measured eel; 0 would be a
+#: metronome. Held at 1.0 across the ladder so a rung differs from its neighbours in tempo
+#: ALONE — the knob and the ladder stay orthogonal, exactly as they are on the RC remote.
+LOC_SYNTH_RANDOMNESS = 1.0
+
+#: Growth factor applied when a train is still too short to have a usable median at all.
+#: The ordinary case extends by the measured shortfall instead; this only covers a rung so
+#: slow that ``LOC_SYNTH_MIN_PULSES`` has not been reached yet.
+LOC_SYNTH_OVERDRAW = 4.0
+
+#: Guard against a degenerate draw. The model's tail is real and long — at a 1 Hz tick a
+#: single interval can exceed the whole 60 s train — so a rung could in principle come out
+#: with almost no pulses, which as a shipped WAV is a defect rather than a realistic fish.
+#: A train short of this is REDRAWN whole; intervals are never clamped, so the interval
+#: distribution within a kept train is exactly the model's.
+LOC_SYNTH_MIN_PULSES = 8
 
 # Where localization sits relative to a volley, as a fraction. Read from the SD-path
 # levels because those are the pair the codegen renders into Python; the RC path
@@ -471,14 +504,6 @@ class SyntheticVolley:
     body_duration_s: float
 
 
-def _lognormal_ipi(rate_hz: float, cv: float, rng, floor_ms: float = 1.6) -> float:
-    """A positive, lognormally-jittered IPI (s) for a target rate, clamped to a floor."""
-    mean_ipi = 1.0 / rate_hz
-    sigma = np.sqrt(np.log(1 + cv * cv))
-    mu = np.log(mean_ipi) - 0.5 * sigma * sigma
-    return float(max(np.exp(rng.normal(mu, sigma)), floor_ms / 1000.0))
-
-
 def _load_volley_model():
     """The vendored sampler, bound to the vendored parameters.
 
@@ -490,6 +515,18 @@ def _load_volley_model():
     from fakefish.volley_model import VolleyModel
 
     return VolleyModel.from_json(VOLLEY_MODEL_JSON)
+
+
+def _load_loc_model():
+    """The vendored resting-rhythm sampler, bound to the vendored parameters.
+
+    Deferred import for the same reasons as :func:`_load_volley_model`: a command that
+    never synthesises does not pay for it, and the vendored module stays a leaf that
+    nothing in fakefish imports except here.
+    """
+    from fakefish.loc_model import LocalizationModel
+
+    return LocalizationModel.from_json(LOC_MODEL_JSON)
 
 
 def _snap_to_grid(times_s: np.ndarray, hz: int, min_samp: int) -> np.ndarray:
@@ -568,38 +605,108 @@ def generate_localization(
     duration_s: float,
     rng,
     label: str,
-    rate_hz: float,
-    cv: float = LOC_SYNTH_CV,
+    tick_hz: float,
+    randomness: float = LOC_SYNTH_RANDOMNESS,
 ) -> SyntheticVolley:
-    """A standalone localization train at a fixed target average ``rate_hz`` (Hz).
+    """A standalone resting train from the FITTED rhythm, at a target tick tempo.
 
-    IPIs are lognormally jittered around ``1/rate_hz`` (``cv``) and clamped under
-    ``LOC_MAX_IPI_S`` so a low-rate (1 Hz) train neither overflows the uint16
-    sample-IPI nor gets fragmented by the gap-free trim.
+    ``tick_hz`` is a TICK TEMPO — one over the median interval, the number quoted as an
+    eel's discharge rate — not an average pulse rate. The two differ by about a factor of
+    two on this heavy-tailed distribution, and the median is what the model's rate knob
+    anchors, so it is what the RC device's CH3 ladder means too.
 
-    ``rate_hz`` is now REQUIRED. It used to be optional, falling back to a fitted
-    resting lognormal; that fit is retired (see ``LOC_SYNTH_RATES_HZ``), and a
-    silent fallback to a distribution that no longer exists is worse than an
-    argument error.
+    A FINITE ITEM CANNOT HOLD A LABELLED TEMPO ON ITS OWN, so the draw is rescaled onto
+    its rung afterwards. This is measured, not defensive. The model's components relax over
+    3 s, 96 s and 62 min, so a 60 s item — of which program B renders only the first 20 s —
+    is far too short to average the slow ones out. Left alone, a 5 Hz rung realises anywhere
+    in 1.8-10.3 Hz and only about one draw in nine lands within 10 % of its label; the rungs
+    come out in the wrong ORDER often enough to be useless as an axis. Pinning the state to
+    its mean at t=0 fixes the ordering but not the scatter, and it introduces a systematic
+    15-25 % slowness of its own, because the interval table is calibrated against the
+    pulse-weighted distribution of a long free-run — which over-visits the fast side —
+    and a pinned start is exactly what removes that.
+
+    So the train is generated freely and then **time-scaled** so its realised median lands
+    on the rung. That is not a distortion: the model says rate is a PURE TIME DILATION,
+    dividing the intervals and stretching the time constants with them (gamma = 1, which
+    beats gamma = 0 by 413 nats). Scaling every time by one factor is precisely what the
+    rate knob does, so the result is a valid realisation at the scaled tempo — with its
+    pulse-indexed texture untouched, because CV2 and the log-interval autocorrelation are
+    scale-invariant. The rung becomes exact by construction and the label stops being a lie.
+
+    This differs from the RC device on purpose. There, a power-on draws its own offset and
+    keeps it: one run is one fish, and the +-25 % individual variation is the point. Here a
+    rung is a point on a designed experimental axis, not a fish.
+
+    The train is redrawn whole if it comes out shorter than ``LOC_SYNTH_MIN_PULSES``
+    pulses (see there). Intervals are never clamped — the long silences are the point.
     """
+    model = _load_loc_model()
+    model.rate = tick_hz / model.params["reference_statistics"]["resting_ipi_median_hz"]
+    model.randomness = randomness
+
+    # GROW, THEN SCALE — never scale then trim. The scale factor is the train's own realised
+    # median, so it is a property of exactly the pulses kept: trimming after scaling would
+    # hand the item a prefix whose median is something else again, which is how an earlier
+    # revision of this shipped a "7 Hz" rung ticking at 11 Hz. Instead the train is extended
+    # until it still spans duration_s AFTER scaling, and then kept whole.
+    st = model.new_state(rng)
     times, t = [], 0.0
-    while t < duration_s:
-        times.append(t)
-        t += min(_lognormal_ipi(rate_hz, cv, rng, SYNTH_MIN_IPI_MS), LOC_MAX_IPI_S)
+    span_target = duration_s
+    for _ in range(64):
+        while t < span_target:
+            times.append(t)
+            t += model.next_interval(st, rng)
+        arr = np.asarray(times)
+        if arr.size < LOC_SYNTH_MIN_PULSES + 1:
+            span_target *= LOC_SYNTH_OVERDRAW
+            continue
+        scale = (1.0 / float(np.median(np.diff(arr)))) / tick_hz
+        if arr[-1] * scale >= duration_s:
+            break
+        # Short after scaling: extend by the shortfall, with headroom for the median moving.
+        span_target = span_target * (duration_s / (arr[-1] * scale)) * 1.2
+    else:  # pragma: no cover - would need the tail to defeat 64 extensions
+        raise RuntimeError(
+            f"{label}: could not reach {duration_s}s at {tick_hz} Hz after 64 extensions"
+        )
+    times = arr * scale
+
+    # THE ANTIMODE IS ABSOLUTE BIOLOGY; THE RATE KNOB MUST NOT CARRY THE FLOOR BELOW IT.
+    # The model's interval table is clamped at the bottom to the 25 ms resting/volley
+    # antimode precisely "so the resting rhythm can never intrude into volley territory"
+    # (spec §3) — but that clamp lives in SCORE space, and rate is a pure TIME dilation, so
+    # a rung above the nominal 3.15 Hz tick scales the floor down with everything else. At
+    # the 10 Hz rung the table's floor lands at 8.8 ms and 7 % of intervals fall inside
+    # volley territory, minimum 9.3 ms. That matters because the source analysis segments
+    # resting from fast runs on exactly this antimode: those pairs would be read as
+    # micro-bursts, contaminating the one distinction the experiment rests on.
+    #
+    # So the floor is re-imposed in absolute time, after scaling. Note this is a LOWER
+    # clamp and is not in tension with leaving the upper tail alone — the spec puts a clamp
+    # at both ends of the table and defends the bottom one in exactly these terms. It bites
+    # on no interval at or below the nominal tempo.
+    floor_s = model.params["provenance"]["resting_min_ipi_ms"] / 1e3
+    d = np.diff(times)
+    if d.size and float(d.min()) < floor_s:
+        times = np.concatenate([times[:1], times[0] + np.cumsum(np.maximum(d, floor_s))])
+
     # NOT snapped to the sample grid, unlike a volley. The snap is there to make the IPI
     # FLOOR exact, and localization runs two orders of magnitude away from it — so here it
     # would only re-round already-rounded numbers, moving every train by up to one sample
-    # (20 us). That costs something real: the six localization items come out
-    # BYTE-IDENTICAL across a volley-model change, which is what makes such a change
-    # reviewable — any localization row that moves in the export diff is a genuine
-    # regression rather than noise. Keeping them still is worth more than uniformity.
+    # (20 us). That costs something real: the localization items come out BYTE-IDENTICAL
+    # across a volley-model change, which is what makes such a change reviewable — any
+    # localization row that moves in the export diff is a genuine regression rather than
+    # noise. Keeping them still is worth more than uniformity.
     times = np.asarray(times)
     return SyntheticVolley(
         kind="localization",
         label=label,
         times_s=times,
         rel_amp=np.ones(times.size),  # localization is uniform full-scale (no decay)
-        body_duration_s=duration_s,
+        # The realised span, not the requested one: the train is kept whole after scaling
+        # (see above), so it runs a little past duration_s rather than being trimmed to it.
+        body_duration_s=float(times[-1]),
     )
 
 
@@ -642,7 +749,7 @@ def build_population(model, seed: int = 0) -> list[SyntheticVolley]:
     # a set of localization trains spanning the resting/exploring rate range (1-10 Hz),
     # one per target average rate.
     for r in LOC_SYNTH_RATES_HZ:
-        out.append(generate_localization(60.0, rng_loc, f"synth_loc_{r:g}hz", rate_hz=r))
+        out.append(generate_localization(60.0, rng_loc, f"synth_loc_{r:g}hz", tick_hz=r))
     return out
 
 

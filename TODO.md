@@ -267,6 +267,41 @@ a build); `--d-pairings N` remains for a smaller card.
 expected value grows with the number of intervals drawn, so a bigger sample makes it *worse*.
 `sustained_peak_hz` survives as QC on both the real and synthetic populations.
 
+## 6b. Localization rhythm — fitted for the RC device, still a ladder on the card
+
+**Done 2026-08-21:** the RC device's resting rhythm is now a model fitted to 99 010 measured
+resting intervals, vendored from `eeltracker/analyses/localization_rhythm/` exactly as the volley
+model was (CLAUDE.md invariant 11). It replaced a unit-mean lognormal draw, which is a *renewal*
+process and therefore has zero log-interval autocorrelation at every lag where a real eel has
+0.55 / 0.36 / 0.21 at lags 1 / 5 / 20.
+
+**The SD path is done too.** `generate_localization` now draws from the model, and the library
+was re-exported on 2026-08-21: `EOD_HV`, the 5 real volleys, both real localization exemplars and
+all 100 synthetic volleys came back byte-identical, and exactly the 6 synthetic localization items
+(107–112) moved. The library is at format **v4** (uint32 IPI, so multi-second silences fit) and
+the packet is 58.7 kB of a 131 kB budget.
+
+- [ ] **Rebuild the WAV card** with `fakefish-build-card` before the next outing — the committed
+      card content predates all of this. Note program D's 5 s lead gets only ~2 pulses from the
+      1 Hz rung now (a 1 Hz fish with the model's tail); pick a faster rung if that lead needs to
+      be denser.
+- [ ] **Bench:** confirm the ISR still closes an interval inside its 20 µs budget on the part you
+      actually flash. The draw costs three `expf`, two Box–Muller pairs and eight PRNG words —
+      once per *interval*, a few times a second, not per sample tick. Comfortable on a 4.1; a 3.5
+      at 120 MHz is the one worth scoping. If it is tight, the spec sanctions two exact-in-context
+      reductions (§7): drop to `n_components = 2`, or replace the medium/slow `expf` with
+      `1 - dt/tau`. Neither is done in the firmware, because either would put the C and the Python
+      reference on different arithmetic and cost the golden parity test.
+- [ ] **Bench:** listen to / scope a few minutes of the resting train at randomness 1.0 and
+      confirm the multi-second silences look right rather than alarming. 1.5 % of intervals exceed
+      5 s and 0.6 % exceed 10 s — that is measured behaviour, not a fault, and the device is
+      *supposed* to go quiet occasionally.
+- [ ] **Field habit:** keep CH5 near 1.0. At 0 the train is an exact metronome, which degrades
+      log↔recording alignment badly (§5 relies on the train's irregularity for a sharp
+      cross-correlation peak).
+
+---
+
 ## 7. Future control surfaces (documented slots, deliberately unbuilt)
 
 Adding one is a new folder under `firmware/`, not a fork — see "Adding a new surface" in

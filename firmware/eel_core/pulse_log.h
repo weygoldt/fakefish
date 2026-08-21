@@ -46,7 +46,16 @@
 
 // Bumped only for a BREAKING change to the row schema or the header keys. The Python reader
 // (src/fakefish/pulse_log.py) refuses a version it does not know.
-#define PULSELOG_FORMAT_VERSION 1
+//
+// v2 (2026-08-21) renamed two localization columns when the resting rhythm became a fitted
+// model rather than a lognormal draw: `cv_m` -> `rand_m` and `rate_ipi` -> `tick_ipi`. Both
+// carry a genuinely different quantity, so renaming was the point. `cv_m` held a coefficient
+// of variation and `rand_m` holds the model's randomness knob (0 = metronome, 1 = the measured
+// eel, up to 1.5); `rate_ipi` held the MEAN interval the rate knob asked for, `tick_ipi` holds
+// the MEDIAN one, and those differ by about a factor of two on a heavy-tailed distribution.
+// Reusing either name would have left every v1-era analysis silently misreading a v2 file —
+// which is exactly what a format version is for.
+#define PULSELOG_FORMAT_VERSION 2
 
 // ===== Event types ====================================================================
 // One row per event. PULSE rows (LOC / MARKER / VOLLEY) are one per emitted pulse, ALWAYS —
@@ -107,13 +116,16 @@ static inline int plog_rtc_valid(uint32_t unix_s) { return unix_s >= PLOG_RTC_MI
 // breaks the CSV column structure.
 typedef struct {
   uint64_t tick;      // 64-bit sample counter at the event (20 us resolution)
-  uint32_t rate_ipi;  // mean localization IPI, whole samples (ABSENT_U32 = n/a)
+  uint32_t tick_ipi;  // nominal MEDIAN localization IPI for the set tempo, whole samples
+                      // (ABSENT_U32 = n/a). Median, not mean: the rate knob anchors the
+                      // tick tempo, and the two differ ~2x on this distribution.
   uint32_t val;       // event-specific integer, see PlogEvent (ABSENT_U32 = n/a)
   uint16_t pulse;     // index of this pulse WITHIN its item, 0-based (ABSENT_U16 = n/a)
   uint16_t trial;     // trial id, 1-based (0 = n/a)
   uint16_t amp_m;     // amplitude applied to THIS pulse x1000 (ABSENT_U16 = n/a)
   uint16_t master_m;  // master (volley) amplitude setting x1000 (ABSENT_U16 = n/a)
-  uint16_t cv_m;      // localization jitter CV x1000 (ABSENT_U16 = n/a)
+  uint16_t rand_m;    // localization RANDOMNESS knob x1000 (ABSENT_U16 = n/a). 0 = a
+                      // metronome, 1000 = the measured eel. Not a jitter amount.
   int8_t   item;      // library item index (ABSENT_ITEM = n/a -> EMPTY column)
   int8_t   pol;       // playback polarity +1 / -1 (0 = n/a)
   uint8_t  ev;        // PlogEvent
@@ -125,13 +137,13 @@ typedef struct {
 // hand-initialised record risks leaving a stale field that reads as real data.
 static inline void plog_rec_init(PlogRec* r, uint8_t ev, uint64_t tick) {
   r->tick     = tick;
-  r->rate_ipi = PLOG_ABSENT_U32;
+  r->tick_ipi = PLOG_ABSENT_U32;
   r->val      = PLOG_ABSENT_U32;
   r->pulse    = PLOG_ABSENT_U16;
   r->trial    = 0;
   r->amp_m    = PLOG_ABSENT_U16;
   r->master_m = PLOG_ABSENT_U16;
-  r->cv_m     = PLOG_ABSENT_U16;
+  r->rand_m   = PLOG_ABSENT_U16;
   r->item     = PLOG_ABSENT_ITEM;
   r->pol      = 0;
   r->ev       = ev;
@@ -267,7 +279,7 @@ static inline size_t plog_buf_finish(PlogBuf* b) {
 
 // ===== CSV rendering (pure) ===========================================================
 // The column order is the file's contract; see firmware/README.md and the Python reader.
-#define PLOG_COLUMNS "seq,tick,event,item,pulse,trial,pol,amp_m,master_m,cv_m,rate_ipi,val,req,res"
+#define PLOG_COLUMNS "seq,tick,event,item,pulse,trial,pol,amp_m,master_m,rand_m,tick_ipi,val,req,res"
 #define PLOG_ROW_MAX 128u   // longest possible row incl. '\n' and NUL, with headroom
 
 static inline const char* plog_event_name(uint8_t ev) {
@@ -304,8 +316,8 @@ static inline size_t plog_format_row(const PlogRec* r, uint32_t seq, char* out, 
   plog_put_ch(&b, ',');  if (r->pol   != 0)                  plog_put_i32(&b, r->pol);
   plog_put_ch(&b, ',');  if (r->amp_m    != PLOG_ABSENT_U16) plog_put_u64(&b, r->amp_m);
   plog_put_ch(&b, ',');  if (r->master_m != PLOG_ABSENT_U16) plog_put_u64(&b, r->master_m);
-  plog_put_ch(&b, ',');  if (r->cv_m     != PLOG_ABSENT_U16) plog_put_u64(&b, r->cv_m);
-  plog_put_ch(&b, ',');  if (r->rate_ipi != PLOG_ABSENT_U32) plog_put_u64(&b, r->rate_ipi);
+  plog_put_ch(&b, ',');  if (r->rand_m   != PLOG_ABSENT_U16) plog_put_u64(&b, r->rand_m);
+  plog_put_ch(&b, ',');  if (r->tick_ipi != PLOG_ABSENT_U32) plog_put_u64(&b, r->tick_ipi);
   plog_put_ch(&b, ',');  if (r->val      != PLOG_ABSENT_U32) plog_put_u64(&b, r->val);
   plog_put_ch(&b, ',');  if (r->req != PLOG_KIND_NONE)       plog_put_ch(&b, (char)r->req);
   plog_put_ch(&b, ',');  if (r->res != PLOG_KIND_NONE)       plog_put_ch(&b, (char)r->res);

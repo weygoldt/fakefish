@@ -58,7 +58,15 @@ app = typer.Typer(
 #: Format versions this reader understands. The firmware bumps
 #: ``PULSELOG_FORMAT_VERSION`` only for a breaking schema change, so refusing an
 #: unknown one is better than silently misreading a future file.
-SUPPORTED_FORMAT_VERSIONS = frozenset({1})
+#:
+#: **v1 is not accepted**, deliberately. v2 (2026-08-21) renamed two localization
+#: columns when the resting rhythm became a fitted model: ``cv_m`` -> ``rand_m`` and
+#: ``rate_ipi`` -> ``tick_ipi``. Both hold a different quantity, not a renamed one — a
+#: coefficient of variation became the model's randomness knob, and a MEAN interval
+#: became a MEDIAN one, which differ by about a factor of two on a heavy-tailed
+#: distribution. Reading a v1 file through v2 field names would be silently wrong in a
+#: way no assertion could catch, so v1 files need a v1 reader (``git log`` this file).
+SUPPORTED_FORMAT_VERSIONS = frozenset({2})
 
 #: The magic first line every log starts with.
 MAGIC = "#fakefish-pulse-log"
@@ -82,8 +90,8 @@ COLUMNS = (
     "pol",
     "amp_m",
     "master_m",
-    "cv_m",
-    "rate_ipi",
+    "rand_m",
+    "tick_ipi",
     "val",
     "req",
     "res",
@@ -140,8 +148,8 @@ class PulseRecord:
     pol: Optional[int]
     amp_m: Optional[int]
     master_m: Optional[int]
-    cv_m: Optional[int]
-    rate_ipi: Optional[int]
+    rand_m: Optional[int]
+    tick_ipi: Optional[int]
     val: Optional[int]
     req: Optional[str]
     res: Optional[str]
@@ -162,9 +170,22 @@ class PulseRecord:
         return _milli(self.master_m)
 
     @property
-    def cv(self) -> Optional[float]:
-        """Localization jitter (coefficient of variation) in force at this row."""
-        return _milli(self.cv_m)
+    def randomness(self) -> Optional[float]:
+        """The localization randomness knob in force at this row.
+
+        The fitted rhythm's knob, not a jitter amount: 0 is a metronome at the nominal
+        tempo, 1.0 is the measured eel and the pot stops at 1.5. It scales the state
+        score, so it changes how *much* the discharge rate varies without touching how it
+        varies over time — the lag-1 autocorrelation stays around 0.52 across the range.
+        """
+        return _milli(self.rand_m)
+
+    #: ``tick_ipi`` is the nominal **median** localization interval in samples — one over
+    #: the tick tempo the CH3 throttle sets, which is the number quoted as an eel's
+    #: discharge rate. It is **not** the average pulse rate: the interval distribution is
+    #: heavy-tailed, so at randomness 1.0 a 5 Hz tick delivers roughly 3.3 pulses per
+    #: second. Both numbers are right and they are not interchangeable. Divide the log's
+    #: ``sample_rate_hz`` by it for Hz (see :meth:`PulseLog.tick_hz`).
 
     @property
     def blinded(self) -> Optional[bool]:
@@ -247,6 +268,29 @@ class PulseLogFile:
         if not rate:
             raise PulseLogError("log header has no usable sample_rate_hz")
         return rate
+
+    def tick_hz(self, record: PulseRecord) -> Optional[float]:
+        """The localization TICK TEMPO in force at ``record``, in Hz.
+
+        One over the *median* interval — what the CH3 throttle sets, and the number
+        quoted as an eel's discharge rate. Deliberately not the average pulse rate: the
+        interval distribution is heavy-tailed, so a 5 Hz tick at randomness 1.0 delivers
+        roughly 3.3 pulses per second. To measure the realised dose instead, count
+        ``LOC`` rows over a span rather than reading this.
+        """
+        if record.tick_ipi is None or record.tick_ipi <= 0:
+            return None
+        return self.sample_rate_hz / record.tick_ipi
+
+    @property
+    def loc_rhythm_is_fitted(self) -> bool:
+        """Did this log come from the fitted resting rhythm, or the retired lognormal?
+
+        Present from format v2 on. A v2 file written by a build that still drew intervals
+        from the lognormal would say 0 — worth checking before pooling logs across a
+        firmware change, because the two produce different resting statistics.
+        """
+        return bool(self.header_int("loc_rhythm_fitted", 0))
 
     @property
     def file_index(self) -> Optional[int]:
@@ -437,8 +481,8 @@ def parse_text(text: str, path: Optional[Path] = None) -> PulseLogFile:
                 pol=_opt_int(row[6]),
                 amp_m=_opt_int(row[7]),
                 master_m=_opt_int(row[8]),
-                cv_m=_opt_int(row[9]),
-                rate_ipi=_opt_int(row[10]),
+                rand_m=_opt_int(row[9]),
+                tick_ipi=_opt_int(row[10]),
                 val=_opt_int(row[11]),
                 req=_opt_str(row[12]),
                 res=_opt_str(row[13]),

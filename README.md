@@ -45,7 +45,7 @@ into three layers, and only the top one differs per device:
 | Layer | What it owns | Where it lives |
 |-------|--------------|----------------|
 | **L1 — output HAL** | one signed `int16` sample → two DRV8871 half-bridges. Pins, PWM carrier, noise shaping, the braked-not-floating idle, boot order. | `firmware/eel_core/config.h`, `out_hal.h` |
-| **L2 — sample producers** | what the samples *are*: the overlap-add engine, the SD WAV streaming runtime, the live localization scheduler, the generated stimulus library. | `firmware/eel_core/eel_player.*`, `sd_player.h`, `locgen.h`, `eel_stimuli.*` |
+| **L2 — sample producers** | what the samples *are*: the overlap-add engine, the SD WAV streaming runtime, the live localization pulse renderer and its **fitted** resting rhythm, the generated stimulus library. | `firmware/eel_core/eel_player.*`, `sd_player.h`, `locgen.h`, `loc_rhythm.h`, `eel_stimuli.*` |
 | **L3 — control surfaces** | what the *operator* does: pin maps, debounce, RC decode, the session state machine, the LED vocabulary, the 50 kHz ISR that ties them together. | `firmware/eel_fakefish_button/`, `firmware/eel_fakefish_rc/` |
 
 **Why it is built this way.** One output stage means a hardware fix (the complementary-drive
@@ -75,7 +75,7 @@ while it is stale.
 | **Who holds it** | the operator, in the hand, at the fish | a catamaran airboat; operator on the transmitter |
 | **Trigger** | 6 program buttons (pins 5–10), one press = one complete playback, uninterruptible | 4 RC channels via a PC817 opto-isolator (pins 4–7) **OR-ed** with 3 panel buttons (pins 9–11) for the bench |
 | **Stimulus source** | **pre-rendered SD WAVs** — mono `int16` @ 50 kHz, one directory per button, built by `fakefish-build-card` | **live synthesis** on-device — `locgen` for the localization train, `eel_player` for the volley, over the mean EOD |
-| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous localization train (rate + jitter) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
+| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous resting train from the **fitted rhythm** (tempo + randomness) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
 | **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
 | **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at a quarter (`PANEL_VOLLEY_AMP` on the bench) |
 | **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost; **inverse blink = logging failed, output suppressed** |
@@ -101,8 +101,18 @@ synthesised volleys, 8 localization trains (`uv run fakefish-render info` lists 
 stimulus is that waveform replayed on those intervals; pulses that out-run the EOD length are
 summed by the overlap-add engine.
 
-- **Localization** — a slow, jittered train (≤ 20 Hz), the discharge an eel emits while
-  cruising and probing. Played at the lower level (a **quarter** of the volley).
+- **Localization** — the slow resting train (≤ 20 Hz), the discharge an eel emits while
+  cruising and probing. Played at the lower level (a **quarter** of the volley). On the RC
+  device its *rhythm* is a model **fitted to 99 010 measured resting intervals** — real eels
+  are not a renewal process, and reproducing the way their rate wanders (log-interval
+  autocorrelation 0.55 at lag 1, 0.21 at lag 20) is what separates a fish from a random
+  number generator. The model, its fitted numbers and its caveats are in
+  [`docs/LOCALIZATION_GENERATIVE_SPEC.md`](docs/LOCALIZATION_GENERATIVE_SPEC.md); like the
+  volley model it is *vendored*, not fitted here. **Both devices use it** — the RC unit live,
+  and the SD card through the library's localization items, which are drawn from it one per
+  rung of a tempo ladder. A rung is a *tick tempo* (one over the median interval), so a 3 Hz
+  rung delivers ~1.9 pulses/s: the interval distribution is heavy-tailed and one long silence
+  eats half the average while contributing one interval to the median.
 - **Volley** — the high-rate discharge burst: the strike. Played at the higher level. Each of
   the 100 is one independent draw from a generative model **fitted to the 200 strongest hunting
   volleys in the FLONA 2025 dataset** (43 recordings, 16 sites) — start rate, duration and decay
@@ -149,7 +159,8 @@ firmware/
     eel_player.{h,cpp}         L2  overlap-add engine (marker + volley)
     eel_stimuli.{h,cpp}        L2  GENERATED stimulus library (byte-frozen contract)
     sd_player.h                L2  SD WAV streaming (header parse, ring buffer, random pick)
-    locgen.h                   L2  live localization scheduler
+    locgen.h                   L2  renders one localization pulse
+    loc_rhythm.h               L2  the fitted resting rhythm (when the next one is)
     host_test/                 shared host self-tests (eel_player, sd_player)
 
   eel_fakefish_button/         L3  SURFACE — 6-button hand-held SD WAV player
@@ -250,7 +261,8 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   means no SD card** (reseat it — it re-mounts automatically).
 - **RC:** CH3 throttle = localization on/off + rate (up to 20 Hz); CH4 right stick = throw high
   → run one **blinded trial**, which the firmware resolves to a volley or a sham (throwing low
-  does nothing at all; one-shot, re-arms at centre); CH5 pot = jitter; CH6 pot =
+  does nothing at all; one-shot, re-arms at centre); CH5 pot = **randomness** (0 = metronome,
+  1.0 = the measured eel); CH6 pot =
   amplitude. Losing the link turns localization off and can never start a trial. On the bench
   with no transmitter, the three panel buttons drive the same state machine: pin 9 toggles
   localization, pin 10 fires a volley, pin 11 fires a sham. **Put a (blank) microSD card in
@@ -265,7 +277,7 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   the migration.
 - **Reassign a button:** move WAVs between the card's directories.
 - **Change a stimulus or the song:** re-run `fakefish-build-card`.
-- **RC amplitude / rate / jitter:** the transmitter pots, live.
+- **RC amplitude / tempo / randomness:** the transmitter pots, live.
 
 ### 6 · Regenerate the library (needs the source recordings, NOT shipped)
 

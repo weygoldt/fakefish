@@ -11,13 +11,21 @@
 //
 //   CH3  throttle stick (ratcheted)    -> localization ON/OFF (dead-band) + RATE (0..20 Hz)
 //   CH4  right stick axis (self-centre)-> one-shot TRIGGER: throw high = VOLLEY, low = SHAM
-//   CH5  pot                           -> localization JITTER (0 = even .. max)
+//   CH5  pot                           -> localization RANDOMNESS (0 = metronome .. ~1.5)
 //   CH6  pot                           -> AMPLITUDE (sets the volley/max; localization = volley/2)
 //
-// All PURE logic (width->unit, low-pass, quantise+hysteresis, throttle map, bidirectional
-// trigger edge-detect, lognormal IPI draw, amplitude/jitter maps) sits ABOVE the `#ifdef ARDUINO`
-// line and host-tests off-device (host_test/rc_control_selftest.cpp). Only the pin-change ISR
+// All PURE logic (width->unit, low-pass, quantise+hysteresis, throttle map, trigger
+// edge-detect, the rate/randomness/amplitude knob maps) sits ABOVE the `#ifdef ARDUINO` line
+// and host-tests off-device (host_test/rc_control_selftest.cpp). Only the pin-change ISR
 // capture is Arduino-specific.
+//
+// THE INTERVAL DRAW NO LONGER LIVES HERE. Until 2026-08-21 this file owned the localization
+// IPI: a unit-mean lognormal around the set rate, parameterised by a jitter CV
+// (`rc_ipi_samples` + `rc_std_normal`, both now gone). That is a RENEWAL process — every
+// interval drawn independently — and real eels are not: their log-intervals correlate 0.55
+// at lag 1 and 0.21 at lag 20. The rhythm now comes from a model fitted to 99 010 measured
+// resting intervals, in src/eel_core/loc_rhythm.h (L2). What is left here is the L3 job:
+// turning two RC channels into that model's two knobs.
 //
 // WHAT LIVES WHERE. This file owns the RC-specific constants (pins, calibration, channel
 // thresholds, conditioning, failsafe) — they used to sit in fakefish-rc's monolithic config.h,
@@ -31,7 +39,8 @@
 #include <math.h>
 #include "src/eel_core/config.h"       // SAMPLE_RATE_HZ (L1 output stage / sample clock)
 #include "src/eel_core/stim_levels.h"  // LOC_RATE_*, MASTER_AMP_*, VOLLEY_AMP_RATIO (generated)
-#include "src/eel_core/locgen.h"       // LocGen + locgen_* (the localization scheduler)
+#include "src/eel_core/locgen.h"       // LocGen + locgen_* (renders the localization pulse)
+#include "src/eel_core/loc_rhythm.h"   // the FITTED resting rhythm — decides WHEN it happens
 
 // ===== RC input pins (interrupt-capable; avoid 2,3 = DRV IN1, 13 LED, 14 A0) ======
 // Pins 4-7 (not the original 5-8): pin 8 was a DEAD GPIO on the build Teensy 4.1 — a bench test
@@ -39,12 +48,12 @@
 // channel shifted down one pin. Plain knobs; restore 5-8 on a board with a working pin 8.
 #define RC_PIN_THROTTLE  4                 // CH3
 #define RC_PIN_TRIGGER   5                 // CH4
-#define RC_PIN_JITTER    6                 // CH5
+#define RC_PIN_RANDOM    6                 // CH5
 #define RC_PIN_AMP       7                 // CH6
 #define RC_N_CHANNELS    4
 #define RC_IDX_THROTTLE  0                 // array indices (order matches RC_PINS[] below)
 #define RC_IDX_TRIGGER   1
-#define RC_IDX_JITTER    2
+#define RC_IDX_RANDOM    2
 #define RC_IDX_AMP       3
 
 // ===== PC817 optocoupler decode (HY-M154 4-channel "817 Module") ===========
@@ -69,8 +78,8 @@
 #define RC_CAL_THROTTLE_MAX 1700
 #define RC_CAL_TRIGGER_MIN  705
 #define RC_CAL_TRIGGER_MAX  1700
-#define RC_CAL_JITTER_MIN   680
-#define RC_CAL_JITTER_MAX   1675
+#define RC_CAL_RANDOM_MIN   680
+#define RC_CAL_RANDOM_MAX   1675
 #define RC_CAL_AMP_MIN      730
 #define RC_CAL_AMP_MAX      1725
 
@@ -86,6 +95,11 @@
                                            // noise burst still leaks a pulse; lower for a snappier throttle-on.
 #define RC_RATE_STEPS     20               // quantise rate (avoid Hz wander) ~1 Hz/step
                                            // (LOC_RATE_MIN_HZ / LOC_RATE_MAX_HZ come from stim_levels.h)
+// NOTE the ladder is now a TICK TEMPO — one over the median interval, the number quoted as an
+// eel's discharge rate — not an average pulse rate. A 5 Hz setting means the fish ticks at
+// 5 Hz and delivers ~3.3 pulses/s, where the retired lognormal's 5 Hz meant 5 pulses/s. The
+// device anchors the median because a heavy-tailed interval distribution cannot hold both,
+// and the median is the one that keeps this Hz scale meaningful (spec section 5.3).
 
 // ===== CH4 trigger: ONE-DIRECTIONAL one-shot (throw high = fire a BLINDED trial) =====
 // Unit thresholds (1000us=0.0, 1500us=0.5, 2000us=1.0). Throw HIGH fires one trial; the axis
@@ -100,11 +114,29 @@
 #define CH4_CENTER_LO     0.40f            // re-arm zone (~1400 us)
 #define CH4_CENTER_HI     0.60f            // re-arm zone (~1600 us)
 
-// ===== CH5 pot: localization jitter ========================================
-#define LOC_CV_MAX        0.8f             // max jitter (coefficient of variation); min pot = perfectly even
-#define RC_JITTER_STEPS   16               // quantise the jitter pot
-#define RC_IPI_MAX_FACTOR 4.0f             // bound the lognormal right tail (no absurd gap)
-                                           // (the minimum IPI, LOC_REFRACTORY_SAMP, comes from stim_levels.h)
+// ===== CH5 pot: localization RANDOMNESS ====================================
+// The fitted model's randomness knob, NOT the retired jitter CV. It scales the state score:
+// 0 is a metronome at exactly the nominal tempo, 1.0 IS the measured eel, and the shipped
+// tables run to 2.0. The pot stops at 1.5 because CV2 saturates above that as the score
+// starts clamping against the ends of the interval table — 1.5 already reaches roughly the
+// 70th percentile of how irregular real single-fish slices are (they span 0.55-1.5).
+//
+// It does NOT blend toward a Poisson process: the lag-1 autocorrelation stays around 0.52
+// across the whole range. It dials how MUCH the rate varies, leaving how it varies over time
+// alone — an eel that is more or less variable, not an eel that is more or less random. That
+// is why every setting still sounds like a fish.
+//
+// There is deliberately NO upper clamp on the interval any more. The retired
+// RC_IPI_MAX_FACTOR bounded the lognormal's right tail at 4x the mean to avoid an "absurd
+// gap"; the gaps are not absurd, they are measured. 1.5 % of real resting intervals exceed
+// 5 s and 0.6 % exceed 10 s, and the pulses bracketing a real 30 s silence are exactly as
+// loud as the rest of the recording — the fish did not swim away, it stopped. The interval
+// table's own top knot (32 s) is the only bound, and it is the 99.98th percentile of the
+// measurement rather than a number someone picked.
+#define LOC_RANDOMNESS_MAX 1.5f            // top of the CH5 pot (the model's tables run to 2.0)
+#define RC_RANDOM_STEPS   16               // quantise the randomness pot
+                                           // (the minimum IPI, LOC_REFRACTORY_SAMP, comes from
+                                           //  stim_levels.h, and is now only a safety floor)
 
 // ===== CH6 pot: amplitude (sets the VOLLEY / max; localization is derived) ==
 // The amplitude control (CH6 pot, or PANEL_VOLLEY_AMP on the bench) sets the VOLLEY amplitude — the
@@ -171,7 +203,7 @@ typedef struct { uint16_t us_min, us_max; } RcCal;
 static const RcCal RC_CAL[RC_N_CHANNELS] = {
   /* throttle */ { RC_CAL_THROTTLE_MIN, RC_CAL_THROTTLE_MAX },
   /* trigger  */ { RC_CAL_TRIGGER_MIN,  RC_CAL_TRIGGER_MAX  },
-  /* jitter   */ { RC_CAL_JITTER_MIN,   RC_CAL_JITTER_MAX   },
+  /* random   */ { RC_CAL_RANDOM_MIN,   RC_CAL_RANDOM_MAX   },
   /* amp      */ { RC_CAL_AMP_MIN,      RC_CAL_AMP_MAX      },
 };
 
@@ -226,11 +258,14 @@ static inline bool rc_throttle_gate(float raw_unit, bool prev_on, uint32_t* coun
   else *count = 0;                                              // in [off,on) while off -> don't build
   return *count >= debounce_ticks;                              // ON only after a sustained rise
 }
-// Mean IPI (samples) for a quantised rate level.
-static inline float rc_rate_to_ipi_samp(int rate_level, int rate_steps) {
+// Tick tempo (Hz) for a quantised rate level: a plain linear ladder over the CH3 travel.
+static inline float rc_rate_to_hz(int rate_level, int rate_steps) {
   float frac = (rate_steps > 1) ? (float)rate_level / (float)(rate_steps - 1) : 0.0f;
-  float hz = LOC_RATE_MIN_HZ + frac * (LOC_RATE_MAX_HZ - LOC_RATE_MIN_HZ);
-  return (float)SAMPLE_RATE_HZ / hz;
+  return LOC_RATE_MIN_HZ + frac * (LOC_RATE_MAX_HZ - LOC_RATE_MIN_HZ);
+}
+// ...as the model's rate knob, which is a TEMPO MULTIPLIER (1.0 == the measured eel).
+static inline float rc_rate_to_tempo(int rate_level, int rate_steps) {
+  return loc_rhythm_rate_for_hz(rc_rate_to_hz(rate_level, rate_steps));
 }
 
 // ===== CH4 trigger: one-directional one-shot edge-detect ===================
@@ -263,10 +298,10 @@ static inline int rc_trigger_step(RcTrigger* t, float unit,
   return fire;
 }
 
-// ===== CH5 jitter pot / CH6 amplitude pot ==================================
-static inline float rc_jitter_cv(int level, int steps) {
+// ===== CH5 randomness pot / CH6 amplitude pot ==============================
+static inline float rc_randomness(int level, int steps) {
   float f = (steps > 1) ? (float)level / (float)(steps - 1) : 0.0f;
-  return f * LOC_CV_MAX;
+  return f * LOC_RANDOMNESS_MAX;
 }
 // The amplitude control maps to the VOLLEY (max) amplitude 0..1 — the loud discharge, the "max".
 static inline float rc_master_amp(int level, int steps) {
@@ -279,28 +314,6 @@ static inline float rc_loc_amp(float volley) {
   return volley / VOLLEY_AMP_RATIO;
 }
 
-// ===== Lognormal IPI draw ==================================================
-// Standard normal from two uniforms in (0,1] (Box-Muller). Device feeds random()-derived u.
-static inline float rc_std_normal(float u1, float u2) {
-  if (u1 < 1e-7f) u1 = 1e-7f;
-  return sqrtf(-2.0f * logf(u1)) * cosf(6.2831853f * u2);
-}
-// One inter-pulse interval (samples) from a UNIT-MEAN lognormal around mean_ipi_samp,
-// parameterised by CV. cv==0 -> factor exactly 1 (perfectly periodic). Right-skewed like real
-// eel IPI. Clamped to [refractory, mean*RC_IPI_MAX_FACTOR].
-static inline uint32_t rc_ipi_samples(float mean_ipi_samp, float cv, float z, uint32_t refractory_samp) {
-  float factor = 1.0f;
-  if (cv > 0.0f) {
-    float sigma = sqrtf(logf(1.0f + cv * cv));
-    factor = expf(sigma * z - 0.5f * sigma * sigma);   // E[factor] == 1 -> mean IPI preserved
-  }
-  long ipi = (long)(mean_ipi_samp * factor + 0.5f);
-  long hi  = (long)(mean_ipi_samp * RC_IPI_MAX_FACTOR + 0.5f);
-  if (ipi > hi) ipi = hi;
-  if (ipi < (long)refractory_samp) ipi = (long)refractory_samp;
-  return (uint32_t)ipi;
-}
-
 // ===== Arduino glue: 4-channel pulse-width capture on pin-change interrupts =====
 // pulseIn() is FORBIDDEN (it blocks up to a full 20 ms frame). Each channel records micros() on
 // every edge and computes the ACTIVE-level width; the sample clock is given higher priority so
@@ -308,7 +321,7 @@ static inline uint32_t rc_ipi_samples(float mean_ipi_samp, float cv, float z, ui
 #ifdef ARDUINO
 #include <Arduino.h>
 
-static const uint8_t RC_PINS[RC_N_CHANNELS] = { RC_PIN_THROTTLE, RC_PIN_TRIGGER, RC_PIN_JITTER, RC_PIN_AMP };
+static const uint8_t RC_PINS[RC_N_CHANNELS] = { RC_PIN_THROTTLE, RC_PIN_TRIGGER, RC_PIN_RANDOM, RC_PIN_AMP };
 static volatile uint32_t rc_edge_us[RC_N_CHANNELS];   // leading edge of the active level
 static volatile uint32_t rc_width[RC_N_CHANNELS];     // last measured width (us)
 static volatile uint32_t rc_seen_us[RC_N_CHANNELS];   // micros() of the last edge (absence detect)

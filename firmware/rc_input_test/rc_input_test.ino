@@ -12,7 +12,7 @@
 // width is the LOW duration -> this sketch measures the LOW time. If widths jitter, add an
 // external 1-2 kOhm pull-up per Vx to 3.3 V (try INPUT_PULLUP alone first).
 //
-//   Teensy pin 4 = CH3 (throttle / rate)     pin 6 = CH5 (jitter pot)
+//   Teensy pin 4 = CH3 (throttle / rate)     pin 6 = CH5 (randomness pot)
 //   Teensy pin 5 = CH4 (trigger)             pin 7 = CH6 (amplitude pot)
 // (Same pin numbers as RC_PIN_* in firmware/eel_fakefish_rc/rc_control.h — keep them in sync.
 //  Pins are 4-7, not 5-8: pin 8 was dead on the build Teensy, so every channel shifted down one.)
