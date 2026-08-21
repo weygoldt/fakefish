@@ -230,11 +230,6 @@ it is a knob, and this is that knob.
       (its §1.3), and its §2.3 between-volley rate is an explicit upper bound. So
       `LOC_SYNTH_RATES_HZ = [1, 2, 3, 5, 7, 10]` is still a *designed* ladder. The seam is marked
       in `synthetic_volleys.py`; a fitted model drops in the same way the volley one did.
-- [ ] **Program D on the SD card is now 840 WAVs (~544 MB).** It renders every
-      localization × volley pair, which is quadratic in the volley pool: 26 volleys gave 208
-      WAVs, 105 give 840. `build_sd_card` warns above 400 pairs and `--d-pairings N` bounds it.
-      Not urgent — the hand-held device's 36 V hardware does not exist yet (§1) — but decide
-      whether all-pairs is still the right default at this pool size.
 - [ ] **The 2.00 ms IPI floor leaves a delta spike: 9.5 % of shipped intervals sit exactly on
       it**, where real volleys have a smooth tail down to ~2.1 ms. It is the right clamp —
       unclamped, 3 % of volleys overlap-clip, and the spec's §5 says the sub-2 ms intervals in
@@ -250,10 +245,22 @@ it is a knob, and this is that knob.
       animal swimming away than its organ winding down. Kept because truncating a fitted tail
       by eye is how a model stops being one, but the RC device draws uniformly, so ~1 % of
       trials would deliver a volley that fades to near-silence. Worth a decision.
-- [ ] **`data/real_volley_population.npz` is now QC-only.** It is a *different* selection from
-      the model's (this repo's single-fish criteria, on fragments), which is what makes it a
-      useful independent cross-check in `compare` — it catches a wiring mistake, not a modelling
-      one. `fakefish-synth-volleys analyze` refreshes it and needs the recordings.
+- [x] **`data/real_volley_population.npz` is now QC-only, and was regenerated 2026-08-21.** It
+      is a *different* selection from the model's (this repo's single-fish criteria, on
+      fragments), which is what makes it a useful independent cross-check in `compare` — it
+      catches a wiring mistake, not a modelling one. Regenerating it inside this repo for the
+      first time shrank it **41 → 29**: the imported file predated this repo's filters and
+      carried 9 events peaking above `VOLLEY_MULTIFISH_PEAK_HZ` (two fish volleying together,
+      rates adding) plus one below the 100 Hz floor. The 29 are a strict subset with the same
+      distribution, so nothing downstream moved — the grey reference curve in `compare` is
+      simply no longer contaminated. `fakefish-synth-volleys analyze` refreshes it (needs the
+      recordings + `--group export`).
+
+**Settled, not open:** program D's size. It renders every localization × volley pair, the only
+quadratic part of the card, so the bigger volley pool took it from 208 WAVs to **840 (~544 MB)**.
+The owner's cards are ≥ 64 GB, where that is under 1 % — so all-pairs stays the default and
+nothing is capped. `build_sd_card` now just *reports* the count and size (it is the slow part of
+a build); `--d-pairings N` remains for a smaller card.
 
 **Kept from the old calibration, because it was the right lesson:** measure a peak as a
 *sustained* rate (`sustained_peak_hz`), never as `1/min(IPI)` — an extreme-value statistic whose

@@ -933,13 +933,22 @@ def analyze(
 
     **This no longer fits anything.** The generative model is fitted upstream in
     eeltracker and vendored in (see the module docstring); all this does is refresh
-    ``data/real_volley_population.npz``, the 41 single-fish volleys that ``compare``
+    ``data/real_volley_population.npz``, the single-fish volleys that ``compare``
     plots the synthetic population against.
 
     That population is a *different selection* from the model's — extracted by this
-    repo's own single-fish criteria, and consisting of tracker fragments rather than
-    whole volleys — which is exactly what makes it useful here: it catches a wiring
-    mistake between the model and the item table, not a modelling mistake.
+    repo's own single-fish criteria (:func:`_good_volleys`), and consisting of tracker
+    fragments rather than whole volleys — which is exactly what makes it useful here: it
+    catches a wiring mistake between the model and the item table, not a modelling mistake.
+
+    It shrank 41 -> 29 on 2026-08-21, the first time it was regenerated inside this repo.
+    The 41-volley file came in with the initial eeltracker import and predates this repo's
+    filters: 9 of the 12 events it lost peak ABOVE ``VOLLEY_MULTIFISH_PEAK_HZ`` (450 Hz),
+    i.e. they are two fish volleying together with their rates adding — the exact artifact
+    that filter exists to remove — and one sat below the 100 Hz volley floor. The surviving
+    29 are a strict subset with the same distribution (duration median 0.20 -> 0.22 s,
+    sustained peak 348 -> 345 Hz), so nothing downstream moved; the old file was simply
+    carrying contamination into the grey reference curve.
 
     Needs the source recordings and the `export` dependency group.
     """
