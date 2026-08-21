@@ -37,7 +37,9 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   per-onset spike — **do not reorder that summation**, it is bit-exact only oldest-first and
   the host self-test cannot see the difference, see the note in `eel_player.cpp`),
   `eel_stimuli.{h,cpp}` (the generated library),
-  `sd_player.h` (SD WAV streaming runtime), `locgen.h` (live localization scheduler),
+  `sd_player.h` (SD WAV streaming runtime), `locgen.h` (renders ONE localization pulse) +
+  `loc_rhythm.h` (decides WHEN the next one is — the **fitted** resting rhythm, invariant 11;
+  its tables are generated into `loc_model_params.h`),
   `pulse_log.h` (per-pulse SD event log — the **mirror image** of `sd_player.h`: there the ISR
   pops samples `loop()` read from the card, here the ISR pushes records `loop()` writes to it;
   same lock-free SPSC ring, same pure/`#ifdef ARDUINO` split). Device-agnostic: they produce
@@ -49,11 +51,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     localization, C volley, D loc→volley, E spare, F song) + `eel_fakefish_button.ino`.
     Uses L2 `sd_player` only; `MASTER_GAIN` in the `.ino` is the single output trim.
   - **`firmware/eel_fakefish_rc/`** — 4-channel **RC + 3-button panel**, **live synthesis**.
-    `rc_control.h` (PC817-isolated decode; CH3 throttle→loc on/off + rate on pin 4, CH4
-    trigger→volley/sham on pin 5, CH5 jitter on pin 6, CH6 amplitude on pin 7 — pins are 4–7
-    not 5–8 because pin 8 was dead on the build board), `panel_control.h` (pins 9–11 +
-    the LED-feedback vocabulary) + `eel_fakefish_rc.ino`. Uses L2 `eel_player` + `locgen` +
-    `eel_stimuli` + `pulse_log`. No `MASTER_GAIN` — amplitude is live (CH6, or
+    `rc_control.h` (PC817-isolated decode; CH3 throttle→loc on/off + **tick tempo** on pin 4,
+    CH4 trigger→volley/sham on pin 5, CH5 **randomness** on pin 6, CH6 amplitude on pin 7 —
+    pins are 4–7 not 5–8 because pin 8 was dead on the build board), `panel_control.h`
+    (pins 9–11 + the LED-feedback vocabulary) + `eel_fakefish_rc.ino`. Uses L2 `eel_player` +
+    `locgen` + `loc_rhythm` + `eel_stimuli` + `pulse_log`. No `MASTER_GAIN` — amplitude is live (CH6, or
     `PANEL_VOLLEY_AMP` on the bench). **It needs an SD card** — not for playback (it
     live-synthesises everything, no WAV card) but for the per-pulse log, and it refuses to
     stimulate without one (invariant 9).
@@ -75,7 +77,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    result. `tests/test_firmware_sync.py` compares bytes and fails on any drift; `check.sh` runs
    the script and fails on any resulting `git diff`.
 2. **Shared constants are GENERATED — edit the JSON, never the outputs.**
-   `shared/stim_constants.json` is the single source; `uv run fakefish-gen-constants`
+   `fakefish-gen-constants` renders **three** files from **two** JSON sources. The second is the
+   vendored localization model: `data/loc_model_params.json` → `firmware/eel_core/loc_model_params.h`
+   (invariant 11). Python needs no generated copy of that one — `fakefish.loc_model` reads the
+   JSON directly, which is exactly what makes the C the only transcription and therefore the only
+   thing that can drift. For the first source, `shared/stim_constants.json` is the single source; `uv run fakefish-gen-constants`
    (`src/fakefish/gen_constants.py`) renders it into **both**
    `firmware/eel_core/stim_levels.h` (C `#define`s for the sketches) and
    `src/fakefish/_constants.py` (module constants for the toolchain). **Never hand-edit either
@@ -204,6 +210,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      recorded volley, so a `0` default would misattribute every localization and marker pulse;
      and `-1` is no safer as a *written* value, because `STIM_ITEMS[-1]` does not raise in
      Python, it quietly returns the last item. `-1` is the in-memory sentinel only.
+   - **The format is at v2, and v1 is refused rather than coerced.** v2 (2026-08-21) renamed
+     two localization columns when the resting rhythm became a fitted model: `cv_m` → `rand_m`
+     and `rate_ipi` → `tick_ipi`. Both hold a genuinely *different* quantity — a coefficient of
+     variation became the model's randomness knob, and a MEAN interval became a MEDIAN one, which
+     differ ~2× on a heavy-tailed distribution — so renaming was the point, and
+     `SUPPORTED_FORMAT_VERSIONS` in `src/fakefish/pulse_log.py` deliberately does **not** include
+     1. Reading a v1 file through v2 names would be silently wrong in a way no assertion catches.
    - **`tests/data/pulse_log_golden.csv` is generated, not authored.** `pulse_log_selftest
      --emit` produces it through the real firmware formatters and `tests/test_pulse_log.py`
      parses it with the real Python reader; `check.sh` diffs it. Changing the format means
@@ -248,7 +261,66 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
 
     Localization is **not** covered by this model (its §1.3: one call is one volley), and its
     §2.3 between-volley rate is explicitly an upper bound. `LOC_SYNTH_RATES_HZ` is therefore a
-    designed ladder, marked in the source as the seam where a fitted localization model lands.
+    designed ladder — and see invariant 11 for the fitted model that has since landed beside it.
+
+11. **The resting localization rhythm is VENDORED too — and its C is GENERATED, because the
+    spec's own C listing is wrong.** Between trials the RC device ticks along like a resting eel.
+    Until 2026-08-21 that was a unit-mean lognormal draw parameterised by a jitter CV
+    (`rc_ipi_samples`/`rc_std_normal`, both now deleted). That is a **renewal process** — every
+    interval drawn independently, so consecutive log-intervals are uncorrelated at every lag —
+    and real eels are not: theirs correlate 0.55 at lag 1 and still 0.21 at lag 20. Three files
+    are **byte-identical copies** from `eeltracker/analyses/localization_rhythm/`, where the model
+    was fitted to 99 010 resting intervals and where `loc_validate.py` is its regression test:
+
+    - `src/fakefish/loc_model.py`   ← `scripts/loc_model.py`
+    - `data/loc_model_params.json`  ← `model/loc_model_params.json`
+    - `docs/LOCALIZATION_GENERATIVE_SPEC.md` ← the spec
+
+    **Never edit any of the three** — a copy has no merge base, so an in-place edit is silently
+    reverted by the next drop. Change it upstream, re-drop all three, update `VENDORED_SHA256` in
+    `tests/test_loc_model.py`, re-run `fakefish-gen-constants`, and regenerate the golden
+    (`uv run python tests/test_loc_model.py --emit`) in the same commit. Same discipline as
+    invariant 10.
+
+    **DO NOT hand-type the spec's §7 C listing.** It ships ready-to-paste C that disagrees with
+    the fitted parameters beside it — `TAU[0]` 3.200 against a shipped `tau_fast_s` of 2.5,
+    `HAZ_B0` −4.872 against −4.8118, and both mixture widths off in the third decimal. The JSON is
+    the self-consistent one (its interval table was calibrated *at* τ = 2.5, and the reference
+    sampler run with it reproduces the spec's own §6 validation column). `loc_model_params.h` is
+    therefore generated from the JSON, and `gen_constants.validate_loc_model` rejects a re-drop
+    that breaks what the C assumes: variances summing to 1, both lookup grids uniform (the C
+    indexes them by arithmetic, not by search), a monotone interval table, and gain 1.0 at
+    randomness 1.0.
+
+    Four things in the model are **measurements, not modelling choices**: the state relaxes in
+    wall-clock time rather than pulse count (699 nats); two timescales, not one (619 nats); the
+    noise is a peaked two-scale mixture, not Gaussian (median CV2 0.38 against 0.60); and **long
+    silences are real** — 1.5 % of intervals exceed 5 s, and the retired `RC_IPI_MAX_FACTOR`
+    clamp is gone on purpose. Do not clamp the tail back.
+
+    Three wiring decisions are this repo's, not the model's:
+
+    - **CH3 anchors the MEDIAN** (the tick tempo), not the mean. A heavy-tailed distribution
+      cannot hold both, and the median is what keeps a throttle labelled in Hz honest. The
+      meaning of the number changed while the number did not: 5 Hz used to mean 5 pulses/s on
+      average, and now means the fish *ticks* at 5 Hz (~3.3 pulses/s at randomness 1.0).
+      `knobs.gain_mean_anchor` in the JSON is the table that would restore the old meaning.
+    - **`interrupt()` is NOT ported.** The model's burst hazard (~1 in 49 resting pulses) would
+      put unmarked volleys in the water and could interrupt a sham, destroying the no-stimulus
+      control of a blinded design. The generated header carries no hazard constants at all and
+      `tests/test_loc_model.py` asserts that.
+    - **The rhythm has its OWN PRNG**, not Arduino's `random()`. Sharing would make the blinded
+      volley/sham sequence depend on how many localization pulses preceded a throw.
+
+    Verified by **two golden gates facing opposite ways**: `tests/data/loc_rhythm_golden.csv` is
+    generated by the vendored Python with its noise draws *injected*, `tests/test_loc_model.py`
+    fails if the golden drifts from the Python, and `loc_rhythm_selftest` fails if the C drifts
+    from the golden. Neither side can move alone.
+
+    **The SD/button device still uses the old ladder.** Its localization WAVs render from the
+    library items generated by `LOC_SYNTH_RATES_HZ` (invariant 10), and replacing those is a
+    library **re-export** needing the source recordings. The two devices therefore tick
+    differently on purpose until that re-export happens; see `TODO.md`.
 
 ## Toolchain conventions
 
@@ -298,7 +370,8 @@ fail; each must print `ok`:
    `tests/test_firmware_sync.py` compares bytes in Python and was enforcing invariant 1
    throughout.)
 2. **host self-tests** (pure logic, PC `g++ -std=c++17 -Wall -Wextra`) —
-   `sd_player_selftest`, `pulse_log_selftest`, `rc_control_selftest`, `panel_control_selftest`,
+   `sd_player_selftest`, `loc_rhythm_selftest`, `pulse_log_selftest`, `rc_control_selftest`,
+   `panel_control_selftest`,
    `button_control_selftest` must each print exactly `OK`. `eel_player_selftest` is **both**:
    `--verify` plays the whole library (both polarities, four amplitudes, and the windowed +
    looping paths) against a frozen ORACLE — the ring-buffer overlap-add engine `eel_player`

@@ -15,9 +15,9 @@
 // The pure logic (millis() debounce + press edge-detect) sits ABOVE the `#ifdef ARDUINO` line so
 // it host-tests on a PC (host_test/panel_control_selftest.cpp).
 //
-// The bench defaults for rate / jitter / amplitude (PANEL_RATE_HZ, PANEL_CV, PANEL_VOLLEY_AMP)
-// are NOT here — they are playback constants, generated into src/eel_core/stim_levels.h from
-// shared/stim_constants.json.
+// The bench defaults for tempo / randomness / amplitude (PANEL_RATE_HZ, PANEL_RANDOMNESS,
+// PANEL_VOLLEY_AMP) are NOT here — they are playback constants, generated into
+// src/eel_core/stim_levels.h from shared/stim_constants.json.
 #pragma once
 #include <stdint.h>
 #include "src/eel_core/config.h"   // LED_PIN (L1: every device has an indicator LED)

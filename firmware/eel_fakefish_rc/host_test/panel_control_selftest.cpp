@@ -44,7 +44,7 @@ static void test_panel_pins() {
   // src/eel_core/config.h or rc_control.h fails HERE instead of on the water.
   const int pins[3] = { PANEL_LOC_PIN, PANEL_VOLLEY_PIN, PANEL_SHAM_PIN };
   const int drv[4]  = { DRV_A_IN1_PIN, DRV_A_IN2_PIN, DRV_B_IN1_PIN, DRV_B_IN2_PIN };
-  const int rc[4]   = { RC_PIN_THROTTLE, RC_PIN_TRIGGER, RC_PIN_JITTER, RC_PIN_AMP };
+  const int rc[4]   = { RC_PIN_THROTTLE, RC_PIN_TRIGGER, RC_PIN_RANDOM, RC_PIN_AMP };
   for (int i = 0; i < 3; i++) {
     for (int k = 0; k < 4; k++) {
       CHECK(pins[i] != drv[k], "panel avoids the DRV8871 output pins");

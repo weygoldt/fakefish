@@ -267,9 +267,9 @@ static void test_format_pulse_rows() {
   loc.pol = -1;
   loc.amp_m = 450;
   loc.master_m = 900;
-  loc.cv_m = 200;
-  loc.rate_ipi = 10000;
-  CHECK(row_of(loc, 42) == "42,123456789,LOC,,,,-1,450,900,200,10000,,,\n", "LOC row");
+  loc.rand_m = 1000;
+  loc.tick_ipi = 10000;
+  CHECK(row_of(loc, 42) == "42,123456789,LOC,,,,-1,450,900,1000,10000,,,\n", "LOC row");
 
   // A volley pulse: item AND pulse index present.
   PlogRec vol;
@@ -280,9 +280,9 @@ static void test_format_pulse_rows() {
   vol.pol = 1;
   vol.amp_m = 900;
   vol.master_m = 900;
-  vol.cv_m = 200;
-  vol.rate_ipi = 10000;
-  CHECK(row_of(vol, 7) == "7,500,VOLLEY,13,27,4,1,900,900,200,10000,,,\n", "VOLLEY row");
+  vol.rand_m = 1000;
+  vol.tick_ipi = 10000;
+  CHECK(row_of(vol, 7) == "7,500,VOLLEY,13,27,4,1,900,900,1000,10000,,,\n", "VOLLEY row");
 
   // A marker pulse: pulse index present, NO item (it is built at runtime, not in the library).
   PlogRec mk_;
@@ -292,9 +292,9 @@ static void test_format_pulse_rows() {
   mk_.pol = 1;
   mk_.amp_m = 500;
   mk_.master_m = 900;
-  mk_.cv_m = 200;
-  mk_.rate_ipi = 10000;
-  CHECK(row_of(mk_, 6) == "6,300,MARKER,,1,4,1,500,900,200,10000,,,\n", "MARKER row");
+  mk_.rand_m = 1000;
+  mk_.tick_ipi = 10000;
+  CHECK(row_of(mk_, 6) == "6,300,MARKER,,1,4,1,500,900,1000,10000,,,\n", "MARKER row");
 
   // Item 0 is a REAL volley and must render as "0", not as an empty column — the empty
   // column means "no item", and conflating the two would be the same class of bug as the
@@ -340,15 +340,15 @@ static void test_format_event_rows() {
   t.trial = 1;
   t.pol = 1;
   t.master_m = 900;
-  t.cv_m = 200;
-  t.rate_ipi = 10000;
+  t.rand_m = 1000;
+  t.tick_ipi = 10000;
   t.req = PLOG_KIND_RANDOM;
   t.res = PLOG_KIND_VOLLEY;
-  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,200,10000,,R,V\n", "blinded TRIAL row");
+  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,R,V\n", "blinded TRIAL row");
 
   // A bench trial forced from the panel: requested VOLLEY, resolved VOLLEY.
   t.req = PLOG_KIND_VOLLEY;
-  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,200,10000,,V,V\n", "bench TRIAL row");
+  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,V,V\n", "bench TRIAL row");
 
   PlogRec link;
   plog_rec_init(&link, PLOG_LINK, 77);
@@ -359,9 +359,9 @@ static void test_format_event_rows() {
   plog_rec_init(&anc, PLOG_ANCHOR, 500000);
   anc.val = 1755720000u;
   anc.master_m = 900;
-  anc.cv_m = 200;
-  anc.rate_ipi = 10000;
-  CHECK(row_of(anc, 2) == "2,500000,ANCHOR,,,,,,900,200,10000,1755720000,,\n", "ANCHOR row");
+  anc.rand_m = 1000;
+  anc.tick_ipi = 10000;
+  CHECK(row_of(anc, 2) == "2,500000,ANCHOR,,,,,,900,1000,10000,1755720000,,\n", "ANCHOR row");
 
   // The 64-bit tick must render in full, not truncated to 32 bits.
   PlogRec big;
@@ -396,8 +396,8 @@ static void test_truncation_detected() {
   r.pol = -1;
   r.amp_m = 65534;
   r.master_m = 65534;
-  r.cv_m = 65534;
-  r.rate_ipi = 4294967294u;
+  r.rand_m = 65534;
+  r.tick_ipi = 4294967294u;
   r.val = 4294967294u;
   r.req = PLOG_KIND_RANDOM;
   r.res = PLOG_KIND_SHAM;
@@ -440,7 +440,7 @@ static void test_kv_and_header() {
   std::string out;
   plog_emit_header(&h, sink_str, &out);
   CHECK(out.rfind("#fakefish-pulse-log\n", 0) == 0, "header starts with the magic line");
-  CHECK(out.find("#format_version=1\n") != std::string::npos, "header carries the version");
+  CHECK(out.find("#format_version=2\n") != std::string::npos, "header carries the version");
   CHECK(out.find("#rtc_valid=1\n") != std::string::npos, "a plausible RTC is marked valid");
   CHECK(out.find("#eod_net_integral_x1000=41577\n") != std::string::npos, "library fingerprint");
   CHECK(out.find("#build=Jan  1 2026 00:00:00\n") != std::string::npos, "build stamp");
@@ -507,11 +507,12 @@ static void emit_golden() {
   uint32_t seq = 0;
   std::vector<PlogRec> rows;
 
-  // Settings in force for this session: master 0.9, loc 0.45, cv 0.2, 5 Hz (10000 samples).
-  const uint16_t MASTER = 900, LOC_AMP = 450, CV = 200;
-  const uint32_t RATE = 10000;
+  // Settings in force for this session: master 0.9, loc 0.225, randomness 1.0 (the measured
+  // eel), ticking at 5 Hz (a 10000-sample median interval).
+  const uint16_t MASTER = 900, LOC_AMP = 225, RANDOMNESS = 1000;
+  const uint32_t TICK_IPI = 10000;
 
-  auto ctx = [&](PlogRec& r) { r.master_m = MASTER; r.cv_m = CV; r.rate_ipi = RATE; };
+  auto ctx = [&](PlogRec& r) { r.master_m = MASTER; r.rand_m = RANDOMNESS; r.tick_ipi = TICK_IPI; };
 
   PlogRec r;
   plog_rec_init(&r, PLOG_BOOT, 0);       r.val = 7;                 ctx(r); rows.push_back(r);

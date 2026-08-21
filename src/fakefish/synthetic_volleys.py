@@ -165,12 +165,25 @@ SUSTAINED_PEAK_WINDOW = 5  # intervals a "peak" must hold for, to not be one out
 # neither overflows the uint16 sample-IPI (65535 samp = 1.31 s) nor gets chopped by
 # the gap-free trim (localization_max_gap_s = 1.2 s).
 #
-# THIS IS THE SEAM FOR A PROPER LOCALIZATION MODEL. It is a designed rate ladder, not a
-# fit: the old in-repo lognormal fit was retired with the old volley fit, and the volley
-# model deliberately does not cover localization (its own §1.3 — one call is one volley).
-# Its §2.3 measures ~3.2 Hz between volleys but labels that an UPPER BOUND, contaminated
-# by imperfectly-separated neighbours, so it is not used. When a fitted localization model
-# lands, it replaces this ladder the same way volley_model.py replaced the volley fit.
+# THIS IS THE SEAM FOR A PROPER LOCALIZATION MODEL, AND THE MODEL HAS NOW LANDED — but
+# not here yet. It is a designed rate ladder, not a fit: the volley model deliberately
+# does not cover localization (its own §1.3 — one call is one volley), and its §2.3
+# measures ~3.2 Hz between volleys but labels that an UPPER BOUND, contaminated by
+# imperfectly-separated neighbours, so it is not used.
+#
+# Since 2026-08-21 there IS a fitted resting rhythm — ``fakefish.loc_model`` +
+# ``data/loc_model_params.json``, vendored from eeltracker exactly as the volley model
+# was, with ``docs/LOCALIZATION_GENERATIVE_SPEC.md`` as its spec. The RC device already
+# uses it live (``firmware/eel_core/loc_rhythm.h``). This ladder is what is left over: it
+# generates the LOCALIZATION ITEMS baked into the byte-frozen library, which the SD card's
+# programs B and D render from, so replacing it here is not a code change but a
+# **library re-export** — and that needs the source recordings, which are not in this repo
+# (CLAUDE.md invariant 3 has the four-step sequence).
+#
+# So the two paths currently disagree, deliberately and visibly: the RC device ticks like
+# a fitted eel, the WAV card ticks on this ladder. Closing that is the next re-export, and
+# it must be done as one commit — regenerate, verify items 0-6 and EOD_HV come back
+# byte-identical, then re-run ``firmware/sync_core.sh``. See TODO.md.
 LOC_SYNTH_RATES_HZ = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
 LOC_SYNTH_CV = 0.3
 LOC_MAX_IPI_S = 1.15

@@ -1,8 +1,10 @@
 // Host self-test for the pure RC logic (no Arduino): width->unit, quantise+hysteresis, the CH3
-// throttle map (on/off + rate), the CH4 bidirectional one-shot trigger (volley/sham edge-detect,
-// re-arm, no boot-time fire), the CH5 jitter + CH6 amplitude maps, the lognormal IPI draw
-// (jitter=0 => exactly periodic; mean preserved; refractory + tail clamps), and the localization
-// scheduler. Compile + run on a PC (needs EOD_HV from eel_stimuli):
+// throttle map (on/off + tick tempo), the CH4 one-shot trigger (edge-detect, re-arm, no
+// boot-time fire), the CH5 randomness + CH6 amplitude maps, and the localization pulse
+// renderer. The RHYTHM itself is not tested here — it moved to src/eel_core/loc_rhythm.h and has
+// its own parity test against the Python reference (host_test/loc_rhythm_selftest.cpp); what is
+// left in this file is the L3 job of turning two RC channels into that model's two knobs.
+// Compile + run on a PC (needs EOD_HV from eel_stimuli):
 //   g++ -std=c++17 firmware/eel_fakefish_rc/src/eel_core/eel_stimuli.cpp
 //       firmware/eel_fakefish_rc/host_test/rc_control_selftest.cpp -lm -o /tmp/rc   (then run /tmp/rc)
 #include <cstdio>
@@ -11,9 +13,6 @@
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); g_fail++; } } while (0)
-
-static uint32_t s_lcg = 12345u;
-static float uni() { s_lcg = s_lcg * 1664525u + 1013904223u; return ((s_lcg >> 8) & 0xFFFFFF) * (1.0f / 16777216.0f); }
 
 // shorthand for the configured CH4 thresholds
 static int trig(RcTrigger* t, float u) {
@@ -42,8 +41,15 @@ static void test_throttle() {
   CHECK(rc_throttle_on(0.5f) == 1, "throttle up -> on");
   CHECK(rc_throttle_frac(0.0f) == 0.0f, "throttle frac 0 at bottom");
   CHECK(fabsf(rc_throttle_frac(1.0f) - 1.0f) < 1e-6f, "throttle frac 1 at full");
-  CHECK(fabsf(rc_rate_to_ipi_samp(0, RC_RATE_STEPS) - (float)SAMPLE_RATE_HZ / LOC_RATE_MIN_HZ) < 1.0f, "rate lvl0 -> min Hz");
-  CHECK(fabsf(rc_rate_to_ipi_samp(RC_RATE_STEPS - 1, RC_RATE_STEPS) - (float)SAMPLE_RATE_HZ / LOC_RATE_MAX_HZ) < 1.0f, "rate top -> 20 Hz");
+  CHECK(fabsf(rc_rate_to_hz(0, RC_RATE_STEPS) - LOC_RATE_MIN_HZ) < 1e-4f, "rate lvl0 -> min Hz");
+  CHECK(fabsf(rc_rate_to_hz(RC_RATE_STEPS - 1, RC_RATE_STEPS) - LOC_RATE_MAX_HZ) < 1e-4f, "rate top -> 20 Hz");
+  // The ladder is a TICK TEMPO, and the model's rate knob is a multiplier of the measured
+  // eel's own tempo — so a setting of LOC_NOMINAL_TICK_HZ must come out as exactly 1.0.
+  // Getting this conversion wrong would scale every localization interval silently.
+  CHECK(fabsf(rc_rate_to_tempo(0, RC_RATE_STEPS) - LOC_RATE_MIN_HZ / LOC_NOMINAL_TICK_HZ) < 1e-5f,
+        "rate lvl0 -> tempo = min_hz / nominal");
+  CHECK(fabsf(loc_rhythm_rate_for_hz(LOC_NOMINAL_TICK_HZ) - 1.0f) < 1e-6f,
+        "the measured eel's tick tempo IS rate 1.0");
 }
 
 static void test_throttle_gate() {
@@ -107,7 +113,7 @@ static void test_trigger_boot() {
   CHECK(trig(&t, 1.0f) == 1, "trig boot: throw after centring -> fires");
 }
 
-static void test_amp_jitter() {
+static void test_amp_randomness() {
   CHECK(fabsf(rc_master_amp(0, RC_AMP_STEPS) - MASTER_AMP_MIN) < 1e-6f, "master lvl0 -> MIN");
   CHECK(fabsf(rc_master_amp(RC_AMP_STEPS - 1, RC_AMP_STEPS) - MASTER_AMP_MAX) < 1e-6f, "master top -> MAX");
   // The SHIPPED ratio, pinned as a literal on purpose. VOLLEY_AMP_RATIO is generated from
@@ -122,22 +128,19 @@ static void test_amp_jitter() {
   CHECK(fabsf(rc_loc_amp(1.0f) - 1.0f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio at full scale");
   CHECK(fabsf(rc_loc_amp(0.4f) - 0.4f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio off full scale");
   CHECK(rc_loc_amp(1.0f) > rc_loc_amp(0.4f), "loc tracks the volley, never converges to it");
-  CHECK(fabsf(rc_jitter_cv(0, RC_JITTER_STEPS) - 0.0f) < 1e-6f, "jitter lvl0 -> 0 (perfectly even)");
-  CHECK(fabsf(rc_jitter_cv(RC_JITTER_STEPS - 1, RC_JITTER_STEPS) - LOC_CV_MAX) < 1e-6f, "jitter top -> CV_MAX");
-}
-
-static void test_ipi() {
-  CHECK(rc_ipi_samples(2500.0f, 0.0f, 3.7f, 250u) == 2500u, "ipi cv=0 exact (z=3.7)");
-  CHECK(rc_ipi_samples(2500.0f, 0.0f, -2.0f, 250u) == 2500u, "ipi cv=0 exact (z=-2)");
-  CHECK(rc_ipi_samples(100.0f, 0.0f, 0.0f, 250u) == 250u, "ipi clamps to refractory");
-  CHECK(rc_ipi_samples(2500.0f, 0.8f, 6.0f, 250u) == (uint32_t)(2500.0f * RC_IPI_MAX_FACTOR + 0.5f),
-        "ipi upper-clamped to mean*RC_IPI_MAX_FACTOR");
-  double sum = 0; int n = 200000;
-  for (int i = 0; i < n; i++) {
-    float z = rc_std_normal(uni() * 0.999999f + 1e-6f, uni());
-    sum += rc_ipi_samples(2500.0f, 0.5f, z, 250u);
-  }
-  CHECK(fabs(sum / n - 2500.0) < 60.0, "ipi cv=0.5 preserves mean (~2500)");
+  // CH5 is the fitted model's RANDOMNESS knob, not the retired jitter CV: 0 is a metronome
+  // at the nominal tempo and 1.0 is the measured eel. The pot's top stops at 1.5, below the
+  // 2.0 the shipped tables reach, because CV2 saturates above that as the score starts
+  // clamping against the ends of the interval table.
+  CHECK(fabsf(rc_randomness(0, RC_RANDOM_STEPS) - 0.0f) < 1e-6f, "randomness lvl0 -> 0 (metronome)");
+  CHECK(fabsf(rc_randomness(RC_RANDOM_STEPS - 1, RC_RANDOM_STEPS) - LOC_RANDOMNESS_MAX) < 1e-6f,
+        "randomness top -> LOC_RANDOMNESS_MAX");
+  CHECK(LOC_RANDOMNESS_MAX <= LOC_KNOB_MAX, "the pot must not run past the shipped gain table");
+  // 1.0 — the measured eel — has to be reachable, or the device cannot be set to a real fish.
+  bool reaches_one = false;
+  for (int i = 0; i < RC_RANDOM_STEPS; i++)
+    if (fabsf(rc_randomness(i, RC_RANDOM_STEPS) - 1.0f) < 0.06f) reaches_one = true;
+  CHECK(reaches_one, "some pot step must land on randomness 1.0, the measured eel");
 }
 
 static void test_locgen() {
@@ -161,9 +164,9 @@ static void test_locgen() {
     int16_t s = locgen_tick(&g, &onset, &boundary); (void)s;
     if (onset && t != expect_next) periodic = false;
     if (onset) expect_next = t + 300;
-    if (boundary) g.ipi = rc_ipi_samples(300.0f, 0.0f, uni(), LOC_REFRACTORY_SAMP);
+    if (boundary) g.ipi = 300u;   // a fixed interval: this tests the renderer, not the rhythm
   }
-  CHECK(periodic, "locgen: cv=0 train is exactly periodic");
+  CHECK(periodic, "locgen: a fixed interval gives an exactly periodic train");
 
   locgen_reset(&g, 300u, 0.5f, 1);
   int16_t peak = 0;
@@ -179,8 +182,7 @@ int main() {
   test_trigger();
   test_trigger_low_throw_is_inert();
   test_trigger_boot();
-  test_amp_jitter();
-  test_ipi();
+  test_amp_randomness();
   test_locgen();
   if (g_fail == 0) { printf("OK\n"); return 0; }
   printf("%d CHECK(s) FAILED\n", g_fail);

@@ -81,10 +81,21 @@
 #define PANEL_VOLLEY_AMP   1.0f // bench default (no transmitter)
 
 // ===== RC path — live localization train ===================================
+// The RHYTHM is the fitted model (loc_model_params.h + loc_rhythm.h); these are only
+// the ranges the operator's knobs span.
+//
+// CH3 is a TICK TEMPO — one over the median interval — not an average pulse rate. The
+// measured eel ticks at LOC_NOMINAL_TICK_HZ (3.15 Hz). Under the retired lognormal a
+// setting of 5 Hz meant 5 pulses/s on average; it now means the fish ticks at 5 Hz,
+// which delivers about 3.3 pulses/s once the heavy tail is included.
 #define LOC_RATE_MIN_HZ    1.0f
 #define LOC_RATE_MAX_HZ    20.0f
 #define PANEL_RATE_HZ      5.0f
-#define PANEL_CV           0.2f
+// CH5 bench default. 1.0 IS the measured eel (0 = metronome, useful to ~1.5). This is
+// NOT the retired jitter CV: it scales the state score, so it changes how MUCH the rate
+// varies without touching how it varies over time.
+#define PANEL_RANDOMNESS   1.0f
 // Minimum IPI. MUST stay > EOD_HV_LEN so localization pulses can never overlap —
-// that invariant is what lets locgen.h use a single-pulse scheduler.
+// that invariant is what lets locgen.h use a single-pulse scheduler. A pure safety
+// floor now: the model's fastest interval is 27.9 ms, well above it.
 #define LOC_REFRACTORY_SAMP 250u  // 5 ms @ 50 kHz

@@ -42,7 +42,9 @@ firmware/
     eel_player.{h,cpp}         L2  overlap-add engine (marker + volley)
     eel_stimuli.{h,cpp}        L2  generated stimulus library (byte-frozen)
     sd_player.h                L2  SD WAV streaming runtime
-    locgen.h                   L2  live localization scheduler
+    locgen.h                   L2  renders one localization pulse
+    loc_rhythm.h               L2  the fitted resting rhythm (when the next one is)
+    loc_model_params.h         L2  its fitted tables (GENERATED from data/)
     host_test/                 shared host self-tests
   eel_fakefish_button/         L3  hand-held 6-button SD player
   eel_fakefish_rc/             L3  boat RC + panel, live synthesis
@@ -410,7 +412,7 @@ The firmware keeps exactly one knob:
 | Knob | Drives | Default |
 |------|--------|---------|
 | `MASTER_GAIN` (button `.ino`) | every streamed sample | `1.0` (levels exactly as rendered) |
-| CH6 pot / `PANEL_VOLLEY_AMP` (RC) | the volley level; localization is derived at half | `1.00` on the bench |
+| CH6 pot / `PANEL_VOLLEY_AMP` (RC) | the volley level; localization is derived at a quarter | `1.00` on the bench |
 
 **Level → volts.** Amplitude `1.0` means the **full rail** — and on this device that is the whole
 story, because the eel EOD is monophasic. `out_write()` **sign-splits** each sample: one bridge
@@ -448,10 +450,14 @@ direct-pin stage and still has to be **scoped** before it goes near an animal.
 - **`sd_player`** — SD WAV streaming: header parse, ring buffer, per-button random pick. The ISR
   never touches the card; `loop()` refills the ring (single-producer/single-consumer). Used by
   the button device.
-- **`locgen`** — the live localization scheduler: one EOD pulse, then silence, until the next
-  onset. It can be a trivial phase counter rather than an overlap-add engine only because
-  localization is ≤ 20 Hz and `LOC_REFRACTORY_SAMP` exceeds `EOD_HV_LEN`, so pulses can never
-  overlap — a `static_assert` in `locgen.h` enforces exactly that.
+- **`locgen`** — renders one localization pulse: one EOD, then silence, until the next onset.
+  It can be a trivial phase counter rather than an overlap-add engine only because localization
+  is ≤ 20 Hz and `LOC_REFRACTORY_SAMP` exceeds `EOD_HV_LEN`, so pulses can never overlap — a
+  `static_assert` in `locgen.h` enforces exactly that.
+- **`loc_rhythm`** — decides *when* that next onset is: the **fitted resting rhythm**, see
+  [The resting rhythm](#the-resting-rhythm-a-fitted-model-not-a-random-draw) below. Paired with
+  `locgen` but deliberately separate, so the rhythm can be tested against the Python reference
+  with no notion of a waveform.
 - **`eel_stimuli`** — the generated library: `EOD_HV` (131 samples @ 50 kHz) plus 34 items.
   Byte-frozen; regenerated only by `fakefish-export`.
 - **`pulse_log`** — the **mirror image of `sd_player`**: where that one has the ISR *pop* samples
@@ -462,6 +468,124 @@ direct-pin stage and still has to be **scoped** before it goes near an animal.
 
 All produce `int16` at 32767 full scale, 50 kHz. A producer a sketch does not reference simply
 links out.
+
+---
+
+## The resting rhythm — a fitted model, not a random draw
+
+Between trials the RC device ticks along like a resting eel. Since **2026-08-21** that rhythm is
+a model **fitted to 99 010 measured resting intervals** (29 h of single-eel stretches, 1 761
+slices, 42 recordings, 15 sites of FLONA 2025) rather than the unit-mean lognormal draw it used
+before. `firmware/eel_core/loc_rhythm.h` is the port; `docs/LOCALIZATION_GENERATIVE_SPEC.md` is
+the spec.
+
+### What was wrong with the lognormal
+
+It is a **renewal process**: every interval drawn independently. That fixes the mean rate and
+nothing else — consecutive log-intervals are uncorrelated at every lag. A real eel's correlate
+**0.55 at lag 1, 0.36 at lag 5 and still 0.21 at lag 20**. Its discharge rate *wanders*, over a
+few seconds and over a minute, and that wander is the one thing a renewal process cannot produce.
+It is also the thing that makes a recording sound like a fish rather than a random number
+generator.
+
+### The model
+
+```
+z   = randomness * (offset + x_fast + x_medium + x_slow + sd_white * e)
+IPI = Q(z) / tempo
+```
+
+`Q` is a 41-knot measured interval quantile table. Each `x` is an Ornstein–Uhlenbeck component
+that relaxes in **wall-clock time** — `x ← a·x + sd·√(1−a²)·e` with `a = exp(−dt/τ)`, τ = 2.5 s,
+96 s and 62 min. Five floats of state; three `expf`, two Box–Muller pairs and eight PRNG words
+per interval, paid on the one tick that closes an interval, not per sample.
+
+Four properties are **measurements, not modelling choices**, and none should be simplified away:
+
+1. **The state relaxes in time, not in pulse count.** After a 3 s silence the fish has forgotten
+   more than after three 100 ms intervals; refitting per-pulse costs 699 nats of likelihood.
+2. **Two timescales, plus a slow one and a per-power-on offset.** One is audibly not enough
+   (619 nats).
+3. **The noise is peaked, not Gaussian** — a two-scale mixture. Gaussian noise of the same
+   variance gets the interval distribution *and* the autocorrelation right and still sounds
+   wrong: median CV2 0.60 against a measured 0.38.
+4. **Long silences are real.** 1.5 % of resting intervals exceed 5 s and 0.6 % exceed 10 s; the
+   table's top knot is 32 s. The device *will* occasionally go quiet that long. The pulses
+   bracketing a real 30 s silence are exactly as loud as the rest of the recording, so the fish
+   did not swim away — it stopped. The retired `RC_IPI_MAX_FACTOR`, which clamped the lognormal's
+   tail at 4× the mean, is gone on purpose. **Do not clamp it back.**
+
+### The two knobs, and what changed about them
+
+| | old (lognormal) | now (fitted) |
+|---|---|---|
+| CH3 | mean pulses/s, 1–20 Hz | **tick tempo** (1/median), 1–20 Hz |
+| CH5 | jitter CV, 0–0.8 | **randomness**, 0–1.5 (1.0 = the measured eel) |
+
+**CH3's meaning changed and the number did not.** A setting of 5 Hz used to mean five pulses per
+second on average; it now means the fish *ticks* at 5 Hz, which at randomness 1.0 delivers about
+3.3 pulses/s. Both are right — the interval distribution is heavy-tailed, so one long silence
+contributes a single interval to the median while eating half the average. A heavy-tailed
+distribution cannot hold its median and its mean at once, and this device **anchors the median**,
+because that is the number quoted as an eel's discharge rate and the only one that keeps a
+throttle labelled in Hz honest. (`knobs.gain_mean_anchor` in the model JSON is the table that
+would restore the old meaning; spec §5.3 has the argument.)
+
+Rate is a **pure time dilation**: it divides the intervals *and* stretches the time constants
+with them. That is measured — refitting the memory as `τ·(own tempo)^γ` peaks sharply at γ = 1
+and beats γ = 0 by 413 nats. Halving the rate with τ fixed instead would let the state relax
+between pulses, so the wander washes out and the device drifts back toward a renewal process
+exactly at the slow settings, which is where it matters most.
+
+Randomness scales the state score. It does **not** blend toward Poisson — the lag-1
+autocorrelation stays around 0.52 across the whole range. It dials how *much* the rate varies,
+leaving how it varies over time alone, so every setting still sounds like a fish.
+
+### What is deliberately not implemented
+
+The model also carries `interrupt()`: the fish's own decision to launch a fast run, about **1 in
+49 resting pulses**. It is **not** ported. This surface runs a blinded trial design in which a
+marker's pulse count *is* the trial record, so a spontaneous burst would be an unmarked volley in
+the water, and one landing inside a sham would destroy the no-stimulus control. Every volley this
+device emits is operator-requested. The generated header carries no hazard constants at all, and
+`tests/test_loc_model.py` asserts that, so it cannot be wired up by accident.
+
+The model also does not carry the **diel cycle** (real eels tick ~1.6× faster in the early night
+than at midday) or any notion of other fish present. Both are in the spec's caveats.
+
+### Why the parameters are generated, and the one trap to know about
+
+`firmware/eel_core/loc_model_params.h` is **generated** from `data/loc_model_params.json` by
+`fakefish-gen-constants`, alongside `stim_levels.h`. That is not ceremony. The spec ships a
+ready-to-paste C listing in its §7, and **that listing disagrees with the fitted parameters it
+sits beside** — `TAU[0]` 3.200 against a shipped `tau_fast_s` of 2.5, `HAZ_B0` −4.872 against
+−4.8118, and both mixture widths off in the third decimal. The JSON is the self-consistent one:
+its interval table was calibrated *at* τ = 2.5, and running the reference sampler with it
+reproduces the spec's own §6 validation column, while substituting 3.2 moves the median interval
+off the measured 317 ms. Anyone hand-typing the listing would get a device that is subtly not the
+model, with nothing to catch it.
+
+### How it is verified
+
+Two golden-file gates, facing opposite directions, so neither side can move alone:
+
+- `tests/data/loc_rhythm_golden.csv` is **generated** by `src/fakefish/loc_model.py` — the
+  vendored reference — with its noise draws *injected* rather than drawn, so the two
+  implementations can be compared state for state despite sharing no generator. Each row carries
+  the four noise values one interval consumes and the state the reference reached.
+- `tests/test_loc_model.py` fails if the golden drifts from the Python. `loc_rhythm_selftest`
+  (run by `check.sh`) fails if the C drifts from the golden. Five knob settings are covered,
+  including both ends of the interval table's clamp.
+
+Regenerate the golden with `uv run python tests/test_loc_model.py --emit`.
+
+### The seam that is still open
+
+The **SD/button device does not use this model.** Its localization WAVs are rendered from the
+localization *items* baked into the byte-frozen library, which come from the designed
+`LOC_SYNTH_RATES_HZ` ladder in `synthetic_volleys.py`. Replacing that is a **library re-export**,
+which needs the source recordings this repo does not ship. Until then the two devices tick
+differently on purpose: the RC unit like a fitted eel, the WAV card on the ladder. See `TODO.md`.
 
 ---
 
@@ -548,10 +672,10 @@ same binary runs on the bench with no transmitter.
 
 | Control | Pin | Does |
 |---|---|---|
-| CH3 throttle | 4 | localization on/off (debounced, hysteretic) + rate 1–20 Hz |
+| CH3 throttle | 4 | localization on/off (debounced, hysteretic) + **tick tempo** 1–20 Hz |
 | CH4 stick | 5 | one-shot: throw high = run one **blinded trial**; throw low does **nothing**; re-arms at centre |
-| CH5 pot | 6 | localization jitter (CV) |
-| CH6 pot | 7 | amplitude → volley level; localization derived at half |
+| CH5 pot | 6 | localization **randomness** (0 = metronome, 1.0 = the measured eel, to 1.5) |
+| CH6 pot | 7 | amplitude → volley level; localization derived at a quarter |
 | panel LOC / VOLLEY / SHAM | 9 / 10 / 11 | the same three actions |
 
 **The PC817 inverts** — the pin is LOW while the servo pulse is HIGH, so the firmware measures
@@ -572,8 +696,13 @@ does not even consume the arm. The three-button bench panel keeps **explicit** v
 buttons, because bench testing needs determinism; blinding is a property of the field instrument.
 
 The draw lives in the ISR rather than in `loop()` for a concrete reason: `random()` is already
-called from the ISR (polarity, localization jitter) and must stay single-caller. Drawing at
+called from the ISR (polarity, the volley item pick) and must stay single-caller. Drawing at
 playback time also means a request that is later discarded never consumes a draw.
+
+The localization rhythm is deliberately **not** on that stream — it runs its own generator.
+Sharing one would make the blinded volley/sham sequence depend on how many localization pulses
+happened to precede a throw, so the operator's rate knob would silently reach into which trials
+came out volleys.
 
 This blinds the *choice*, not the *record*: the LED still shows its distinct sham pattern
 afterwards, and the marker's pulse count still tags which trial fired — analysis needs that.
@@ -610,8 +739,9 @@ sample tick that placed it. Core: `eel_core/pulse_log.h`. Reader: `fakefish-puls
 
 Volley and sham **trials** are already identifiable in a recording — the count-coded marker tags
 them (2 pulses volley, 4 sham). The **localization train is not**. It is single-polarity EOD
-pulses at 1–20 Hz with lognormal jitter, deliberately built to look exactly like a real cruising
-eel, and nothing in the water distinguishes it from biology. Without a log, every analysis of a
+pulses from a rhythm **fitted to real resting eels**, and since 2026-08-21 it is a closer forgery
+than it ever was — it reproduces the wander that used to be the one giveaway. Nothing in the
+water distinguishes it from biology. Without a log, every analysis of a
 recording made during playback has to treat an unknown subset of pulses as possibly ours — and
 localization is the thing that runs *continuously* for a whole session.
 
@@ -696,8 +826,8 @@ A `#key=value` header block, then a comment column line, then the bare column li
 | `pol` | playback polarity, +1 / −1 |
 | `amp_m` | amplitude applied to **this** pulse, ×1000 — for a `VOLLEY` row this includes the item's per-pulse envelope, so it decays down the burst while `master_m` holds |
 | `master_m` | the master (volley) amplitude setting in force, ×1000 |
-| `cv_m` | localization jitter CV in force, ×1000 |
-| `rate_ipi` | mean localization IPI in whole samples |
+| `rand_m` | localization **randomness** knob in force, ×1000 (0 = metronome, 1000 = the measured eel) |
+| `tick_ipi` | nominal **median** localization IPI in whole samples — the tick tempo, not the mean |
 | `val` | event-specific: `DROP` records lost, `LINK` 1 = up, `ANCHOR` RTC unix seconds, `GAP`/`BOOT` file index |
 | `req` | trial **requested**: `R` = blinded lever, `V`/`S` = explicit panel button |
 | `res` | trial **resolved**: `V` / `S` — what the firmware actually drew |
@@ -730,11 +860,14 @@ The log alone **is** sufficient to align — this is the intended procedure:
 3. Cross-correlate the two point processes to find the offset.
 4. Every logged pulse then maps to a recorded pulse; everything unmatched is a real fish.
 
-**The lognormal jitter is what makes this work.** A perfectly periodic train would correlate
-ambiguously — an equally good peak at every IPI. The jittered train (CV up to 0.8) gives any
-stretch a unique fingerprint and a sharp peak. The randomness that makes the stimulus
-biologically realistic also makes it uniquely identifiable; a zero-jitter localization mode would
-degrade alignment. Detection precision is not the limit: an EOD is ~800 µs FWHM, so each peak
+**The rhythm's irregularity is what makes this work.** A perfectly periodic train would correlate
+ambiguously — an equally good peak at every IPI. A train whose intervals vary gives any stretch a
+unique fingerprint and a sharp peak, and the fitted rhythm varies *more* than the lognormal it
+replaced (median CV2 ~0.42 at randomness 1.0, and a heavy tail that the old 4×-mean clamp used to
+cut off), so alignment got better rather than worse. The randomness that makes the stimulus
+biologically realistic also makes it uniquely identifiable — which is why **CH5 at 0 is a trap in
+the field**: it is an exact metronome and degrades alignment badly. Keep it near 1.0, the
+measured eel, unless a metronome is the point of the test. Detection precision is not the limit: an EOD is ~800 µs FWHM, so each peak
 localises to well under a millisecond.
 
 > **The one real constraint is clock drift.** The Teensy's 50 kHz clock and the recorder's 48 kHz
