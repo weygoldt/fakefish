@@ -950,6 +950,8 @@ A `#key=value` header block, then a comment column line, then the bare column li
 | `amp_m` | amplitude applied to **this** pulse, ×1000 — for a `VOLLEY` row this includes the item's per-pulse envelope, so it decays down the burst while `master_m` holds |
 | `master_m` | the master (volley) amplitude setting in force, ×1000 |
 | `rand_m` | localization **randomness** knob in force, ×1000 (0 = metronome, 1000 = the measured eel) |
+| `ch3_us`…`ch6_us` | **v3**: the RAW decoded RC pulse width per channel, µs — the measurement every other control column is derived from |
+| `zero_us` | **v3**: the session zero the throttle captured (`RcZero`), µs. Compare against `RC_CAL_THROTTLE_MIN` to read the opto path's drift directly |
 | `tick_ipi` | nominal **median** localization IPI in whole samples — the tick tempo, not the mean |
 | `val` | event-specific: `DROP` records lost, `LINK` 1 = up, `ANCHOR` RTC unix seconds, `GAP`/`BOOT` file index |
 | `req` | trial **requested**: `R` = blinded lever, `V`/`S` = explicit panel button |

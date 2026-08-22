@@ -269,7 +269,7 @@ static void test_format_pulse_rows() {
   loc.master_m = 900;
   loc.rand_m = 1000;
   loc.tick_ipi = 10000;
-  CHECK(row_of(loc, 42) == "42,123456789,LOC,,,,-1,450,900,1000,10000,,,\n", "LOC row");
+  CHECK(row_of(loc, 42) == "42,123456789,LOC,,,,-1,450,900,1000,10000,,,,,,,,\n", "LOC row");
 
   // A volley pulse: item AND pulse index present.
   PlogRec vol;
@@ -282,7 +282,7 @@ static void test_format_pulse_rows() {
   vol.master_m = 900;
   vol.rand_m = 1000;
   vol.tick_ipi = 10000;
-  CHECK(row_of(vol, 7) == "7,500,VOLLEY,13,27,4,1,900,900,1000,10000,,,\n", "VOLLEY row");
+  CHECK(row_of(vol, 7) == "7,500,VOLLEY,13,27,4,1,900,900,1000,10000,,,,,,,,\n", "VOLLEY row");
 
   // A marker pulse: pulse index present, NO item (it is built at runtime, not in the library).
   PlogRec mk_;
@@ -294,7 +294,27 @@ static void test_format_pulse_rows() {
   mk_.master_m = 900;
   mk_.rand_m = 1000;
   mk_.tick_ipi = 10000;
-  CHECK(row_of(mk_, 6) == "6,300,MARKER,,1,4,1,500,900,1000,10000,,,\n", "MARKER row");
+  CHECK(row_of(mk_, 6) == "6,300,MARKER,,1,4,1,500,900,1000,10000,,,,,,,,\n", "MARKER row");
+
+  // v3: with the raw decode populated. This is the row shape a real device writes — every
+  // other control column here is derived from these five, which is why they are worth the bytes.
+  PlogRec raw;
+  plog_rec_init(&raw, PLOG_LOC, 900);
+  raw.pol = 1;
+  raw.amp_m = 225;
+  raw.master_m = 900;
+  raw.rand_m = 1000;
+  raw.tick_ipi = 10000;
+  raw.ch_us[0] = 1115; raw.ch_us[1] = 1200; raw.ch_us[2] = 1010; raw.ch_us[3] = 1580;
+  raw.zero_us = 905;
+  CHECK(row_of(raw, 11) == "11,900,LOC,,,,1,225,900,1000,10000,,,,1115,1200,1010,1580,905\n",
+        "LOC row with the raw decode populated");
+  // ...and a channel that has never been seen stays EMPTY, not 0. A width of 0 us is a value in
+  // this column's own units, so a 0 default would read as a zero-length pulse from the receiver
+  // rather than as "this device has no receiver" — the same trap as item 0 below.
+  raw.ch_us[2] = PLOG_ABSENT_U16;
+  CHECK(row_of(raw, 11) == "11,900,LOC,,,,1,225,900,1000,10000,,,,1115,1200,,1580,905\n",
+        "an unseen channel renders EMPTY, never 0 us");
 
   // Item 0 is a REAL volley and must render as "0", not as an empty column — the empty
   // column means "no item", and conflating the two would be the same class of bug as the
@@ -303,7 +323,7 @@ static void test_format_pulse_rows() {
   plog_rec_init(&zero, PLOG_VOLLEY, 1);
   zero.item = 0;
   zero.pulse = 0;
-  CHECK(row_of(zero, 0) == "0,1,VOLLEY,0,0,,,,,,,,,\n", "item 0 renders as 0, not empty");
+  CHECK(row_of(zero, 0) == "0,1,VOLLEY,0,0,,,,,,,,,,,,,,\n", "item 0 renders as 0, not empty");
 }
 
 // THE SENTINEL MUST NEVER REACH THE FILE. -1 is safe in C but in Python STIM_ITEMS[-1]
@@ -323,13 +343,13 @@ static void test_absent_never_leaks() {
     // 14 columns == 13 commas, exactly, on every event type.
     size_t commas = 0;
     for (char c : s) if (c == ',') commas++;
-    CHECK(commas == 13, "every row has exactly 13 commas");
+    CHECK(commas == 18, "every row has exactly 18 commas");
     CHECK(s.back() == '\n', "every row ends with a newline");
   }
   // A fully-default row is all-empty after the fixed three columns.
   PlogRec r;
   plog_rec_init(&r, PLOG_LOCOFF, 99);
-  CHECK(row_of(r, 3) == "3,99,LOCOFF,,,,,,,,,,,\n", "default row is all-empty");
+  CHECK(row_of(r, 3) == "3,99,LOCOFF,,,,,,,,,,,,,,,,\n", "default row is all-empty");
 }
 
 static void test_format_event_rows() {
@@ -344,16 +364,16 @@ static void test_format_event_rows() {
   t.tick_ipi = 10000;
   t.req = PLOG_KIND_RANDOM;
   t.res = PLOG_KIND_VOLLEY;
-  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,R,V\n", "blinded TRIAL row");
+  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,R,V,,,,,\n", "blinded TRIAL row");
 
   // A bench trial forced from the panel: requested VOLLEY, resolved VOLLEY.
   t.req = PLOG_KIND_VOLLEY;
-  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,V,V\n", "bench TRIAL row");
+  CHECK(row_of(t, 5) == "5,1000,TRIAL,,,1,1,,900,1000,10000,,V,V,,,,,\n", "bench TRIAL row");
 
   PlogRec link;
   plog_rec_init(&link, PLOG_LINK, 77);
   link.val = 0;
-  CHECK(row_of(link, 1) == "1,77,LINK,,,,,,,,,0,,\n", "LINK down row");
+  CHECK(row_of(link, 1) == "1,77,LINK,,,,,,,,,0,,,,,,,\n", "LINK down row");
 
   PlogRec anc;
   plog_rec_init(&anc, PLOG_ANCHOR, 500000);
@@ -361,12 +381,12 @@ static void test_format_event_rows() {
   anc.master_m = 900;
   anc.rand_m = 1000;
   anc.tick_ipi = 10000;
-  CHECK(row_of(anc, 2) == "2,500000,ANCHOR,,,,,,900,1000,10000,1755720000,,\n", "ANCHOR row");
+  CHECK(row_of(anc, 2) == "2,500000,ANCHOR,,,,,,900,1000,10000,1755720000,,,,,,,\n", "ANCHOR row");
 
   // The 64-bit tick must render in full, not truncated to 32 bits.
   PlogRec big;
   plog_rec_init(&big, PLOG_LOC, 0x1FFFFFFFFull);
-  CHECK(row_of(big, 0) == "0,8589934591,LOC,,,,,,,,,,,\n", "64-bit tick renders in full");
+  CHECK(row_of(big, 0) == "0,8589934591,LOC,,,,,,,,,,,,,,,,\n", "64-bit tick renders in full");
 
   // A GAP row is written by loop(), which cannot read the ISR-owned tick. The column must be
   // EMPTY — a literal 0 would read as a real event at device time zero and would collide with
@@ -374,7 +394,7 @@ static void test_format_event_rows() {
   PlogRec gap;
   plog_rec_init(&gap, PLOG_GAP, PLOG_ABSENT_TICK);
   gap.val = 6;
-  CHECK(row_of(gap, 9) == "9,,GAP,,,,,,,,,6,,\n", "GAP row leaves the tick column empty");
+  CHECK(row_of(gap, 9) == "9,,GAP,,,,,,,,,6,,,,,,,\n", "GAP row leaves the tick column empty");
   CHECK(row_of(gap, 9).find("18446744073709551615") == std::string::npos,
         "the tick sentinel never reaches the file");
 
@@ -382,7 +402,7 @@ static void test_format_event_rows() {
   PlogRec boot;
   plog_rec_init(&boot, PLOG_BOOT, 0);
   boot.val = 7;
-  CHECK(row_of(boot, 0) == "0,0,BOOT,,,,,,,,,7,,\n", "BOOT keeps its legitimate tick 0");
+  CHECK(row_of(boot, 0) == "0,0,BOOT,,,,,,,,,7,,,,,,,\n", "BOOT keeps its legitimate tick 0");
 }
 
 // A truncated row must be DETECTED, never silently written: a partial row corrupts the
@@ -398,6 +418,9 @@ static void test_truncation_detected() {
   r.master_m = 65534;
   r.rand_m = 65534;
   r.tick_ipi = 4294967294u;
+  // v3 columns left at their init value on this row ON PURPOSE: it proves an absent width
+  // renders as an EMPTY column rather than a 0, which in this column's units is a real width.
+  
   r.val = 4294967294u;
   r.req = PLOG_KIND_RANDOM;
   r.res = PLOG_KIND_SHAM;
@@ -440,7 +463,7 @@ static void test_kv_and_header() {
   std::string out;
   plog_emit_header(&h, sink_str, &out);
   CHECK(out.rfind("#fakefish-pulse-log\n", 0) == 0, "header starts with the magic line");
-  CHECK(out.find("#format_version=2\n") != std::string::npos, "header carries the version");
+  CHECK(out.find("#format_version=3\n") != std::string::npos, "header carries the version");
   CHECK(out.find("#rtc_valid=1\n") != std::string::npos, "a plausible RTC is marked valid");
   CHECK(out.find("#eod_net_integral_x1000=41577\n") != std::string::npos, "library fingerprint");
   CHECK(out.find("#build=Jan  1 2026 00:00:00\n") != std::string::npos, "build stamp");
@@ -460,7 +483,7 @@ static void test_kv_and_header() {
   CHECK(cols == "#" PLOG_COLUMNS "\n" PLOG_COLUMNS "\n", "columns emitted commented + bare");
   size_t commas = 0;
   for (char c : std::string(PLOG_COLUMNS)) if (c == ',') commas++;
-  CHECK(commas == 13, "the column line declares 14 columns");
+  CHECK(commas == 18, "the column line declares 19 columns (v3 added five raw-decode ones)");
 }
 
 // ===== golden log emitter ==============================================================
@@ -511,8 +534,18 @@ static void emit_golden() {
   // eel), ticking at 5 Hz (a 10000-sample median interval).
   const uint16_t MASTER = 900, LOC_AMP = 225, RANDOMNESS = 1000;
   const uint32_t TICK_IPI = 10000;
+  // v3: the RAW decode behind those settings. A throttle sitting 210 us above its captured zero,
+  // a centred trigger, and two pots — the near end of the chain every other column is derived
+  // from. ZERO_US is deliberately unlike the calibrated minimum, because the whole point of the
+  // column is that the two differ and by how much.
+  const uint16_t CH_US[4] = { 1115u, 1200u, 1010u, 1580u };
+  const uint16_t ZERO_US  = 905u;
 
-  auto ctx = [&](PlogRec& r) { r.master_m = MASTER; r.rand_m = RANDOMNESS; r.tick_ipi = TICK_IPI; };
+  auto ctx = [&](PlogRec& r) {
+    r.master_m = MASTER; r.rand_m = RANDOMNESS; r.tick_ipi = TICK_IPI;
+    for (int i = 0; i < 4; i++) r.ch_us[i] = CH_US[i];
+    r.zero_us = ZERO_US;
+  };
 
   PlogRec r;
   plog_rec_init(&r, PLOG_BOOT, 0);       r.val = 7;                 ctx(r); rows.push_back(r);

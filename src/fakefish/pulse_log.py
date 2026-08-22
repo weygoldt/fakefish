@@ -59,6 +59,14 @@ app = typer.Typer(
 #: ``PULSELOG_FORMAT_VERSION`` only for a breaking schema change, so refusing an
 #: unknown one is better than silently misreading a future file.
 #:
+#: **v3 is accepted alongside v2**, because v3 (2026-08-22) is purely ADDITIVE: it appends
+#: ``ch3_us``…``ch6_us`` (the raw decoded RC pulse width per channel) and ``zero_us`` (the
+#: session zero the throttle captured), and renames nothing. Every v2 column means in a v3 file
+#: exactly what it meant in a v2 one, so a v2 log stays fully readable and the extra fields
+#: simply read as ``None``. That is the opposite of the v1 situation below, and the distinction
+#: is the whole reason a version number is worth having: an added column is compatible, a
+#: repurposed one is not.
+#:
 #: **v1 is not accepted**, deliberately. v2 (2026-08-21) renamed two localization
 #: columns when the resting rhythm became a fitted model: ``cv_m`` -> ``rand_m`` and
 #: ``rate_ipi`` -> ``tick_ipi``. Both hold a different quantity, not a renamed one — a
@@ -66,7 +74,7 @@ app = typer.Typer(
 #: became a MEDIAN one, which differ by about a factor of two on a heavy-tailed
 #: distribution. Reading a v1 file through v2 field names would be silently wrong in a
 #: way no assertion could catch, so v1 files need a v1 reader (``git log`` this file).
-SUPPORTED_FORMAT_VERSIONS = frozenset({2})
+SUPPORTED_FORMAT_VERSIONS = frozenset({2, 3})
 
 #: The magic first line every log starts with.
 MAGIC = "#fakefish-pulse-log"
@@ -96,6 +104,18 @@ COLUMNS = (
     "req",
     "res",
 )
+
+#: The five columns v3 appends: the RAW decode, ahead of every calibration and quantiser.
+#: Everything in :data:`COLUMNS` that describes a control is *derived* from these, which is why
+#: a fault in the measurement used to be reachable only by inverting the rate ladder.
+COLUMNS_V3_EXTRA = ("ch3_us", "ch4_us", "ch5_us", "ch6_us", "zero_us")
+
+#: Column row expected per format version. Position-based parsing needs the exact tuple, and
+#: pinning it per version is what turns "this file is v3" into "these columns, in this order".
+COLUMNS_BY_VERSION: dict[int, tuple[str, ...]] = {
+    2: COLUMNS,
+    3: COLUMNS + COLUMNS_V3_EXTRA,
+}
 
 #: Events that represent one emitted pulse (one row each, never summarised).
 PULSE_EVENTS = frozenset({"LOC", "MARKER", "VOLLEY"})
@@ -153,6 +173,26 @@ class PulseRecord:
     val: Optional[int]
     req: Optional[str]
     res: Optional[str]
+
+    # ----- v3: the raw decode (None on a v2 file, and on any row that has no RC) --------
+    ch_us: tuple[Optional[int], ...] = (None, None, None, None)
+    """Raw decoded RC pulse width per channel in microseconds — CH3, CH4, CH5, CH6.
+
+    The measurement itself, before the calibration that turns it into a unit and the quantiser
+    that turns that into a ladder rung. ``None`` means the column was empty, which is *not* the
+    same as 0: a width of 0 µs is a value in these units, so an absent channel is absent rather
+    than zero. All four are ``None`` when reading a v2 file.
+    """
+
+    zero_us: Optional[int] = None
+    """The session zero the throttle captured, in microseconds (``RcZero`` in the firmware).
+
+    The decoded widths move with the receiver's supply voltage — ~200 µs between a flat and a
+    fresh pack on the build rig — so the device measures its own zero from the throttle at every
+    power-on and applies it to all four channels. Comparing this against the firmware's
+    ``RC_CAL_THROTTLE_MIN`` is the direct read on how far the opto path has drifted, and it is
+    the number whose absence made the 2026-08-22 fault take a log inversion to find.
+    """
 
     @property
     def is_pulse(self) -> bool:
@@ -437,10 +477,12 @@ def parse_text(text: str, path: Optional[Path] = None) -> PulseLogFile:
 
     if idx >= len(lines):
         raise PulseLogError("log has a header but no column row")
+    expected = COLUMNS_BY_VERSION[version_i]
     columns = tuple(c.strip() for c in lines[idx].split(","))
-    if columns != COLUMNS:
+    if columns != expected:
         raise PulseLogError(
-            f"unexpected column row: {columns!r}\nexpected: {COLUMNS!r}"
+            f"unexpected column row for format v{version_i}: {columns!r}\n"
+            f"expected: {expected!r}"
         )
     idx += 1
 
@@ -466,9 +508,9 @@ def parse_text(text: str, path: Optional[Path] = None) -> PulseLogFile:
     for row_i, row in enumerate(reader):
         if not row or (len(row) == 1 and not row[0].strip()):
             continue
-        if len(row) != len(COLUMNS):
+        if len(row) != len(expected):
             raise PulseLogError(
-                f"row {row_i} has {len(row)} columns, expected {len(COLUMNS)}: {row!r}"
+                f"row {row_i} has {len(row)} columns, expected {len(expected)}: {row!r}"
             )
         try:
             rec = PulseRecord(
@@ -486,6 +528,13 @@ def parse_text(text: str, path: Optional[Path] = None) -> PulseLogFile:
                 val=_opt_int(row[11]),
                 req=_opt_str(row[12]),
                 res=_opt_str(row[13]),
+                # v3 only. A v2 file simply has no such columns, and the defaults stand.
+                ch_us=(
+                    tuple(_opt_int(row[i]) for i in range(14, 18))
+                    if version_i >= 3
+                    else (None, None, None, None)
+                ),
+                zero_us=_opt_int(row[18]) if version_i >= 3 else None,
             )
         except ValueError as exc:
             # Card corruption is exactly what the Integrity machinery exists for, so it must

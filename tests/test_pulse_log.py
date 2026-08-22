@@ -33,7 +33,7 @@ def test_golden_exists():
 
 
 def test_header_provenance(golden):
-    assert golden.format_version == 2
+    assert golden.format_version == 3
     assert golden.sample_rate_hz == 50000
     assert golden.file_index == 7
     assert golden.rtc_valid is True
@@ -461,3 +461,64 @@ def _synthetic_log(rows: list[str], version: int = 2) -> str:
         ",".join(pl.COLUMNS),
     ]
     return "\n".join(head + rows) + "\n"
+
+
+# ===== v3: the raw decode ===================================================
+def test_v3_raw_decode_columns(golden):
+    """Every row carries the raw widths and the session zero the settings were derived from.
+
+    These are the near end of the decode chain. Without them a fault in the measurement can
+    only be reached by inverting the rate ladder through the very calibration under suspicion,
+    which is how the 2026-08-22 supply-offset fault had to be diagnosed.
+    """
+    loc = [r for r in golden.records if r.event == "LOC"]
+    assert loc, "the golden log must contain localization pulses"
+    assert loc[0].ch_us == (1115, 1200, 1010, 1580)
+    assert loc[0].zero_us == 905
+
+
+def test_v3_absent_width_is_none_not_zero(golden):
+    """An empty width column reads as None, never 0.
+
+    0 µs is a value in this column's own units — a zero-length pulse from the receiver — so
+    conflating it with "no receiver" is the same class of bug as reading an absent ``item`` as
+    library item 0, which is a real recorded volley.
+    """
+    # DROP and GAP are the rows built without any RC context — DROP by the ring itself when it
+    # overflows, GAP by loop() on a card failure. Neither knows a width, so both must render the
+    # columns EMPTY.
+    bare = [r for r in golden.records if r.event in ("DROP", "GAP")]
+    assert bare, "the golden log must contain DROP and GAP rows"
+    for rec in bare:
+        assert rec.ch_us == (None, None, None, None), rec
+        assert rec.zero_us is None, rec
+
+
+def test_v2_file_still_reads(tmp_path):
+    """v3 is ADDITIVE, so a v2 log stays readable with the new columns simply absent.
+
+    This is the distinction a version number exists to carry: v1 is refused because it reused
+    two column names for different quantities, while v3 only appends. A stored v2 log from an
+    earlier field session must not become unreadable because the firmware moved on.
+    """
+    text = GOLDEN.read_text()
+    head, _, body = text.partition("#" + ",".join(pl.COLUMNS_BY_VERSION[3]) + "\n")
+    assert body, "golden should carry the v3 column row"
+    v2_cols = ",".join(pl.COLUMNS)
+    lines = []
+    for line in body.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        lines.append(",".join(line.split(",")[: len(pl.COLUMNS)]))
+    # rebuild a minimal v2 file: same header, v2 column row, rows trimmed to 14 fields
+    head = head.replace("#format_version=3", "#format_version=2")
+    v2_text = head + "#" + v2_cols + "\n" + v2_cols + "\n" + "\n".join(lines[1:]) + "\n"
+    out = tmp_path / "PULS0007.CSV"
+    out.write_text(v2_text)
+
+    log = pl.read(out)
+    assert log.format_version == 2
+    assert log.records, "a v2 file must still yield rows"
+    assert all(r.ch_us == (None, None, None, None) for r in log.records)
+    assert all(r.zero_us is None for r in log.records)
+

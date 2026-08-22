@@ -60,11 +60,28 @@
 > critical, but it is the number that would size `CH3_OFF_DEADBAND` if the jitter turns out larger
 > than assumed.
 >
-> **Follow-up worth deciding:** the pulse log records only the *commanded* rung, never the raw
-> decoded width, which is why diagnosing this needed inverting the quantiser through the rate
-> ladder. Logging the four raw widths (and the captured zero) would make a calibration fault a
-> one-glance read. It is a log format change — v3 plus the golden file and the Python reader, per
-> invariant 9 — so it is a deliberate decision, not a drive-by.
+> **Done 2026-08-22: the pulse log is at v3** and carries the four raw decoded widths plus the
+> captured session zero, so a calibration fault is a one-glance read instead of an inversion
+> through the rate ladder. Purely additive, so v2 field logs stay readable. `PLOG_ROW_MAX` moved
+> 128 → 192 with it.
+>
+> **Also new:** `fakefish-session stats` (what the session did, as opposed to
+> `fakefish-pulse-log info`, which reports what the file contains) and `fakefish-session timeline`
+> (a full-page overview figure: session state, pulse raster, commanded-vs-realised rhythm, knobs,
+> and on a v3 log the throttle's travel above its own zero). Derived structure in
+> `src/fakefish/session_stats.py`, figures in `src/fakefish/plot_session.py`.
+>
+> **PULS0037 (2026-08-22, the first log with the session zero) confirms the fix.** Rung 0 — the
+> state meaning "throttle below the dead-band", which never once occurred in 360 s of PULS0024 —
+> now appears, and **zero** localization pulses were emitted at the bottom of the stick (PULS0024
+> had 37). Of 13 `LOCOFF` rows only 1 is a genuine gate release, at rung 0, after which the train
+> stayed off; the other 12 are trials preempting it. The commanded tempo now reaches
+> **0.50 Hz**, the bottom of the ladder, against 0.61 Hz before.
+>
+> **One thing did not fully clear:** the randomness pot bottoms at 0.067 rather than 0 (it was
+> 0.200 before). Either a residual per-channel offset of 30–100 µs, or the pot was not turned
+> fully down — and the two are indistinguishable in a v2 log. The next v3 log settles it directly
+> from `ch5_us` against `zero_us`.
 
 # TODO
 

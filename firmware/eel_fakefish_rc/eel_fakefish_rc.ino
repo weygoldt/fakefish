@@ -114,6 +114,20 @@ static volatile bool     g_log_ok      = false;    // the SD event log is health
 // needs to: what reaches the ISR is the already-corrected knob values and g_rc_zeroed.
 static RcZero g_zero;
 
+// ===== the RAW decode, published for the log (pulse-log v3) ===============
+// loop() decodes; the ISR is the ring's ONLY producer (invariant 9). So the raw widths and the
+// captured zero are published here as volatile words and READ BY THE ISR when it fills a record
+// — the same publish/latch idiom as g_randomness and g_tick_ipi_samp, and the same reason: a
+// record must carry the state at the instant of the event, not at the instant loop() got round
+// to formatting it.
+//
+// These are the NEAR end of the decode chain. Everything else the log carries about the controls
+// is derived from them through a calibration and a quantiser, so without them a fault in the
+// measurement can only be inferred backwards, one rung at a time, through the very constants
+// under suspicion. That is exactly how the 2026-08-22 supply-offset fault had to be found.
+static volatile uint16_t g_ch_us[RC_N_CHANNELS];   // raw width per channel, us (ABSENT_U16 = none yet)
+static volatile uint16_t g_zero_us = PLOG_ABSENT_U16;  // the captured session zero, us
+
 // ===== ISR-owned playback state ===========================================
 enum Source { SRC_IDLE, SRC_LOC, SRC_MARKER, SRC_VOLLEY, SRC_SHAM };
 static volatile Source src = SRC_IDLE;
@@ -182,6 +196,8 @@ static inline void log_fill(PlogRec* r, uint8_t ev) {
   r->master_m = plog_milli(g_volley_amp);
   r->rand_m   = plog_milli(g_randomness);
   r->tick_ipi = g_tick_ipi_samp;
+  for (int i = 0; i < RC_N_CHANNELS; i++) r->ch_us[i] = g_ch_us[i];
+  r->zero_us  = g_zero_us;
 }
 static inline void log_event(uint8_t ev) { PlogRec r; log_fill(&r, ev); plog_push(&g_plog, &r); }
 
@@ -504,6 +520,7 @@ void setup() {
   panel_begin();                                     // 3 panel buttons + the LED (pin 13)
   rc_begin();                                        // 4 RC pins + pin-change interrupts
   rc_zero_reset(&g_zero);                            // no session zero until the throttle supplies one
+  for (int i = 0; i < RC_N_CHANNELS; i++) g_ch_us[i] = PLOG_ABSENT_U16;   // "never seen", not 0 us
 
   // Build the coded marker: a fixed-IPI EOD burst (its pulse count is set per fire).
   g_marker_ipi[0] = 0;
@@ -678,6 +695,15 @@ void loop() {
       const bool armed = rc_zero_step(&g_zero, thr_us) != 0;
       const int32_t zoff = rc_zero_offset(&g_zero, RC_CAL_THROTTLE_MIN);
       g_rc_zeroed = armed;
+
+      // Publish the RAW decode for the log (v3). Clamped into the u16 column, with the absent
+      // sentinel reserved: the glitch filter already bounds real widths to 400..3000 us, so this
+      // only ever fires on a channel that has never been seen.
+      for (int i = 0; i < RC_N_CHANNELS; i++) {
+        uint32_t w = rc_get_width_us((uint8_t)i);
+        g_ch_us[i] = (w == 0 || w >= PLOG_ABSENT_U16) ? PLOG_ABSENT_U16 : (uint16_t)w;
+      }
+      g_zero_us = g_zero.zero_us ? (uint16_t)g_zero.zero_us : PLOG_ABSENT_U16;
 
       float raw_thr  = rc_unit_off(thr_us,                          RC_CAL[RC_IDX_THROTTLE], zoff);
       float raw_trig = rc_unit_off(rc_get_width_us(RC_IDX_TRIGGER), RC_CAL[RC_IDX_TRIGGER],  zoff);

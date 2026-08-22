@@ -55,7 +55,26 @@
 // the MEDIAN one, and those differ by about a factor of two on a heavy-tailed distribution.
 // Reusing either name would have left every v1-era analysis silently misreading a v2 file —
 // which is exactly what a format version is for.
-#define PULSELOG_FORMAT_VERSION 2
+//
+// v3 (2026-08-22) ADDS five columns and renames nothing: `ch3_us`..`ch6_us`, the RAW decoded RC
+// pulse width per channel, and `zero_us`, the session zero the throttle captured (rc_control.h ->
+// RcZero). Purely additive, so unlike v1 a v2 file stays readable and the Python reader accepts
+// BOTH — every v2 column means in v3 exactly what it meant in v2.
+//
+// WHY THIS EXISTS. The log recorded only the far end of the decode chain — width -> unit ->
+// quantised rung -> tick_ipi — so a fault in the near end could only be reached by inverting the
+// quantiser, at a resolution of one rung (~48 us) and through calibration constants that were
+// themselves the thing under suspicion. That is how the 2026-08-22 supply-offset fault had to be
+// diagnosed: the strongest available statement was "rung 0 never occurs in 360 s", from which a
+// width bound followed. With the raw width in the file it is one glance instead. `zero_us` is the
+// new quantity that did not exist before RcZero, and it is the single most diagnostic number the
+// device holds: it says outright what the opto path was doing at that power-on.
+//
+// COST, paid deliberately. Five uint16 per record: the ring grows from ~16 kB to ~24 kB at
+// PULSELOG_RING_SIZE 512, and rows get ~20 % longer (PULS0037 would go from ~120 kB to ~145 kB).
+// Both are affordable, and they buy the format's own stated property — that every row is
+// interpretable on its own, which is what makes a power-cut file readable up to the tear.
+#define PULSELOG_FORMAT_VERSION 3
 
 // ===== Event types ====================================================================
 // One row per event. PULSE rows (LOC / MARKER / VOLLEY) are one per emitted pulse, ALWAYS —
@@ -126,6 +145,18 @@ typedef struct {
   uint16_t master_m;  // master (volley) amplitude setting x1000 (ABSENT_U16 = n/a)
   uint16_t rand_m;    // localization RANDOMNESS knob x1000 (ABSENT_U16 = n/a). 0 = a
                       // metronome, 1000 = the measured eel. Not a jitter amount.
+  // ----- v3: the NEAR end of the decode chain ----------------------------------------
+  // The four RAW measured RC pulse widths in microseconds, and the session zero. Everything
+  // else on this row is a DERIVED value — a width turned into a unit through a calibration,
+  // quantised onto a ladder. These are the measurement itself, before any of that, so a
+  // calibration fault reads off the file instead of being inferred back through the quantiser.
+  //
+  // uint16 is ample: the decoder's own glitch filter accepts only 400..3000 us, so no valid
+  // width comes near the ABSENT_U16 sentinel. Index order is the surface's channel order
+  // (CH3, CH4, CH5, CH6 on the RC unit); a device with no RC input leaves them absent, which is
+  // why they are ABSENT_U16 rather than 0 — 0 is a decodable width, "no receiver" is not.
+  uint16_t ch_us[4];  // raw decoded width per channel, us (ABSENT_U16 = n/a)
+  uint16_t zero_us;   // the captured session zero, us (ABSENT_U16 = not captured / no RC)
   int8_t   item;      // library item index (ABSENT_ITEM = n/a -> EMPTY column)
   int8_t   pol;       // playback polarity +1 / -1 (0 = n/a)
   uint8_t  ev;        // PlogEvent
@@ -144,6 +175,8 @@ static inline void plog_rec_init(PlogRec* r, uint8_t ev, uint64_t tick) {
   r->amp_m    = PLOG_ABSENT_U16;
   r->master_m = PLOG_ABSENT_U16;
   r->rand_m   = PLOG_ABSENT_U16;
+  for (int i = 0; i < 4; i++) r->ch_us[i] = PLOG_ABSENT_U16;
+  r->zero_us  = PLOG_ABSENT_U16;
   r->item     = PLOG_ABSENT_ITEM;
   r->pol      = 0;
   r->ev       = ev;
@@ -279,8 +312,13 @@ static inline size_t plog_buf_finish(PlogBuf* b) {
 
 // ===== CSV rendering (pure) ===========================================================
 // The column order is the file's contract; see firmware/README.md and the Python reader.
-#define PLOG_COLUMNS "seq,tick,event,item,pulse,trial,pol,amp_m,master_m,rand_m,tick_ipi,val,req,res"
-#define PLOG_ROW_MAX 128u   // longest possible row incl. '\n' and NUL, with headroom
+#define PLOG_COLUMNS "seq,tick,event,item,pulse,trial,pol,amp_m,master_m,rand_m,tick_ipi,val,req,res," \
+                     "ch3_us,ch4_us,ch5_us,ch6_us,zero_us"
+// Longest possible row incl. '\n' and NUL, with headroom. 128 was already within ~25 bytes of the
+// worst case (a 20-digit uint64 tick plus every optional column populated); the five v3 columns
+// would have crossed it, and plog_write_row DROPS a row that does not fit rather than writing a
+// half-row — so this had to move with the schema.
+#define PLOG_ROW_MAX 192u
 
 static inline const char* plog_event_name(uint8_t ev) {
   switch (ev) {
@@ -321,6 +359,13 @@ static inline size_t plog_format_row(const PlogRec* r, uint32_t seq, char* out, 
   plog_put_ch(&b, ',');  if (r->val      != PLOG_ABSENT_U32) plog_put_u64(&b, r->val);
   plog_put_ch(&b, ',');  if (r->req != PLOG_KIND_NONE)       plog_put_ch(&b, (char)r->req);
   plog_put_ch(&b, ',');  if (r->res != PLOG_KIND_NONE)       plog_put_ch(&b, (char)r->res);
+  // v3: the raw widths and the session zero. Absent -> EMPTY, never 0: a width of 0 us is a
+  // decodable value in this column's own units, so a 0 default would read as "the receiver sent
+  // a zero-length pulse" rather than "this device has no receiver".
+  for (int i = 0; i < 4; i++) {
+    plog_put_ch(&b, ',');  if (r->ch_us[i] != PLOG_ABSENT_U16) plog_put_u64(&b, r->ch_us[i]);
+  }
+  plog_put_ch(&b, ',');  if (r->zero_us != PLOG_ABSENT_U16)  plog_put_u64(&b, r->zero_us);
   plog_put_ch(&b, '\n');
   return plog_buf_finish(&b);
 }

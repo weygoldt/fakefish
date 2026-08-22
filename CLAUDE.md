@@ -226,7 +226,17 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      recorded volley, so a `0` default would misattribute every localization and marker pulse;
      and `-1` is no safer as a *written* value, because `STIM_ITEMS[-1]` does not raise in
      Python, it quietly returns the last item. `-1` is the in-memory sentinel only.
-   - **The format is at v2, and v1 is refused rather than coerced.** v2 (2026-08-21) renamed
+   - **The format is at v3; v2 is still read, v1 is refused.** v3 (2026-08-22) APPENDS five
+     columns — `ch3_us`..`ch6_us`, the raw decoded RC pulse width per channel, and `zero_us`,
+     the session zero the throttle captured — and renames nothing, so a v2 file stays fully
+     readable and the new fields simply read as `None`. That is the whole distinction a version
+     number carries: an added column is compatible, a repurposed one is not. It exists because
+     the log recorded only the FAR end of the decode chain (width -> unit -> rung -> `tick_ipi`),
+     so the 2026-08-22 supply-offset fault could only be reached by inverting the quantiser at
+     ~48 us resolution, through the very calibration under suspicion. `PLOG_ROW_MAX` moved
+     128 -> 192 with it: the old value was within ~25 bytes of the worst-case row, and
+     `plog_write_row` DROPS a row that does not fit rather than writing half of one.
+   - **v1 is refused rather than coerced.** v2 (2026-08-21) renamed
      two localization columns when the resting rhythm became a fitted model: `cv_m` → `rand_m`
      and `rate_ipi` → `tick_ipi`. Both hold a genuinely *different* quantity — a coefficient of
      variation became the model's randomness knob, and a MEAN interval became a MEDIAN one, which
@@ -378,7 +388,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   - regeneration (**needs the source recordings + `--group export`**): `fakefish-export`,
     and `fakefish-synth-volleys analyze` (QC population only — `synthesize` and `compare` run
     off the vendored model and the committed caches, no recordings)
-  - reading a device's SD log (no dataset, no library): `fakefish-pulse-log`
+  - reading a device's SD log (no dataset, no library): `fakefish-pulse-log` (`info` = what the
+    FILE contains and whether it is intact; `pulses` = the rows), and `fakefish-session`
+    (`stats` = what the SESSION did, `timeline` = the overview figure). The derived structure
+    lives in `src/fakefish/session_stats.py`, which stays matplotlib-free so it is importable
+    and testable on its own; `src/fakefish/plot_session.py` owns the figure and the CLI.
   - against the committed library (no dataset): `fakefish-render`, `fakefish-build-card`,
     `fakefish-simulate`, `fakefish-gallery-volley`, `fakefish-gallery-localization`,
     `fakefish-gallery-loc-volley`, `fakefish-anatomy`

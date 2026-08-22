@@ -268,7 +268,9 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   with no transmitter, the three panel buttons drive the same state machine: pin 9 toggles
   localization, pin 10 fires a volley, pin 11 fires a sham. **Put a (blank) microSD card in
   before you start**: it logs every pulse to `/LOGS/PULSnnnn.CSV` and will not stimulate
-  without one. Afterwards, read the card with `uv run fakefish-pulse-log info /path/PULS0000.CSV`.
+  without one. Afterwards: `uv run fakefish-pulse-log info <file>` for the file's provenance
+  and integrity, `uv run fakefish-session stats <file>` for what the session actually did, and
+  `uv run fakefish-session timeline <file>` for a one-page figure of when everything happened.
 - **Reading the RC unit's LED**, which is the whole state of the device from shore and is sized so
   a 30 fps camera resolves every blink: *steady on with a dark notch each second* = logging has
   failed and **output is suppressed**; *two quick blinks a second* = no RC link; *three quick blinks
