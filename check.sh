@@ -134,8 +134,9 @@ run_selftest "eel_core     loc_rhythm_selftest"     locr \
     firmware/eel_core/host_test/loc_rhythm_selftest.cpp -lm
 run_selftest "eel_core     pulse_log_selftest"     plog \
     firmware/eel_core/host_test/pulse_log_selftest.cpp
-# The L1 duty mapping + the driver dead-zone pedestal. Needs eel_stimuli.cpp because it sweeps the
-# REAL EOD_HV at every level the devices use, asserting no sample ever lands in the dead zone.
+# The L1 duty mapping. Needs eel_stimuli.cpp because it sweeps the REAL EOD_HV at every level the
+# devices use, asserting that a zero sample brakes BOTH boards to duty 0 — the pedestal regression
+# guard (config.h -> "The driver dead zone").
 run_selftest "eel_core     out_hal_selftest"       outhal \
     firmware/eel_core/host_test/out_hal_selftest.cpp firmware/eel_core/eel_stimuli.cpp
 

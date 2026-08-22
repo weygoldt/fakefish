@@ -32,7 +32,7 @@
 // must be re-scoped and set with MASTER_GAIN below before it goes near a fish.
 #include <IntervalTimer.h>
 #include "src/eel_core/config.h"     // L1: output stage, sample clock, LED pin
-#include "src/eel_core/out_hal.h"    // L1: out_begin/out_write/out_arm/out_disarm (+ AMP_DEBUG)
+#include "src/eel_core/out_hal.h"    // L1: out_begin/out_write/out_silence (+ AMP_DEBUG)
 #include "src/eel_core/sd_player.h"  // L2: SD WAV streaming — parse, ring buffer, random pick
 #include "button_control.h"          // L3: 6 program buttons (pins 5-10) + indicator LED
 
@@ -74,7 +74,7 @@ static void onSampleTick() {
     out_write(sdp_apply(s, MASTER_GAIN, sdplayer.polarity));
   } else if (sdp_finished(&sdplayer)) {
     sampleClock.end();
-    out_disarm();    // playback over: brake BOTH bridges to GND, clear the shaper, drop the pedestal
+    out_silence();   // playback over: brake BOTH bridges to GND and clear the shaper
     digitalWriteFast(LED_PIN, LOW);
     playing = false;
     return;
@@ -88,7 +88,7 @@ static void onSampleTick() {
 // directory has no playable WAV. One polarity per playback (randomised for anti-pitting).
 static void start_playback(int b) {
   const int8_t pol = random(2) ? 1 : -1;
-  out_arm();       // bridges live at the pedestal (out of the driver dead zone) + shaper cleared
+  out_silence();   // clean seam: both bridges braked to GND, shaper cleared
   if (!sdp_start(&sdplayer, BTN_DIRS[b], (int)random(1 << 30), pol, SAMPLE_RATE_HZ)) {
     // A failed press is usually a spare/empty button, but it can also mean the card was
     // pulled while idle. Re-probe: sdp_begin() re-runs SD.begin(), which flips card_ok false
