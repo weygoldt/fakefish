@@ -13,8 +13,12 @@ figure both need:
 * :func:`summarise` — the headline numbers, including the two the 2026-08-22
   supply-offset fault made worth checking every session.
 
-Nothing here plots. The figures live in :mod:`fakefish.plot_session`, so this module
-stays importable without matplotlib and testable without a display.
+Nothing here plots — but not because matplotlib is optional. It is a hard dependency of
+the package, and the deck figure system in :mod:`fakefish.viz` is the standard every
+figure goes through. The split is the repo's existing shape: :mod:`fakefish.pulse_log`
+reads, ``plot_*`` modules draw, and the layer in between is the one an analysis wants to
+import on its own. Concretely, ``fakefish-session stats`` needs these numbers and no
+figure, and these functions are the ones worth asserting on in tests.
 
 **Why the run classification is the load-bearing part.** A ``LOCOFF`` row means the
 localization train stopped, and it is written for *two completely different reasons*:
