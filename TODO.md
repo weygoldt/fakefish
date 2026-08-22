@@ -83,28 +83,26 @@ toolchain prints is therefore ~11× low: `fakefish-build-card`'s mV CLI, and the
 Fractions of full scale, the level *ratios*, and every WAV on the card are unaffected — this is
 purely the human-readable mV annotation.
 
-## 3b. Set `OUT_PEDESTAL_DUTY` from a measurement, not from the datasheet bound
+## 3b. DONE (by removal) — the dead-zone pedestal is gone
 
-The driver dead zone is **implemented and documented** (`firmware/README.md` → "The driver dead
-zone"): both bridges now idle at `OUT_PEDESTAL_DUTY` while armed, so no sample is ever commanded
-into the DRV8871's minimum-pulse-width gap. This removed a level-dependent distortion worth
-3-32 % RMS shape error (and outright silence below ~1/16 amplitude) that was first noticed **by
-ear** — the pulses changed character as the RC amplitude control came down.
+Resolved 2026-08-22. The pedestal was reverted rather than tuned: on the bench (Teensy 3.5,
+pins 22/23, 36 V, the built 2x 220R/220nF filter) holding both bridges at `OUT_PEDESTAL_DUTY = 21`
+ran the output-filter wiring hot and turned the water into a cacophony, and with it at 0 the
+amplitude pot works to the BOTTOM of its travel without cutting out — the very failure the
+pedestal was added to fix. So the dead-zone shutoff does not reproduce on this hardware: these
+DRV8871s sit near the 400 ns TYPICAL detection figure, not the 800 ns guarantee the pedestal was
+sized against. Full record in `firmware/eel_core/config.h` -> "The driver dead zone".
 
-The shipped value **21** is the datasheet-*guaranteed* 800 ns bound, chosen to be safe without
-measuring. A typical part is fine at **11**, halving both costs (headroom 8.2 % → 4.3 %, armed
-idle dissipation ~0.45 W → ~0.24 W per channel).
+Do NOT reopen this as "pick a smaller pedestal" — see that note for why a smaller one is closer
+to the detection knee, not further from it.
 
-- [ ] **Measure the real threshold** with the `AMP_DEBUG` sweep walking the bottom of the range
-      (`{ 0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 21, 24, 32 }`). Find the lowest code that
-      produces output *and* the lowest code from which output is linear; set `OUT_PEDESTAL_DUTY` a
-      couple above the second. Procedure in `firmware/README.md`.
-- [ ] While there, read the **duty→volts intercept**: `t_DEAD = 220 ns` is 2.2 % of the carrier
+Two bench readings are still worth taking if the question ever comes back:
+
+- [ ] **The real threshold**, with the `AMP_DEBUG` sweep walking the bottom of the range
+      (`{ 0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 16, 18, 21, 24, 32 }`): the lowest code that produces
+      output, and the lowest code from which output is linear. Procedure in `firmware/README.md`.
+- [ ] While there, read the **duty->volts intercept**: `t_DEAD = 220 ns` is 2.2 % of the carrier
       period, worth up to 5.6 duty codes of systematic offset, and is not modelled anywhere.
-- [ ] **Confirm disarmed idle is still hard 0 V** single-ended (it commands a 39 ns pulse the
-      driver should ignore) and that battery drain with the lever down is unchanged.
-- [ ] **Confirm by ear**: the pulse should keep its character all the way down the amplitude range
-      instead of thinning out and vanishing.
 
 ## 4. Verify the filter on the bench, not on paper
 

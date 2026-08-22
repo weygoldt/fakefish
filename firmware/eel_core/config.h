@@ -126,58 +126,58 @@ static constexpr float PWM_TIMER_CLOCK_HZ = 150000000.0f;   // host g++ (self-te
 static_assert(PWM_CARRIER_HZ * (float)(1u << PWM_BITS) <= PWM_TIMER_CLOCK_HZ,
               "PWM_CARRIER_HZ too high for full PWM_BITS duty resolution on this part's PWM clock");
 
-// ===== Driver dead-zone pedestal ===========================================
-// WHY THIS EXISTS. `analogWrite()` maps duty q to an IN2-LOW (= DRIVE) time of (q+1)/256 of the
-// carrier period. At PWM_CARRIER_HZ = 100 kHz that period is 10 us, so duty 0 commands a 39 ns
-// drive pulse, duty 4 commands 195 ns, duty 11 commands 469 ns. The DRV8871 needs a MINIMUM INPUT
-// PULSE WIDTH to respond at all — datasheet SLVSCY9B, Recommended Operating Conditions footnote 1:
+// ===== The driver dead zone — measured, and NOT compensated ================
+// THE PHYSICS IS REAL, THE FIX WAS WORSE THAN THE PROBLEM. Keep the first half, do not
+// reintroduce the second.
+//
+// `analogWrite()` maps duty q to an IN2-LOW (= DRIVE) time of (q+1)/256 of the carrier period.
+// At PWM_CARRIER_HZ = 100 kHz that period is 10 us, so duty 0 commands a 39 ns drive pulse,
+// duty 4 commands 195 ns, duty 11 commands 469 ns. The DRV8871 needs a MINIMUM INPUT PULSE
+// WIDTH to respond at all — datasheet SLVSCY9B, Recommended Operating Conditions footnote 1:
 // "The voltages applied to the inputs should have at least 800 ns of pulse width to ensure
-// detection. Typical devices require at least 400 ns." Duty codes below ~11 (typical part) or
-// ~21 (guaranteed) are therefore UNRELIABLE — the bridge may ignore them outright.
+// detection. Typical devices require at least 400 ns." The bottom duty codes are therefore in a
+// region the datasheet does not specify, and the flanks and negative pre-potential of every EOD
+// sit there. That much is true and worth knowing.
 //
-// The consequence is not a small linearity error, it is a LEVEL-DEPENDENT one. The flanks and the
-// negative pre-potential of every EOD sit at low duty, so as the amplitude control comes down a
-// growing fraction of each pulse falls under the threshold and is silently deleted: the pulse is
-// hollowed out from the bottom while its PEAK still arrives at the right height. Simulated
-// delivered-vs-ideal RMS shape error with the bridge dropping sub-threshold pulses (q_min = 21):
+// WHAT WAS TRIED (2026-08-21, commit 3af9f33, REVERTED 2026-08-22). Both bridges were held at
+// OUT_PEDESTAL_DUTY = 21 — the datasheet-GUARANTEED 800 ns bound — whenever the device was armed
+// to emit, with the signal scaled into the codes above it. The offset was identical on both
+// electrodes, so on paper it was pure common mode and cancelled across the dipole.
 //
-//     amp 0.90 -> 3.3 %   0.45 -> 6.9 %   0.25 -> 12.9 %   0.125 -> 32 %   0.0625 -> SILENT
+// WHAT THE BENCH SAID (Teensy 3.5, pins 22/23, 36 V, the built 2x 220R/220nF filter). One
+// variable, both directions, decisive:
 //
-// That is larger than everything the output filter does to the pulse, and unlike the filter it
-// VARIES WITH THE AMPLITUDE SETTING — which breaks the assumption that the marker / localization /
-// volley level RATIOS survive the chain. It is audible: the pulse changes character as the pot
-// comes down, then stops entirely, which is how it was first noticed.
+//     pedestal 21 -> output-filter wiring runs HOT, and the signal in water is a cacophony
+//     pedestal  0 -> clean pulses, no noise, and the amplitude pot works to the BOTTOM of its
+//                    travel without cutting out — the very failure the pedestal was added to fix
 //
-// THE FIX. Hold BOTH boards at a small non-zero duty whenever the device is armed to emit, and
-// ride the signal on top of it. The offset is IDENTICAL on both electrodes, so it is pure common
-// mode and cancels in the water (the field is driven by V_A - V_B); no channel is ever commanded
-// below OUT_PEDESTAL_DUTY, so nothing enters the dead zone at any amplitude. Same simulation, with
-// the pedestal: 0.90 -> 0.04 %, 0.45 -> 0.07 %, 0.25 -> 0.11 %, 0.125 -> 0.28 %, 0.0625 -> 0.51 %.
+// So the dead-zone shutoff does not reproduce on this hardware at all: these DRV8871s sit near
+// the 400 ns TYPICAL figure, not the 800 ns guarantee. The pedestal was justified against
+// worst-case silicon and an ear observation made on a DIFFERENT output path (Teensy 4.1, IN2 on
+// pins 0/1 = FlexPWM1 X-channel). It was never verified on the path it shipped to.
 //
-// WHAT IT COSTS.
-//   1. HEADROOM. The signal is scaled into the OUT_SIGNAL_DUTY_MAX codes left above the pedestal,
-//      so full scale drops by OUT_PEDESTAL_DUTY/PWM_DUTY_MAX — 8.2 % (0.74 dB) at 21. That is less
-//      than one click of the RC amplitude control (0.60 dB at mid-scale).
-//   2. POWER. While armed the bridges switch continuously, so the first output-filter resistor
-//      dissipates V_rail^2 * d(1-d) / R1 ~ 0.45 W per channel even BETWEEN pulses. That is why the
-//      pedestal is ARMED rather than permanent — see out_arm()/out_disarm() in out_hal.h. With
-//      nothing playing and localization off the firmware disarms, commanding duty 0 on both boards
-//      = hard brake = zero dissipation and zero battery drain, exactly as before this feature.
-//   3. IDLE IS NO LONGER HARD 0 V SINGLE-ENDED *WHILE ARMED*. It is +OUT_PEDESTAL_DUTY/PWM_DUTY_MAX
-//      of the rail, common mode on both electrodes, differentially zero. The star ground is not in
-//      the water, so that pedestal has no return path through the water. Disarmed idle is still a
-//      hard brake. Do not "simplify" out_silence() back to an unconditional brake — that would put
-//      a common-mode step at every zero-valued sample inside a playback.
+// WHY IT WAS SO DESTRUCTIVE. Idle stopped being a hard brake. Both bridges switched a 36 V
+// square continuously — through every silence of a localization train, which is >98 % of it —
+// putting ~0.47 W per channel into the first filter resistor where there had been none, and
+// leaving both electrodes at ~3.1 V DC plus carrier residue instead of at 0 V. The filter is
+// series-R / shunt-C, so it passes that DC untouched, and firmware/README.md's own recording
+// model is SINGLE-ENDED: "common mode" is not "silent" for anything listening in that water.
 //
-// TUNING THIS NUMBER IS A BENCH JOB AND IT HAS NOT BEEN DONE. 21 is the datasheet-GUARANTEED
-// 800 ns bound, chosen because it is safe on any device without measuring. A typical part would be
-// fine at 11, which would halve both the headroom and the power cost. Setting it to 0 disables the
-// feature entirely and restores the previous behaviour exactly. See firmware/README.md ->
-// "The driver dead zone" for the AMP_DEBUG sweep that measures the real threshold on a given board.
-#define OUT_PEDESTAL_DUTY     21
-#define OUT_SIGNAL_DUTY_MAX   ((int)PWM_DUTY_MAX - OUT_PEDESTAL_DUTY)   // 234 — codes left for signal
-static_assert(OUT_PEDESTAL_DUTY >= 0 && OUT_PEDESTAL_DUTY < (int)PWM_DUTY_MAX / 2,
-              "OUT_PEDESTAL_DUTY must leave most of the duty range for signal (0 disables it)");
+// DO NOT REINTRODUCE IT, AND DO NOT TRY A SMALLER ONE. The bench A/B proves the pedestal caused
+// both symptoms; it does not prove which path carried the heat. Arithmetic says the first series
+// resistor must dissipate 24-1100x more than the ground return at EVERY value of R1, so either
+// R1 was the hot part, or current was bypassing R1 through the bridge — cross-conduction at the
+// 867 ns detection knee, which is unspecified silicon behaviour rather than a spec violation.
+// A smaller pedestal moves CLOSER to that knee, not further from it. Any future attempt has to
+// solve the common-mode problem first (the electrodes must return to 0 V between pulses), not
+// merely pick a gentler number.
+//
+// `OUT_PEDESTAL_DUTY`, `OUT_SIGNAL_DUTY_MAX`, `out_scale_to_headroom()`, `out_duty_for()`,
+// `out_arm()`, `out_disarm()`, `out_armed()`, `out_idle_duty()` and `shape()`'s `qmax` parameter
+// are **gone** — do not reintroduce those names. Idle is once again an unconditional brake to
+// GND on both bridges (out_hal.h `out_silence()`), which is the state the hardware is known good
+// in. AMP_DEBUG below is retained: it is the right way to measure a given board's real threshold,
+// and it is independent of any compensation scheme.
 
 // ===== Indicator LED =======================================================
 // Shared by every surface (the Teensy 4.1 built-in LED, plus an external one on the same pin).
