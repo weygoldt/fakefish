@@ -398,7 +398,15 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     `fakefish-gallery-loc-volley`, `fakefish-anatomy`
 - **Figures** are built with the vendored deck figure system in `src/fakefish/viz/`
   (`plotstyle` page geometry + colours, `figsave.save_figure`). Never pass `figsize=` or a
-  non-300 `dpi=` (`FIGURE_DPI == PUBLICATION_DPI == DIAGNOSTIC_DPI == 300`). The deck font is
+  non-300 `dpi=` (`FIGURE_DPI == PUBLICATION_DPI == DIAGNOSTIC_DPI == 300`);
+  `tests/test_figure_convention.py` fails on either, naming the offending `file:line`.
+  **`docs/guidelines/figure_guidelines.md` is the standard the figures are held to** — it and
+  the three `viz/` modules and that test are all byte-level copies from `eeltracker`, where the
+  system was written; change them upstream and re-drop rather than editing in place. The parts
+  that bite hardest in review: label directly on the plot instead of adding a legend, encode the
+  most important comparison as position, don't encode one variable twice, and drop every pixel
+  that is not data (this repo's own session timeline had to be rebuilt once because it coloured
+  a *span* by how it *ended*, which paints a property of one edge across the whole width). The deck font is
   **Inter**, with `Noto Sans` / `DejaVu Sans` fallbacks — if Inter is not installed figures
   still render (in the fallback font); matplotlib needs a writable font cache (`MPLCONFIGDIR`).
 - **Logging** via `from fakefish.viz.loggers import get_logger, configure_logging`

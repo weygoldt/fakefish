@@ -29,6 +29,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
 import typer
 
@@ -44,188 +45,220 @@ app = typer.Typer(
     help="Overview figures for the RC device's per-pulse SD session logs.",
 )
 
-#: Pulse kinds, in the raster's row order — quietest at the top, loudest at the bottom.
+#: Pulse kinds in the raster, bottom row first. The localization train is the dense,
+#: continuous thing a session is *made of*, so it sits at the base; the trial pulses
+#: that interrupt it stack above.
 _PULSE_ROWS = (
     ("LOC", "localization", CATEGORICAL[0]),
     ("MARKER", "marker", CATEGORICAL[4]),
     ("VOLLEY", "volley", CATEGORICAL[1]),
 )
 
-#: How a localization run ended -> (colour, label).
-_RUN_STYLE = {
-    ss.ENDED_BY_GATE: (CATEGORICAL[2], "ended by throttle"),
-    ss.ENDED_BY_TRIAL: (CATEGORICAL[3], "ended by trial"),
-    ss.ENDED_BY_EOF: (CATEGORICAL[5], "ran to end of file"),
-}
+#: The one recessive fill for "localization was enabled". Deliberately ONE colour.
+#: Colouring the band by how its run *ended* painted a property of the right-hand edge
+#: across the whole width, which is what made this panel unreadable. How a run ended is
+#: an EVENT, so it is marked at the boundary instead — and only the rare, meaningful
+#: case is marked at all (see _panel_state).
+_BAND = "#c9dbe6"
+
+
+def _label_at(ax, x, y, text, colour, *, va="center", ha="left"):
+    """Direct label, next to the thing it names.
+
+    Legends are friction: the eye leaves the data, finds the key, carries a colour back
+    and re-finds the trace, losing the comparison each time. With at most three traces
+    per panel there is always room to say it in place.
+    """
+    ax.annotate(
+        text,
+        xy=(x, y),
+        xytext=(2, 0),
+        textcoords="offset points",
+        color=colour,
+        fontsize=7,
+        va=va,
+        ha=ha,
+        annotation_clip=False,
+    )
 
 
 def _panel_state(ax, log_file, runs, trial_list) -> None:
-    """Localization runs as bands, trials as stems above them."""
-    seen: set[str] = set()
+    """What the operator did: localization on/off, and each trial's outcome.
+
+    Three labelled rows, so nothing has to be decoded from a colour. Trials get one row
+    per outcome rather than a letter per trial — twelve letters across 260 s collide,
+    and a row you can scan carries the same information without any of them.
+    """
+    y_loc, y_sham, y_volley = 0.0, 1.0, 2.0
+
     for run in runs:
-        colour, label = _RUN_STYLE.get(run.ended_by, (CATEGORICAL[5], run.ended_by))
-        ax.axvspan(
-            run.start_s,
-            run.end_s,
-            ymin=0.0,
-            ymax=0.55,
-            color=colour,
-            alpha=0.55,
-            linewidth=0,
-            label=label if label not in seen else None,
+        ax.add_patch(
+            plt.Rectangle(
+                (run.start_s, y_loc - 0.3),
+                run.duration_s,
+                0.6,
+                facecolor=_BAND,
+                edgecolor="none",
+                zorder=1,
+            )
         )
-        seen.add(label)
 
-    # Trials cluster — several within a few seconds is normal — so the letters are
-    # staggered across two rows rather than overprinting each other. Alternating blindly
-    # would look tidier and lie about spacing; this only lifts a label when its neighbour
-    # is close enough to collide.
-    span = max((tr.start_s for tr in trial_list), default=1.0) or 1.0
-    prev_s = -np.inf
-    high = False
+    # THE ONLY RUN-END WORTH MARKING. A trial preempting the train is the protocol doing
+    # its job and happens on every throw; the operator releasing the throttle is the
+    # thing you actually want to find, and on a healthy log there are very few.
+    gate_ends = [r.end_s for r in runs if r.ended_by == ss.ENDED_BY_GATE]
+    for i, x in enumerate(gate_ends):
+        ax.plot(
+            [x], [y_loc], marker="|", ms=11, mew=1.8,
+            color=CATEGORICAL[1], markeredgecolor=CATEGORICAL[1], zorder=3,
+        )
+        if i == 0:
+            # Right-aligned, above the band: to the right of the last release lies the
+            # link-loss rule and the figure edge.
+            _label_at(
+                ax, x, y_loc + 0.45, "throttle released ", CATEGORICAL[1],
+                ha="right", va="bottom",
+            )
+
     for tr in trial_list:
-        volley = tr.resolved == "V"
-        colour = CATEGORICAL[1] if volley else CATEGORICAL[4]
-        high = (tr.start_s - prev_s) < 0.02 * span and not high
-        prev_s = tr.start_s
-        top = 0.98 if not high else 1.10
-        ax.vlines(tr.start_s, 0.62, top, color=colour, linewidth=1.2)
-        ax.text(
-            tr.start_s,
-            top + 0.02,
-            "V" if volley else "S",
-            ha="center",
-            va="bottom",
-            fontsize=6,
-            color=colour,
+        y = y_volley if tr.resolved == "V" else y_sham
+        # Indigo, not the palette's light green: a sham mark is a single 8 pt tick and
+        # the pale end of the cycle disappears against white at that size.
+        colour = CATEGORICAL[1] if tr.resolved == "V" else CATEGORICAL[5]
+        ax.plot(
+            [tr.start_s], [y], marker="|", ms=8, mew=1.5,
+            color=colour, markeredgecolor=colour, zorder=3,
         )
 
-    # A dropped RC link is the one thing that can stop the session without the operator.
     for rec in log_file.events("LINK"):
         if rec.tick is not None and rec.val == 0:
-            ax.axvline(rec.tick / log_file.sample_rate_hz, color="0.35", ls=":", lw=0.9)
+            ax.axvline(rec.tick / log_file.sample_rate_hz, color="0.55", ls=":", lw=0.8)
 
-    ax.set_ylim(0, 1.30)
-    ax.set_yticks([])
-    ax.set_ylabel("session", rotation=0, ha="right", va="center")
-    if seen:
-        ax.legend(loc="lower left", ncols=3, frameon=False, fontsize=6,
-                  bbox_to_anchor=(0.0, -0.04))
+    ax.set_yticks([y_loc, y_sham, y_volley])
+    ax.set_yticklabels(["localization on", "sham trial", "volley trial"])
+    ax.set_ylim(-0.95, 2.5)
+    ax.tick_params(axis="y", length=0)
 
 
 def _panel_raster(ax, log_file) -> None:
-    """One tick per emitted pulse, one row per kind."""
+    """Every pulse that entered the water, by kind. The figure's subject."""
     rate = float(log_file.sample_rate_hz)
     for row, (kind, label, colour) in enumerate(_PULSE_ROWS):
         ticks = [r.tick for r in log_file.pulses(kind) if r.tick is not None]
         if not ticks:
             continue
         t = np.array(ticks, dtype=float) / rate
-        ax.vlines(t, row + 0.12, row + 0.88, color=colour, linewidth=0.35, alpha=0.85)
-    ax.set_ylim(-0.15, len(_PULSE_ROWS) - 0.05)
+        ax.vlines(t, row + 0.12, row + 0.88, color=colour, linewidth=0.35, alpha=0.9)
+    ax.set_ylim(-0.1, len(_PULSE_ROWS))
     ax.set_yticks([i + 0.5 for i in range(len(_PULSE_ROWS))])
-    ax.set_yticklabels([label for _, label, _ in _PULSE_ROWS], fontsize=7)
-    ax.set_ylabel("pulses", rotation=0, ha="right", va="center")
+    ax.set_yticklabels([label for _, label, _ in _PULSE_ROWS])
+    ax.tick_params(axis="y", length=0)
 
 
 def _panel_rhythm(ax, log_file, track) -> None:
-    """Realised instantaneous rate against the commanded tick tempo."""
+    """Realised rate against what was asked for.
+
+    They are not meant to coincide, and that is the point: the fitted rhythm is
+    heavy-tailed, so the commanded MEDIAN sits above most of the realised scatter. Dots
+    hugging the line means a session run at randomness 0 — a metronome, not a fish.
+    """
     t, ipi = ss.loc_intervals(log_file)
     if ipi.size:
         ax.plot(
-            t,
-            1.0 / ipi,
-            ".",
-            ms=1.6,
-            color=CATEGORICAL[0],
-            alpha=0.55,
-            label="realised 1/IPI",
+            t, 1.0 / ipi, ".", ms=1.8, alpha=0.45, zorder=2,
+            color=CATEGORICAL[0], markeredgecolor="none", markerfacecolor=CATEGORICAL[0],
         )
+        _label_at(ax, t[-1], float(np.median(1.0 / ipi[-50:])), " realised", CATEGORICAL[0])
     finite = np.isfinite(track.tick_hz)
     if np.any(finite):
         ax.step(
-            track.t_s[finite],
-            track.tick_hz[finite],
-            where="post",
-            color=CATEGORICAL[1],
-            lw=1.0,
-            label="commanded tick tempo",
+            track.t_s[finite], track.tick_hz[finite], where="post",
+            color=CATEGORICAL[1], lw=1.1, zorder=3,
+        )
+        _label_at(
+            ax, track.t_s[finite][-1], track.tick_hz[finite][-1],
+            " commanded", CATEGORICAL[1],
         )
     ax.set_yscale("log")
-    ax.set_ylabel("rate (Hz)")
-    ax.legend(loc="upper left", ncols=2, frameon=False, fontsize=6)
+    ax.set_ylabel("pulse rate (Hz)")
 
 
 def _panel_controls(ax, track) -> None:
-    """The knobs, plus the raw throttle travel when the log carries it."""
-    finite = np.isfinite(track.randomness)
-    ax.step(
-        track.t_s[finite],
-        track.randomness[finite],
-        where="post",
-        color=CATEGORICAL[4],
-        lw=1.0,
-        label="randomness",
-    )
-    finite = np.isfinite(track.master_amp)
-    ax.step(
-        track.t_s[finite],
-        track.master_amp[finite],
-        where="post",
-        color=CATEGORICAL[2],
-        lw=1.0,
-        label="volley amplitude",
-    )
-    ax.set_ylim(-0.05, 1.15)
-    ax.set_ylabel("knob (0–1)")
+    """The two knobs, on their shared 0-1 scale."""
+    for values, colour, name in (
+        (track.randomness, CATEGORICAL[4], " randomness"),
+        (track.master_amp, CATEGORICAL[2], " volley amplitude"),
+    ):
+        finite = np.isfinite(values)
+        if not np.any(finite):
+            continue
+        ax.step(track.t_s[finite], values[finite], where="post", color=colour, lw=1.1)
+        _label_at(ax, track.t_s[finite][-1], values[finite][-1], name, colour)
+    ax.set_ylim(-0.06, 1.10)
+    ax.set_yticks([0.0, 0.5, 1.0])
+    ax.set_ylabel("knob (0-1)")
 
+
+def _panel_throttle(ax, track) -> None:
+    """The raw measurement, in the unit the 2026-08-22 fault lived in.
+
+    Its own panel rather than a second y-axis on the knobs: two scales in one frame is
+    friction, and this is the single trace that answers "could the fish be switched
+    off?". At rest it must sit on the zero line.
+    """
     above = track.throttle_above_zero_us
-    if above is not None and np.any(np.isfinite(above)):
-        # THE MEASUREMENT, not a derived setting. Its own axis in µs because that is the
-        # unit the fault lived in: a resting throttle must sit at 0 here, and on the
-        # 2026-08-22 log it sat ~200 µs up with no way to see it.
-        twin = ax.twinx()
-        finite = np.isfinite(above)
-        twin.step(
-            track.t_s[finite],
-            above[finite],
-            where="post",
-            color="0.35",
-            lw=0.8,
-            label="throttle above zero",
-        )
-        twin.axhline(0.0, color="0.35", lw=0.5, ls=":")
-        twin.set_ylabel("CH3 above zero (µs)", fontsize=7)
-        twin.tick_params(labelsize=7)
-        handles = ax.get_legend_handles_labels()[0] + twin.get_legend_handles_labels()[0]
-        labels = ax.get_legend_handles_labels()[1] + twin.get_legend_handles_labels()[1]
-        ax.legend(handles, labels, loc="upper left", ncols=3, frameon=False, fontsize=6)
-    else:
-        ax.legend(loc="upper left", ncols=2, frameon=False, fontsize=6)
+    finite = np.isfinite(above)
+    ax.step(track.t_s[finite], above[finite], where="post", color="0.30", lw=0.9)
+    ax.axhline(0.0, color=CATEGORICAL[1], lw=0.8, ls="--")
+    _label_at(ax, track.t_s[finite][-1], 0.0, " at rest", CATEGORICAL[1])
+    ax.set_ylabel("throttle (us\nabove zero)")
 
 
 def build_timeline(log_file, *, title: Optional[str] = None):
-    """Build the four-panel session timeline. Returns the figure."""
+    """Build the session timeline. Returns the figure.
+
+    Panels run in the order the argument does — what the operator did, what came out of
+    the electrodes, how it was paced, what the knobs said, what the receiver actually
+    measured — and share the time axis, so a trial lines up with the throttle position
+    that preceded it and the rhythm it interrupted.
+    """
     runs = ss.loc_runs(log_file)
     trial_list = ss.trials(log_file)
     track = ss.control_track(log_file)
+    raw = track.has_raw_decode
 
-    # The raster and the rhythm carry the detail, so they get the height; the state strip
-    # is a band and a row of letters and needs almost none.
+    # The raster is the subject and gets the height; the state strip is three rows of
+    # marks and needs almost none. A pre-v3 log has no throttle panel to draw at all.
+    ratios = [0.75, 1.5, 1.35, 0.9] + ([0.85] if raw else [])
     fig, axes = full_page(
-        height_cm=15.0,
-        nrows=4,
+        height_cm=15.5 if raw else 13.0,
+        nrows=len(ratios),
         sharex=True,
-        gridspec_kw={"height_ratios": [0.8, 1.25, 1.5, 1.05]},
+        gridspec_kw={"height_ratios": ratios},
     )
+
     _panel_state(axes[0], log_file, runs, trial_list)
     _panel_raster(axes[1], log_file)
     _panel_rhythm(axes[2], log_file, track)
     _panel_controls(axes[3], track)
+    if raw:
+        _panel_throttle(axes[4], track)
 
-    axes[-1].set_xlabel("device time (s)")
+    axes[-1].set_xlabel("time since power-on (s)")
+
+    # Non-data ink, dropped as the guidelines ask. Under sharex every panel would draw
+    # its own bottom spine and tick marks, stacking four rules through the middle of the
+    # figure that carry nothing; only the bottom axis needs one. The categorical strips
+    # lose their y-spine too — their rows are named, so the line measures nothing.
+    span = max([r.end_s for r in runs] + list(track.t_s[-1:]) + [1.0])
     for ax in axes:
-        ax.margins(x=0.005)
+        ax.set_xlim(-0.01 * span, span * 1.10)
+        ax.grid(False)
+    for ax in axes[:-1]:
+        ax.spines["bottom"].set_visible(False)
+        ax.tick_params(axis="x", length=0)
+    for ax in axes[:2]:
+        ax.spines["left"].set_visible(False)
     if title:
         fig.suptitle(title)
     return fig
