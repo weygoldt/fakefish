@@ -5,7 +5,8 @@
 // with the same binary and no transmitter, by three panel buttons for the bench (panel_control.h).
 // Both input sources are OR-ed. It LIVE-GENERATES its stimuli over the mean-EOD waveform (EOD_HV):
 //
-//   CH3 throttle  -> localization ON/OFF (dead-band) + TICK TEMPO 0.5..20 Hz, log ladder
+//   CH3 throttle  -> localization ON/OFF + TICK TEMPO 0.5..20 Hz, log ladder. At REST it is a
+//                    MASTER off: it also clears the panel LOC latch, so throttle-down is zero pulses
 //   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws volley
 //                    or sham); throw low does NOTHING
 //   CH5 pot       -> localization RANDOMNESS      CH6 pot -> AMPLITUDE (sets volley/max; loc = quarter)
@@ -100,7 +101,6 @@ static volatile float    g_randomness  = 0.0f;     // localization randomness (0
 static volatile float    g_volley_amp  = 0.0f;     // volley (max) amplitude 0..1 — the amplitude control sets THIS
 static volatile float    g_loc_amp     = 0.0f;     // localization amplitude = volley / VOLLEY_AMP_RATIO (always half)
 static volatile bool     g_link_up     = false;    // CH3 (throttle) delivering edges
-static volatile bool     g_rc_ever     = false;    // RC has been present at least once
 static volatile bool     g_playing     = false;    // ISR is emitting a playback (owns the LED then)
 // LOGGING IS A PRECONDITION FOR OUTPUT. loop() publishes the log's health here and the ISR
 // latches it: with no working log the device does not stimulate at all (see the block comment
@@ -549,14 +549,28 @@ void setup() {
 // panel button.
 static inline void request_trigger(int kind) { g_trig_kind = kind; g_trig_seq = g_trig_seq + 1; }
 
-// Distinct "no RC signal" LED pattern (two quick blinks per second), shown only after RC was
-// present at least once (a bench unit that never had a transmitter stays dark). loop()-owned,
-// only while the ISR is not emitting a playback.
+// Distinct "no RC signal" LED pattern (two quick blinks per second). loop()-owned, only while
+// the ISR is not emitting a playback.
+//
+// SHOWN FROM BOOT, not only after a transmitter has been seen once. It used to be gated on
+// g_rc_ever ("a bench unit that never had a transmitter stays dark"), which meant the one case
+// where you most need to know — powered up, transmitter off or out of range, nothing has ever
+// linked — was the one case that looked identical to a dead board. The bench cost is that a
+// panel-only unit blinks this while idle, which is simply true: there is no link. Anything it
+// actually does still overrides it, because the ISR owns the LED whenever something is playing.
 static inline void no_signal_blink(uint32_t now_ms) {
   uint32_t ph = now_ms % NOSIG_LED_PERIOD_MS;
   bool on = (ph < NOSIG_BLINK_MS) ||
             (ph >= NOSIG_BLINK_SPACING_MS && ph < NOSIG_BLINK_SPACING_MS + NOSIG_BLINK_MS);
   digitalWriteFast(LED_PIN, on ? HIGH : LOW);
+}
+
+// "READY": logging healthy, RC link up, and localization OFF — one short blink every two
+// seconds. The state that used to be a DARK LED, indistinguishable from a crashed board or a
+// dead battery. It is also what makes "the throttle is down" readable from shore: pull the
+// throttle to rest and the per-pulse flashing must give way to this heartbeat, promptly.
+static inline void ready_blink(uint32_t now_ms) {
+  digitalWriteFast(LED_PIN, (now_ms % READY_LED_PERIOD_MS) < READY_BLINK_MS ? HIGH : LOW);
 }
 
 // Per-channel presence by CHANGE-DETECTION on the ISR edge timestamp (rc_last_edge_us): present
@@ -634,7 +648,6 @@ void loop() {
     g_link_up = thr_present;
 
     if (thr_present) {
-      g_rc_ever = true;
       float raw_thr  = rc_unit(rc_get_width_us(RC_IDX_THROTTLE), RC_CAL[RC_IDX_THROTTLE]);
       float raw_trig = rc_unit(rc_get_width_us(RC_IDX_TRIGGER),  RC_CAL[RC_IDX_TRIGGER]);
       float raw_rnd  = rc_unit(rc_get_width_us(RC_IDX_RANDOM),   RC_CAL[RC_IDX_RANDOM]);
@@ -669,6 +682,22 @@ void loop() {
       // CH3_ON_DEBOUNCE_TICKS ticks; disable is immediate below CH3_OFF_DEADBAND.
       rc_loc_state = rc_throttle_gate(raw_thr, rc_loc_state, &thr_on_count,
                                       CH3_ON_THRESH, CH3_OFF_DEADBAND, CH3_ON_DEBOUNCE_TICKS);
+      // ...AND A THROTTLE AT REST IS A MASTER OFF, not merely one vote in the OR below.
+      // g_loc_enabled is `rc_loc_state || panel_loc_state`, so a latched panel LOC toggle used
+      // to make localization impossible to stop from the transmitter — which is the ONLY
+      // control the operator still has once the boat is on the water, and the panel button is
+      // easy to knock on while launching it. Clearing the latch here makes "throttle down"
+      // mean zero pulses unconditionally.
+      //
+      // Gated on thr_present (this whole branch): with no transmitter at all the else branch
+      // below runs instead and never touches the latch, so a bench unit driven from the panel
+      // alone is unaffected.
+      //
+      // THE CONSEQUENCE, STATED SO IT IS NOT A SURPRISE: with a transmitter connected AND the
+      // throttle at rest, the panel LOC button no longer latches — a press is cleared within one
+      // decode tick. That is what "master off" means; a master off a button can override is not
+      // one. Push the throttle to use the panel toggle, or run the bench unit with no receiver.
+      if (raw_thr < CH3_OFF_DEADBAND) panel_loc_state = false;
       // CH3 rate. The ladder is a TICK TEMPO (1/median interval), so the tempo multiplier and
       // the nominal median IPI the log carries are two views of the same setting.
       float tick_hz   = rc_rate_to_hz(rate_level, RC_RATE_STEPS);
@@ -699,13 +728,19 @@ void loop() {
   }
 
   // ----- idle LED (loop owns the LED only while the ISR is not emitting a playback) -----
-  // A logging fault OUTRANKS the no-signal blink: it is the more severe condition, because it
-  // is actively suppressing stimulation. There is never contention with the ISR's per-pulse
-  // flash here — a logging fault means there is no playback to flash for, so g_playing is
-  // false and this branch owns the LED outright.
+  // Severity order, most severe first. A logging fault OUTRANKS no-link because it is the one
+  // condition actively SUPPRESSING stimulation; no-link outranks ready because a ready-looking
+  // idle unit with no transmitter is a lie. There is never contention with the ISR's per-pulse
+  // flash here — every branch below implies nothing is playing, so g_playing is false and this
+  // owns the LED outright.
+  //
+  // THE FINAL BRANCH IS A BLINK, NOT DARKNESS. Every state the device can be in now has a
+  // pattern (panel_control.h lists the whole vocabulary), so the only time the LED is dark is
+  // the gap between localization pulses — which the ISR owns, because g_playing stays true
+  // across a gap. A dark LED therefore means "running, mid-gap"; it never means "wedged".
   if (!g_playing) {
     if (!plog_healthy(&g_plog)) log_fault_blink(now_ms);
-    else if (g_rc_ever && !g_link_up) no_signal_blink(now_ms);
-    else digitalWriteFast(LED_PIN, LOW);
+    else if (!g_link_up)        no_signal_blink(now_ms);
+    else                        ready_blink(now_ms);
   }
 }

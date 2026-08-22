@@ -53,8 +53,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
   - **`firmware/eel_fakefish_rc/`** — 4-channel **RC + 3-button panel**, **live synthesis**.
     `rc_control.h` (PC817-isolated decode; CH3 throttle→loc on/off + **tick tempo** on pin 4,
     CH4 trigger→volley/sham on pin 5, CH5 **randomness** on pin 6, CH6 amplitude on pin 7 —
-    pins are 4–7 not 5–8 because pin 8 was dead on the build board), `panel_control.h`
-    (pins 9–11 + the LED-feedback vocabulary) + `eel_fakefish_rc.ino`. Uses L2 `eel_player` +
+    pins are 4–7 not 5–8 because pin 8 was dead on the build board; CH3 at REST is a **master
+    off** — it clears the panel LOC latch, so throttle-down is zero pulses; CH5 spans exactly
+    metronome→**1.0, the measured eel**, and deliberately stops there), `panel_control.h`
+    (pins 9–11 + the LED-feedback vocabulary — **every on- and off-time in it is ≥ 2 frames of a
+    30 fps camera**, static_asserted against `LED_MIN_VISIBLE_MS`; and every device state has a
+    pattern, so the only dark LED is a gap between localization pulses) + `eel_fakefish_rc.ino`.
+    Uses L2 `eel_player` +
     `locgen` + `loc_rhythm` + `eel_stimuli` + `pulse_log`. No `MASTER_GAIN` — amplitude is live (CH6, or
     `PANEL_VOLLEY_AMP` on the bench). **It needs an SD card** — not for playback (it
     live-synthesises everything, no WAV card) but for the per-pulse log, and it refuses to

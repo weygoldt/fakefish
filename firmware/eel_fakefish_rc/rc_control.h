@@ -12,7 +12,7 @@
 //   CH3  throttle stick (ratcheted)    -> localization ON/OFF (dead-band) + TICK TEMPO
 //                                         (0.5..20 Hz, LOGARITHMIC — see rc_rate_to_hz)
 //   CH4  right stick axis (self-centre)-> one-shot TRIGGER: throw high = VOLLEY, low = SHAM
-//   CH5  pot                           -> localization RANDOMNESS (0 = metronome .. ~1.5)
+//   CH5  pot                           -> localization RANDOMNESS (0 = metronome .. 1.0 = the eel)
 //   CH6  pot                           -> AMPLITUDE (sets the volley/max; localization = volley/2)
 //
 // All PURE logic (width->unit, low-pass, quantise+hysteresis, throttle map, trigger
@@ -89,8 +89,23 @@
 // noise: ENABLING requires the RAW throttle unit to stay >= CH3_ON_THRESH for CH3_ON_DEBOUNCE_TICKS
 // consecutive decode ticks; DISABLING is immediate below CH3_OFF_DEADBAND (fail-safe). A transient noise
 // glitch — however large — never sustains the debounce, so it can never fire a stray localization pulse.
-#define CH3_OFF_DEADBAND  0.06f            // throttle unit below this -> localization OFF (immediate; resting = clean off)
-#define CH3_ON_THRESH     0.12f            // must first EXCEED this (hysteresis margin above the dead-band) to enable
+// The .ino additionally treats a throttle below the dead-band as a MASTER off: it clears the panel LOC
+// latch that is OR-ed with this gate, so throttle-down means zero pulses whatever the panel did.
+//
+// THE OFF ZONE IS SIZED IN MICROSECONDS, NOT IN PERCENT (widened 0.06/0.12 -> 0.15/0.22 on 2026-08-22).
+// Against the ~995 us calibrated throttle span, 0.06 bought only ~60 us of margin below which the stick
+// must read to shut localization down — and the PC817's error is DIRECTIONAL. The decoder measures the
+// LOW duration at the pin, and the opto's slow turn-off lengthens it; anything that slows it further
+// (a warm box, LED ageing, a weaker pull-up) grows every measured width, resting throttle included, and
+// pushes it up through a 60 us dead-band. Then throttle-down stops meaning off and there is no way to
+// stop the fish from shore. 0.15 is ~149 us of margin against a one-directional drift.
+//
+// It costs TRAVEL, NOT RANGE. rc_throttle_frac renormalises over the above-dead-band travel, so every
+// rung keeps its value and the ladder still spans 0.5-20 Hz; only the stick length spent reaching them
+// shrinks, from 94 % to 85 %. Cheap on a geometric ladder, where a rung is a ratio rather than a slice
+// of travel.
+#define CH3_OFF_DEADBAND  0.15f            // throttle unit below this -> localization OFF (immediate; resting = clean off)
+#define CH3_ON_THRESH     0.22f            // must first EXCEED this (hysteresis margin above the dead-band) to enable
 #define CH3_ON_DEBOUNCE_TICKS 30u          // ...and stay above it this many decode ticks (~150 ms at
                                            // RC_DECODE_PERIOD_MS 5 ms) before localization ENABLES. Raise if a
                                            // noise burst still leaks a pulse; lower for a snappier throttle-on.
@@ -116,11 +131,20 @@
 #define CH4_CENTER_HI     0.60f            // re-arm zone (~1600 us)
 
 // ===== CH5 pot: localization RANDOMNESS ====================================
-// The fitted model's randomness knob, NOT the retired jitter CV. It scales the state score:
-// 0 is a metronome at exactly the nominal tempo, 1.0 IS the measured eel, and the shipped
-// tables run to 2.0. The pot stops at 1.5 because CV2 saturates above that as the score
-// starts clamping against the ends of the interval table — 1.5 already reaches roughly the
-// 70th percentile of how irregular real single-fish slices are (they span 0.55-1.5).
+// The fitted model's randomness knob, NOT the retired jitter CV. It scales the state score, and
+// THE POT NOW SPANS EXACTLY THE TWO ENDPOINTS THAT MEAN SOMETHING: 0 is a perfect metronome at
+// the nominal tempo, and full scale is 1.0 — the measured eel, the model in undiluted control of
+// the temporal dynamics. Nothing in between is invented; the knob interpolates between a
+// frequency-locked train and biology.
+//
+// It ran to 1.5 until 2026-08-22 (the shipped tables go to 2.0). That top third was a setting
+// with no referent — MORE irregular than the fish the model was fitted to — and it was actively
+// harmful in the field: rate is only controllable on average, and less so as randomness rises,
+// so at 1.5 the realised rate over a two-minute window can sit several times off the commanded
+// tempo. The 2026-08-22 field log has a run commanded at 4 Hz / randomness 1.5 that opened at
+// 1940/259/133/211 ms, took a genuine 4.3 s silence, then collapsed to a near-constant 38 ms for
+// fifty pulses. That is the model behaving correctly at a setting that should not have been on
+// the dial. See firmware/README.md -> "Rate is only controllable on average".
 //
 // It does NOT blend toward a Poisson process: the lag-1 autocorrelation stays around 0.52
 // across the whole range. It dials how MUCH the rate varies, leaving how it varies over time
@@ -134,7 +158,7 @@
 // loud as the rest of the recording — the fish did not swim away, it stopped. The interval
 // table's own top knot (32 s) is the only bound, and it is the 99.98th percentile of the
 // measurement rather than a number someone picked.
-#define LOC_RANDOMNESS_MAX 1.5f            // top of the CH5 pot (the model's tables run to 2.0)
+#define LOC_RANDOMNESS_MAX 1.0f            // top of the CH5 pot IS the measured eel (tables run to 2.0)
 #define RC_RANDOM_STEPS   16               // quantise the randomness pot
                                            // (the minimum IPI, LOC_REFRACTORY_SAMP, comes from
                                            //  stim_levels.h, and is now only a safety floor)

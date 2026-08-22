@@ -39,6 +39,20 @@ static void test_throttle() {
   CHECK(rc_throttle_on(0.0f) == 0, "throttle bottom -> off");
   CHECK(rc_throttle_on(CH3_OFF_DEADBAND - 0.01f) == 0, "throttle in dead-band -> off");
   CHECK(rc_throttle_on(0.5f) == 1, "throttle up -> on");
+  CHECK(CH3_ON_THRESH > CH3_OFF_DEADBAND, "the enable threshold must sit above the dead-band");
+
+  // THE OFF ZONE IS A MICROSECOND MARGIN, and that is how it has to be checked. The unit scale
+  // is a fiction of the calibration; what actually has to hold is that the resting throttle can
+  // drift by a useful number of MICROSECONDS and still decode as off. The PC817's error is
+  // one-directional — the decoder measures the LOW duration and the opto's slow turn-off only
+  // ever lengthens it — so this margin is spent from one side. 0.06 bought ~60 us and was the
+  // reason throttle-down could stop meaning off.
+  const float span_us = (float)(RC_CAL_THROTTLE_MAX - RC_CAL_THROTTLE_MIN);
+  CHECK(CH3_OFF_DEADBAND * span_us >= 100.0f,
+        "the CH3 off zone is under 100 us wide — opto drift can push a resting throttle through it");
+  // ...but not so wide it eats the stick. The ladder renormalises above the dead-band, so this
+  // costs travel, not range.
+  CHECK(CH3_ON_THRESH < 0.35f, "the CH3 enable threshold has eaten a third of the throttle");
   CHECK(rc_throttle_frac(0.0f) == 0.0f, "throttle frac 0 at bottom");
   CHECK(fabsf(rc_throttle_frac(1.0f) - 1.0f) < 1e-6f, "throttle frac 1 at full");
   CHECK(fabsf(rc_rate_to_hz(0, RC_RATE_STEPS) - LOC_RATE_MIN_HZ) < 1e-4f, "rate lvl0 -> min Hz");
@@ -152,19 +166,25 @@ static void test_amp_randomness() {
   CHECK(fabsf(rc_loc_amp(1.0f) - 1.0f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio at full scale");
   CHECK(fabsf(rc_loc_amp(0.4f) - 0.4f / VOLLEY_AMP_RATIO) < 1e-6f, "loc == volley / ratio off full scale");
   CHECK(rc_loc_amp(1.0f) > rc_loc_amp(0.4f), "loc tracks the volley, never converges to it");
-  // CH5 is the fitted model's RANDOMNESS knob, not the retired jitter CV: 0 is a metronome
-  // at the nominal tempo and 1.0 is the measured eel. The pot's top stops at 1.5, below the
-  // 2.0 the shipped tables reach, because CV2 saturates above that as the score starts
-  // clamping against the ends of the interval table.
+  // CH5 is the fitted model's RANDOMNESS knob, not the retired jitter CV. ITS TWO ENDPOINTS ARE
+  // THE POINT: hard down is a perfect metronome at the nominal tempo, hard up is EXACTLY 1.0 —
+  // the measured eel, the model in undiluted control. Pinned as literals, both ends, because
+  // every value in between is an interpolation between two things that mean something and a pot
+  // that stopped somewhere else (it ran to 1.5 until 2026-08-22) is a dial with a region that
+  // has no referent at all.
   CHECK(fabsf(rc_randomness(0, RC_RANDOM_STEPS) - 0.0f) < 1e-6f, "randomness lvl0 -> 0 (metronome)");
   CHECK(fabsf(rc_randomness(RC_RANDOM_STEPS - 1, RC_RANDOM_STEPS) - LOC_RANDOMNESS_MAX) < 1e-6f,
         "randomness top -> LOC_RANDOMNESS_MAX");
+  CHECK(fabsf(LOC_RANDOMNESS_MAX - 1.0f) < 1e-6f,
+        "the top of the CH5 pot must BE the measured eel (randomness 1.0), not past it");
   CHECK(LOC_RANDOMNESS_MAX <= LOC_KNOB_MAX, "the pot must not run past the shipped gain table");
-  // 1.0 — the measured eel — has to be reachable, or the device cannot be set to a real fish.
-  bool reaches_one = false;
-  for (int i = 0; i < RC_RANDOM_STEPS; i++)
-    if (fabsf(rc_randomness(i, RC_RANDOM_STEPS) - 1.0f) < 0.06f) reaches_one = true;
-  CHECK(reaches_one, "some pot step must land on randomness 1.0, the measured eel");
+  // ...and hard up must land on 1.0 exactly, not merely near it: the top rung IS the endpoint.
+  CHECK(fabsf(rc_randomness(RC_RANDOM_STEPS - 1, RC_RANDOM_STEPS) - 1.0f) < 1e-6f,
+        "the top pot step must land on randomness 1.0, the measured eel");
+  // Monotone in between, so the dial reads left-to-right as "more like a fish".
+  for (int i = 0; i + 1 < RC_RANDOM_STEPS; i++)
+    CHECK(rc_randomness(i + 1, RC_RANDOM_STEPS) > rc_randomness(i, RC_RANDOM_STEPS),
+          "the randomness pot must increase monotonically");
 }
 
 static void test_locgen() {

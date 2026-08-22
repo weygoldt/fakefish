@@ -524,7 +524,7 @@ Four properties are **measurements, not modelling choices**, and none should be 
 | | old (lognormal) | now (fitted) |
 |---|---|---|
 | CH3 | mean pulses/s, 1–20 Hz linear | **tick tempo** (1/median), 0.5–20 Hz **logarithmic** |
-| CH5 | jitter CV, 0–0.8 | **randomness**, 0–1.5 (1.0 = the measured eel) |
+| CH5 | jitter CV, 0–0.8 | **randomness**, 0–1.0 (0 = metronome, 1.0 = the measured eel) |
 
 **The CH3 ladder is logarithmic**, so every rung is the same *ratio* from the next (~21 % at 20
 steps over 0.5–20 Hz) rather than the same number of Hz. It was linear 1–20 Hz until 2026-08-22,
@@ -704,9 +704,9 @@ same binary runs on the bench with no transmitter.
 
 | Control | Pin | Does |
 |---|---|---|
-| CH3 throttle | 4 | localization on/off (debounced, hysteretic) + **tick tempo** 0.5–20 Hz, log ladder |
+| CH3 throttle | 4 | localization on/off (debounced, hysteretic; **at rest it is a master off**) + **tick tempo** 0.5–20 Hz, log ladder |
 | CH4 stick | 5 | one-shot: throw high = run one **blinded trial**; throw low does **nothing**; re-arms at centre |
-| CH5 pot | 6 | localization **randomness** (0 = metronome, 1.0 = the measured eel, to 1.5) |
+| CH5 pot | 6 | localization **randomness**, hard down = metronome → hard up = **1.0, the measured eel** |
 | CH6 pot | 7 | amplitude → volley level; localization derived at a quarter |
 | panel LOC / VOLLEY / SHAM | 9 / 10 / 11 | the same three actions |
 
@@ -743,12 +743,58 @@ afterwards, and the marker's pulse count still tags which trial fired — analys
 signal loss can never *start* a trial. A volley already playing always runs to completion.
 Presence is tracked by change-detection on a millisecond clock, wrap-safe over ~49 days.
 
-**LED:** flash per pulse, a distinct 3-blink pattern for a fired sham (which produces no output —
-it is the no-stimulus control), a double-blink per second when the RC link is lost after having
-been present, and — outranking all of them — a steady **inverse blink** (on, with a brief dark
-notch each second) when logging has failed and output is therefore suppressed. That one is
-deliberately the only *inverted* pattern in the vocabulary; every other is a short flash on a dark
-background, and a blocked device otherwise looks exactly like an idle one.
+**A throttle at rest is a master off.** Below `CH3_OFF_DEADBAND` localization stops immediately
+*and* the panel LOC latch is cleared — the panel toggle is OR-ed with the throttle, so a latched
+one used to make localization impossible to stop from the transmitter, which is the only control
+the operator still has once the boat is on the water (and a panel button is easy to knock on while
+launching it). The clear is gated on the throttle channel being present, so a bench unit with no
+transmitter keeps its panel toggle. The off zone itself is sized in **microseconds, not percent**:
+it was widened 0.06 → 0.15 on 2026-08-22 because 0.06 bought only ~60 µs of margin against the
+opto's *one-directional* error — the decoder measures the LOW duration at the pin and the PC817's
+slow turn-off only ever lengthens it, so anything that slows it further (a warm box, LED ageing, a
+weaker pull-up) grows every width including the resting throttle's. It costs travel, not range:
+`rc_throttle_frac` renormalises above the dead-band, so the ladder's rungs are unchanged.
+
+**LED:** every state the device can be in has a pattern, so the state is readable from the blinks
+alone — from shore, and (since 2026-08-22) on video. In `loop()`'s arbitration order, most severe
+first:
+
+| Pattern | Means |
+|---|---|
+| **inverse blink** — ~750 ms on, 250 ms dark, 1 s period | logging has failed, **output is suppressed** |
+| two 80 ms blinks per second | **no RC link** — including a unit that has never seen one |
+| one 80 ms blink every 2 s | **ready**: healthy, armed, localization off |
+| one 70 ms flash per emitted pulse | running — localization, marker or volley |
+| 3 × (120 ms on, 120 ms off) | a **sham** fired (it produces no output — it is the no-stimulus control) |
+
+The inverse blink is deliberately the only *inverted* pattern in the set: it is the one condition
+actively preventing stimulation, and a blocked device otherwise looks exactly like an idle one.
+That is also why it outranks the no-link blink.
+
+**Two rules fix those durations, and both came out of a field session.**
+
+*Every on-time and every off-time is at least two video frames.* A 30 fps camera exposes for at
+most 33.3 ms per frame and usually far less, so a flash shorter than one frame period can land
+entirely in the inter-frame gap and never appear, and a flash of exactly one frame period appears
+only ever partially exposed — how bright it looks depends on where it fell. Two frame periods
+(66.7 ms) is the shortest pulse that guarantees one *fully* exposed frame. The per-pulse flash was
+6 ms until this rule existed: invisible on video by a factor of ten. `panel_control.h`
+static_asserts the whole vocabulary against `LED_MIN_VISIBLE_MS`.
+
+*The LED is never dark except when the fish is deliberately quiet.* The only silence is the gap
+between localization pulses, which the fitted rhythm makes multi-second on purpose. A dark LED
+therefore means "running, mid-gap" — never "wedged". Two holes used to break that: the no-link
+blink was gated on having seen a transmitter at least once, so a unit powered up with its
+transmitter off sat completely dark (indistinguishable from a dead board, at exactly the moment
+you most want to know), and a healthy idle unit with localization off was dark too. The **ready**
+heartbeat is that second state, and it is what makes *throttle down* visibly different from
+*crashed*.
+
+One known ambiguity, and it is the price of the first rule: above a tick tempo of ~14 Hz the
+interval is shorter than the flash, so consecutive pulses merge into a steady on. It is still
+distinguishable from the log fault, which has a quarter-second dark notch every second, but it is
+why there is no "steady on" state in the vocabulary. Below ~14 Hz — every biologically meaningful
+setting, a real eel ticks at 3.15 Hz — the pulses resolve cleanly.
 
 **This device now needs an SD card.** It still needs no *WAV card* — it live-synthesises
 everything — but it writes a per-pulse log and **will not stimulate without one**. See
@@ -903,12 +949,16 @@ an EOD is ~800 µs FWHM, so each peak localises to well under a millisecond.
 **Rate is only controllable on average, and less so as CH5 rises.** The state relaxes in
 wall-clock time, so when the rhythm wanders to the fast side the intervals shorten, which means
 *less* relaxation per pulse, which keeps it fast. Over tens of thousands of pulses it averages to
-the commanded tempo; over a two-minute window at randomness 1.5 the realised rate can sit several
-times off it and feel stuck. Measured in the field (2026-08-22): commanded 4 Hz at randomness 1.5
-produced a run that opened correctly at 1940/259/133/211 ms, took a genuine 4.3 s silence, then
-collapsed to a near-constant 38 ms for fifty pulses. That is the model, not a fault — the same
-short-window scatter that makes a synthetic localization item need time-scaling onto its rung. If
-an experiment needs the *rate* controlled rather than the texture, run CH5 low.
+the commanded tempo; over a two-minute window the realised rate can sit well off it and feel
+stuck. Measured in the field (2026-08-22): commanded 4 Hz at randomness **1.5** produced a run
+that opened correctly at 1940/259/133/211 ms, took a genuine 4.3 s silence, then collapsed to a
+near-constant 38 ms for fifty pulses. That is the model, not a fault — the same short-window
+scatter that makes a synthetic localization item need time-scaling onto its rung. It is also why
+the pot no longer reaches 1.5: **CH5 now stops at 1.0**, the measured eel, so the two ends of the
+dial are the only two settings with a referent — a frequency-locked train and biology — and the
+old top third, which was *more* irregular than any fish the model was fitted to, is gone. The
+effect is milder at 1.0 but it does not vanish: if an experiment needs the *rate* controlled
+rather than the texture, run CH5 low.
 
 **What CH5 at 0 actually costs.** An exact metronome has no fingerprint — sliding the log by any
 whole interval fits as well as the true offset, so the localization train stops being usable for

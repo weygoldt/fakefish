@@ -1,11 +1,47 @@
-# User TODO items: 
+# User TODO items
 
-- [ ] Make LED blinks long enough for a camera to see (assuming 30 fps framerate)
-- [ ] Make Error LED blink more expressive. Currently: Blinks inverse when no SD, blinks twice when no RC. But when RC is not connected on boot, it doesnt blink at all. It should also do the double blinks there, waiting for the RC signal. So I think there is still some issues with the error blink logic. From the blinks alone, I always want to see which state the device is on. The EOD discharge blink is obviously non-repeating, but the rythmic patterns that indicate some issues should work always. The only case where the LED should be completely silent is during a long break of loc pulses. 
-- [ ] Analyze SD card output
-- [ ] Throttle down should produce *zero* pulses. I need to be able to completely disable loc. 
-- [ ] Randomness knob should go from *perfect frequency locked* to *perfect eel model*. So when the knob is low, I want perfectly even pulses, when it all the way up, I want the eel loc model to fully control EOD temporal dynamics. 
+- [x] **LED blinks long enough for a camera to see (30 fps).** Every on-time and every off-time
+      in the RC unit's LED vocabulary is now ≥ 70 ms — two frame periods at 30 fps, the shortest
+      pulse that guarantees one *fully* exposed frame. The per-pulse flash went 6 ms → 70 ms;
+      the no-link blink 60 → 80 ms (and its two blinks are now 240 ms apart, not 150); the
+      log-fault dark notch 100 → 250 ms. `panel_control.h` static_asserts the whole vocabulary
+      against `LED_MIN_VISIBLE_MS`, so a future retune cannot quietly drop below it. Known price:
+      above a ~14 Hz tick tempo consecutive flashes merge into a steady on.
+- [x] **Error LED blink more expressive.** Two holes closed. (1) The no-link double-blink was
+      gated on `g_rc_ever` — "a bench unit that never had a transmitter stays dark" — so a unit
+      powered up with its transmitter off looked exactly like a dead board. That gate is gone;
+      it blinks from boot, waiting for the link. (2) A healthy idle unit with localization off
+      was dark too, so there is now a **ready** heartbeat (one 80 ms blink every 2 s). The
+      arbitration is log fault → no link → ready, and the only remaining silence is the gap
+      between localization pulses, which the ISR owns. A dark LED now means "running, mid-gap"
+      and never "wedged". Full table in `firmware/README.md` → the RC section's **LED**.
+- [ ] **Analyze SD card output.** Not done — no log file in the repo to work from. Copy a
+      `/LOGS/PULSnnnn.CSV` off a card into `data/` (or say where it is) and this can be picked
+      up; `uv run fakefish-pulse-log info <file>` is the reader. Worth checking first, given the
+      two items below: whether any `LOC` rows appear while the throttle was at rest, and what
+      `rand_m` / `tick_ipi` actually were during the runs that felt uncontrollable.
+- [x] **Throttle down produces zero pulses.** Two changes. The throttle at rest is now a
+      **master off**: below `CH3_OFF_DEADBAND` the .ino clears the panel LOC latch that is OR-ed
+      with the throttle gate, so a latched panel toggle can no longer make localization
+      unstoppable from the transmitter — the only control left once the boat is on the water,
+      and a panel button is easy to knock on while launching. (Gated on the throttle channel
+      being present, so a panel-only bench unit is unaffected.) And the off zone was widened
+      0.06 → 0.15 (`CH3_ON_THRESH` 0.12 → 0.22): 0.06 bought only ~60 µs of margin against the
+      PC817's *one-directional* error — the decoder measures the LOW duration and the opto's slow
+      turn-off only lengthens it, so a warm box or an ageing LED grows every width, resting
+      throttle included. It costs travel, not range: `rc_throttle_frac` renormalises above the
+      dead-band, so the ladder's rungs are unchanged.
+- [x] **Randomness knob spans metronome → the eel, and stops there.** `LOC_RANDOMNESS_MAX`
+      1.5 → **1.0**. Hard down is a perfect frequency-locked train; hard up is randomness 1.0,
+      the measured eel, with the fitted model in undiluted control. The old top third had no
+      referent — more irregular than any fish the model was fitted to — and was actively harmful:
+      the 2026-08-22 field log has a run commanded at 4 Hz / randomness 1.5 that opened at
+      1940/259/133/211 ms, took a genuine 4.3 s silence, then collapsed to a near-constant 38 ms
+      for fifty pulses. `rc_control_selftest` now pins both endpoints as literals.
 
+> The four ticked items are **code + gate green** (`make check`), not bench-verified. The LED
+> timings in particular are arithmetic against a 30 fps assumption — point the actual camera at
+> the actual LED before trusting them.
 
 # TODO
 

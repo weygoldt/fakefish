@@ -259,16 +259,22 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   stimulus start to finish (playbacks are uninterruptible). Each press picks a *random* WAV
   from that button's directory and a random polarity. LED solid while playing; a **~1 Hz blink
   means no SD card** (reseat it — it re-mounts automatically).
-- **RC:** CH3 throttle = localization on/off + rate (up to 20 Hz); CH4 right stick = throw high
-  → run one **blinded trial**, which the firmware resolves to a volley or a sham (throwing low
-  does nothing at all; one-shot, re-arms at centre); CH5 pot = **randomness** (0 = metronome,
-  1.0 = the measured eel); CH6 pot =
+- **RC:** CH3 throttle = localization on/off + rate (up to 20 Hz) — **at rest it is a master
+  off**, so a throttle pulled down means zero pulses whatever the panel toggle did; CH4 right
+  stick = throw high → run one **blinded trial**, which the firmware resolves to a volley or a
+  sham (throwing low does nothing at all; one-shot, re-arms at centre); CH5 pot = **randomness**,
+  hard down a metronome, hard up 1.0 = the measured eel; CH6 pot =
   amplitude. Losing the link turns localization off and can never start a trial. On the bench
   with no transmitter, the three panel buttons drive the same state machine: pin 9 toggles
   localization, pin 10 fires a volley, pin 11 fires a sham. **Put a (blank) microSD card in
   before you start**: it logs every pulse to `/LOGS/PULSnnnn.CSV` and will not stimulate
-  without one — a steady LED with a brief dark notch each second means logging has failed.
-  Afterwards, read the card with `uv run fakefish-pulse-log info /path/PULS0000.CSV`.
+  without one. Afterwards, read the card with `uv run fakefish-pulse-log info /path/PULS0000.CSV`.
+- **Reading the RC unit's LED**, which is the whole state of the device from shore and is sized so
+  a 30 fps camera resolves every blink: *steady on with a dark notch each second* = logging has
+  failed and **output is suppressed**; *two quick blinks a second* = no RC link; *one blink every
+  two seconds* = ready, armed, localization off; *one 70 ms flash per pulse* = running; *three
+  120 ms blinks* = a sham fired. The only time it is dark is a gap between localization pulses —
+  the fitted rhythm makes those multi-second on purpose — so a dark LED never means "wedged".
 
 ### 5 · Tune — no reflash where possible
 
