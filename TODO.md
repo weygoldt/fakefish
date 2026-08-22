@@ -1,3 +1,12 @@
+# User TODO items: 
+
+- [ ] Make LED blinks long enough for a camera to see (assuming 30 fps framerate)
+- [ ] Make Error LED blink more expressive. Currently: Blinks inverse when no SD, blinks twice when no RC. But when RC is not connected on boot, it doesnt blink at all. It should also do the double blinks there, waiting for the RC signal. So I think there is still some issues with the error blink logic. From the blinks alone, I always want to see which state the device is on. The EOD discharge blink is obviously non-repeating, but the rythmic patterns that indicate some issues should work always. The only case where the LED should be completely silent is during a long break of loc pulses. 
+- [ ] Analyze SD card output
+- [ ] Throttle down should produce *zero* pulses. I need to be able to completely disable loc. 
+- [ ] Randomness knob should go from *perfect frequency locked* to *perfect eel model*. So when the knob is low, I want perfectly even pulses, when it all the way up, I want the eel loc model to fully control EOD temporal dynamics. 
+
+
 # TODO
 
 Open items after the 3-layer merge. Everything here is **owner/bench work** or a decision that
@@ -10,7 +19,7 @@ needs a measurement — nothing in this file is blocking `make check`, which is 
 The hand-held SD player **migrated off** its old direct-pin ~5.7 Vpp stage onto the shared
 36 V DRV8871 stage. That hardware **has to be built** before the sketch can be bench-tested.
 
-- [ ] Build the 36 V DRV8871 output stage for the hand-held unit (2× DRV8871, IN1 on pins 2/3
+- [x] Build the 36 V DRV8871 output stage for the hand-held unit (2× DRV8871, IN1 on pins 2/3
       held high, **IN2 on pins 22/23** — NOT 0/1, which this line said until 2026-08-21 and which
       have no FTM channel at all on a Teensy 3.5 — plus the per-channel output filter). Double-check
       IN1/IN2 orientation at each driver before first power-up: see the hazard note in
