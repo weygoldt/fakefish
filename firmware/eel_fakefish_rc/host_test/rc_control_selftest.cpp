@@ -41,18 +41,17 @@ static void test_throttle() {
   CHECK(rc_throttle_on(0.5f) == 1, "throttle up -> on");
   CHECK(CH3_ON_THRESH > CH3_OFF_DEADBAND, "the enable threshold must sit above the dead-band");
 
-  // THE OFF ZONE IS A MICROSECOND MARGIN, and that is how it has to be checked. The unit scale
-  // is a fiction of the calibration; what actually has to hold is that the resting throttle can
-  // drift by a useful number of MICROSECONDS and still decode as off. The PC817's error is
-  // one-directional — the decoder measures the LOW duration and the opto's slow turn-off only
-  // ever lengthens it — so this margin is spent from one side. 0.06 bought ~60 us and was the
-  // reason throttle-down could stop meaning off.
+  // THE OFF ZONE IS A NOISE MARGIN, NOT A DRIFT BUDGET — and the distinction is the whole design.
+  // It has to cover the jitter of a stationary stick around a zero that RcZero re-measures every
+  // power-on and keeps ratcheting down; it does NOT have to cover the supply-dependent offset,
+  // which measured ~200 us and which no threshold value can absorb without eating a fifth of the
+  // travel. That was tried (0.15/0.22) and abandoned. Still check it in MICROSECONDS, because the
+  // unit scale is a fiction of the calibration and jitter is not.
   const float span_us = (float)(RC_CAL_THROTTLE_MAX - RC_CAL_THROTTLE_MIN);
-  CHECK(CH3_OFF_DEADBAND * span_us >= 100.0f,
-        "the CH3 off zone is under 100 us wide — opto drift can push a resting throttle through it");
-  // ...but not so wide it eats the stick. The ladder renormalises above the dead-band, so this
-  // costs travel, not range.
-  CHECK(CH3_ON_THRESH < 0.35f, "the CH3 enable threshold has eaten a third of the throttle");
+  CHECK(CH3_OFF_DEADBAND * span_us >= 50.0f,
+        "the CH3 off zone is under 50 us wide — too tight even for stationary-stick jitter");
+  CHECK(CH3_ON_THRESH < 0.25f,
+        "the CH3 enable threshold is sized like a drift budget — RcZero handles drift, shrink it");
   CHECK(rc_throttle_frac(0.0f) == 0.0f, "throttle frac 0 at bottom");
   CHECK(fabsf(rc_throttle_frac(1.0f) - 1.0f) < 1e-6f, "throttle frac 1 at full");
   CHECK(fabsf(rc_rate_to_hz(0, RC_RATE_STEPS) - LOC_RATE_MIN_HZ) < 1e-4f, "rate lvl0 -> min Hz");
@@ -88,6 +87,83 @@ static void test_throttle() {
     if (lo <= 1.0f && hi >= 1.0f)
       CHECK(hi - lo < 0.25f, "the rung containing 1 Hz is coarser than 0.25 Hz");
   }
+}
+
+// ===== the session zero: one measured reference for all four channels =====
+// The failure this exists to prevent is on record: the 2026-08-22 field log never once decoded the
+// throttle below 877 us against a 705 us calibration, so "throttle down" could not mean off.
+static void test_zero_capture() {
+  RcZero z;
+  rc_zero_reset(&z);
+  CHECK(!rc_zero_armed(&z), "a fresh RcZero is not armed");
+  CHECK(rc_zero_offset(&z, RC_CAL_THROTTLE_MIN) == 0, "an unarmed zero applies no offset");
+
+  // Arming takes RC_ZERO_SETTLE_TICKS in-window readings, and lands on their MINIMUM.
+  for (uint32_t i = 0; i < RC_ZERO_SETTLE_TICKS - 1; i++)
+    CHECK(!rc_zero_step(&z, 900u + (i == 3 ? 40u : 0u)), "not armed before the settle window ends");
+  CHECK(rc_zero_step(&z, 900u), "armed once the settle window completes");
+  CHECK(z.zero_us == 900u, "the captured zero is the minimum over the settle window");
+
+  // PROPERTY 1: it only ever ratchets DOWN. A higher reading must never raise it, or a throttle
+  // pushed up during arming would redefine "off" as "somewhat open".
+  rc_zero_step(&z, 1200u);
+  CHECK(z.zero_us == 900u, "a higher reading must never raise the zero");
+  // PROPERTY 2: it follows the pack down.
+  rc_zero_step(&z, 850u);
+  CHECK(z.zero_us == 850u, "a lower reading tracks the sagging pack");
+
+  // PROPERTY 4: the plausibility window. Neither a failsafe frame nor a decode glitch may capture.
+  rc_zero_step(&z, RC_ZERO_MIN_US - 1u);
+  CHECK(z.zero_us == 850u, "a width below the window must not capture");
+  rc_zero_step(&z, RC_ZERO_MAX_US + 1u);
+  CHECK(z.zero_us == 850u, "a width above the window must not capture");
+  CHECK(rc_zero_armed(&z), "an out-of-window reading must not disarm");
+
+  // A first reading outside the window must not arm on its own, either.
+  RcZero z2; rc_zero_reset(&z2);
+  for (int i = 0; i < 50; i++) CHECK(!rc_zero_step(&z2, 3000u), "out-of-window traffic never arms");
+  CHECK(z2.zero_us == 0, "...and never captures");
+}
+
+static void test_zero_applied() {
+  // THE WHOLE POINT: a throttle at its mechanical stop must decode to 0.00 whatever the supply did
+  // to the widths. Replay the two states this rig has actually been measured in.
+  const uint32_t FLAT = 705u;   // 2026-08-07 calibration, nearly empty pack
+  const uint32_t FULL = 905u;   // 2026-08-22 field log, fresh pack: ~200 us higher
+  RcCal cal = RC_CAL[RC_IDX_THROTTLE];
+
+  // Without the correction the fresh-pack rest decodes a fifth of the way up the stick — which is
+  // exactly why the device could not be stopped from shore.
+  CHECK(rc_unit(FULL, cal) > 0.15f, "uncorrected, a full-pack resting throttle decodes well above 0");
+
+  RcZero z; rc_zero_reset(&z);
+  for (uint32_t i = 0; i < RC_ZERO_SETTLE_TICKS; i++) rc_zero_step(&z, FULL);
+  int32_t off = rc_zero_offset(&z, RC_CAL_THROTTLE_MIN);
+  CHECK(off == (int32_t)FULL - (int32_t)RC_CAL_THROTTLE_MIN, "the offset is zero minus the calibrated min");
+  CHECK(rc_unit_off(FULL, cal, off) == 0.0f, "a corrected resting throttle decodes to exactly 0");
+  CHECK(rc_throttle_on(rc_unit_off(FULL, cal, off)) == 0, "...and therefore reads OFF");
+
+  // Same stop on a flat pack, with a zero captured then: also exactly 0.
+  RcZero zf; rc_zero_reset(&zf);
+  for (uint32_t i = 0; i < RC_ZERO_SETTLE_TICKS; i++) rc_zero_step(&zf, FLAT);
+  CHECK(rc_unit_off(FLAT, cal, rc_zero_offset(&zf, RC_CAL_THROTTLE_MIN)) == 0.0f,
+        "a flat-pack resting throttle also decodes to exactly 0");
+
+  // SPAN IS PRESERVED, not rescaled: the offset shifts both ends, so full travel still reads 1.0.
+  CHECK(rc_unit_off(FULL + (cal.us_max - cal.us_min), cal, off) == 1.0f,
+        "full travel above the zero still decodes to 1.0 — the offset shifts, it does not scale");
+
+  // ONE ZERO CORRECTS FOUR CHANNELS. The offset belongs to the shared opto path, so the pots —
+  // which the transmitter does not force anywhere — inherit the throttle's measurement.
+  for (int i = 0; i < RC_N_CHANNELS; i++) {
+    float rest = rc_unit_off(RC_CAL[i].us_min + off, RC_CAL[i], off);
+    CHECK(rest == 0.0f, "every channel's calibrated minimum, shifted by the session offset, reads 0");
+  }
+  // ...and that is what makes randomness 0 (the metronome) reachable again: the same log showed
+  // rand_m bottoming out at 200, never 0.
+  float rnd_rest = rc_unit_off(RC_CAL[RC_IDX_RANDOM].us_min + off, RC_CAL[RC_IDX_RANDOM], off);
+  CHECK(rc_randomness(rc_quantize_hyst(rnd_rest, 0, RC_RANDOM_STEPS, 0.0f), RC_RANDOM_STEPS) == 0.0f,
+        "a corrected pot at rest reaches randomness 0, the metronome end of the knob");
 }
 
 static void test_throttle_gate() {
@@ -226,6 +302,8 @@ int main() {
   test_trigger();
   test_trigger_low_throw_is_inert();
   test_trigger_boot();
+  test_zero_capture();
+  test_zero_applied();
   test_amp_randomness();
   test_locgen();
   if (g_fail == 0) { printf("OK\n"); return 0; }

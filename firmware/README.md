@@ -704,7 +704,7 @@ same binary runs on the bench with no transmitter.
 
 | Control | Pin | Does |
 |---|---|---|
-| CH3 throttle | 4 | localization on/off (debounced, hysteretic; **at rest it is a master off**) + **tick tempo** 0.5–20 Hz, log ladder |
+| CH3 throttle | 4 | localization on/off (debounced, hysteretic; **at rest it is a master off**) + **tick tempo** 0.5–20 Hz, log ladder + it **carries the session zero** for all four channels |
 | CH4 stick | 5 | one-shot: throw high = run one **blinded trial**; throw low does **nothing**; re-arms at centre |
 | CH5 pot | 6 | localization **randomness**, hard down = metronome → hard up = **1.0, the measured eel** |
 | CH6 pot | 7 | amplitude → volley level; localization derived at a quarter |
@@ -748,12 +748,56 @@ Presence is tracked by change-detection on a millisecond clock, wrap-safe over ~
 one used to make localization impossible to stop from the transmitter, which is the only control
 the operator still has once the boat is on the water (and a panel button is easy to knock on while
 launching it). The clear is gated on the throttle channel being present, so a bench unit with no
-transmitter keeps its panel toggle. The off zone itself is sized in **microseconds, not percent**:
-it was widened 0.06 → 0.15 on 2026-08-22 because 0.06 bought only ~60 µs of margin against the
-opto's *one-directional* error — the decoder measures the LOW duration at the pin and the PC817's
-slow turn-off only ever lengthens it, so anything that slows it further (a warm box, LED ageing, a
-weaker pull-up) grows every width including the resting throttle's. It costs travel, not range:
-`rc_throttle_frac` renormalises above the dead-band, so the ladder's rungs are unchanged.
+transmitter keeps its panel toggle.
+
+### The session zero
+
+**A fixed calibration cannot hold, because the decode moves with the battery.** The measured pulse
+width depends on how hard the receiver drives the PC817's LED, which depends on the receiver's
+supply. Measured on this rig: the 2026-08-07 calibration was taken on a nearly flat pack and read
+**705 µs** at the throttle's mechanical stop; a field log on 2026-08-22 with a fresh pack never
+decoded that same stop below **877 µs**. All three analog channels moved together by ~200 µs — a
+fifth of full travel. So the bottom fifth of every knob became unreachable, "throttle down" stopped
+meaning off, and the randomness pot could no longer reach 0.
+
+**The hardware fix is not available on this board.** A low-value pull-up would stiffen the collector
+node and make the width far less sensitive to LED current. It was tried on 2026-08-22 and does not
+work here: the phototransistor sources only ~**0.15 mA**, so 10 kΩ leaves the pin at ~1.8 V — above
+the input threshold, channel dead — and even 22 kΩ, which does switch, tolerates barely a 30 % fall
+in LED current before it stops, against 61 % for the internal pull-up. Anything stiff enough to help
+is too stiff to survive a sagging pack.
+
+**So the zero is measured, once per power-on, from the throttle itself** (`RcZero` in
+`rc_control.h`). The transmitter refuses to transmit until the throttle is at its stop, so the very
+first frames the receiver delivers are guaranteed to carry a throttle at rest. That reading is the
+zero, taken at the battery state actually in use, and it is applied to **every** channel: the offset
+belongs to the shared opto path, and the throttle is the only control the transmitter forces to a
+known position. The pots may be anywhere at power-on, which is why they cannot calibrate themselves.
+The 2026-08-22 log put the three analog channels 172, 199 and 199 µs out, so correcting all of them
+by the throttle's figure leaves under 30 µs against the ~200 µs it removes.
+
+Four properties make it safe, and each is load-bearing:
+
+1. **The zero only ratchets down.** A stale-high zero makes a resting throttle decode negative,
+   which clamps to 0 and reads off — the safe direction. The unsafe direction needs the resting
+   width to *rise* after capture, which needs the pack to gain charge. It cannot within a session.
+2. **It tracks the sag.** As the pack drains the widths shorten and the running minimum follows, so
+   the rate ladder stays anchored instead of drifting across a session.
+3. **A link drop never resets it.** Re-capturing on reacquisition would sample whatever position
+   the stick was left in — the one case the transmitter's interlock does not cover.
+4. **A plausibility window bounds it** (`RC_ZERO_MIN_US`…`MAX_US`), so a failsafe frame or a decode
+   glitch cannot poison it; and because of (1) a later, truer reading still corrects it downward.
+
+**Until it is captured, the RC path does not stimulate** — not the localization gate and not the
+trigger, since before the offset is known every threshold on every channel is wrong by the same
+~0.2 of travel. The bench panel is deliberately *not* gated; it has no transmitter to wait for.
+This turns a silent failure ("I cannot stop it") into a loud one ("it will not start"), which is the
+trade the whole mechanism exists to make. The LED shows it as three blinks per second.
+
+With drift handled at its source, `CH3_OFF_DEADBAND` went back down to **0.08** (from the 0.15 it
+was briefly widened to): it is now a noise margin around a continuously re-measured zero, not a
+budget for a 200 µs offset. It costs travel, not range either way — `rc_throttle_frac` renormalises
+above the dead-band, so every rung keeps its value.
 
 **LED:** every state the device can be in has a pattern, so the state is readable from the blinks
 alone — from shore, and (since 2026-08-22) on video. In `loop()`'s arbitration order, most severe
@@ -763,6 +807,7 @@ first:
 |---|---|
 | **inverse blink** — ~750 ms on, 250 ms dark, 1 s period | logging has failed, **output is suppressed** |
 | two 80 ms blinks per second | **no RC link** — including a unit that has never seen one |
+| three 80 ms blinks per second | link up, **no session zero yet** — the RC path cannot stimulate |
 | one 80 ms blink every 2 s | **ready**: healthy, armed, localization off |
 | one 70 ms flash per emitted pulse | running — localization, marker or volley |
 | 3 × (120 ms on, 120 ms off) | a **sham** fired (it produces no output — it is the no-stimulus control) |

@@ -56,6 +56,7 @@
 //
 //   LOG FAULT   inverse: ~750 ms ON, 250 ms dark, 1 s period   output is SUPPRESSED (no card)
 //   NO RC LINK  two 80 ms blinks in a 1 s period               waiting for a transmitter
+//   NOT ZEROED  three 80 ms blinks in a 1 s period             link up, waiting for a throttle zero
 //   READY       one 80 ms blink in a 2 s period                healthy, armed, localization OFF
 //   RUNNING     one 70 ms flash per emitted pulse              localization / marker / volley
 //   SHAM        3 x (120 ms on, 120 ms off)                    a sham fired (no water output)
@@ -94,6 +95,17 @@
 #define LOGFAULT_LED_PERIOD_MS 1000u       // full inverse-blink period
 #define LOGFAULT_LED_DARK_MS    250u       // the dark notch within that period
 
+// "NOT ZEROED": the link is up but the session zero has not been captured yet, so the RC path
+// cannot stimulate (rc_control.h -> RcZero). One more blink than the no-link pattern, deliberately:
+// both mean "waiting on the RC side", and the count says which. In normal use this is nearly
+// invisible — the transmitter will not transmit until the throttle is at its stop, so the zero is
+// captured within ~100 ms of the link coming up. Seeing it persist means something abnormal: a
+// receiver running failsafe frames with the transmitter off, or a resting width outside
+// RC_ZERO_MIN_US..MAX_US, which is a broken opto path rather than a stick position.
+#define NOTZERO_LED_PERIOD_MS  1000u       // "waiting for the throttle zero" triple-blink period
+#define NOTZERO_BLINK_MS         80u       // each blink within the period
+#define NOTZERO_BLINK_GAP_MS    160u       // blink pitch: blinks start at 0, 160, 320 ms
+
 // "READY": healthy, armed, and localization is OFF (throttle down / panel toggle off). One
 // short blink every two seconds — sparse enough to read instantly against the no-link
 // double-blink, and the thing that makes "throttle down" visibly different from "wedged".
@@ -120,6 +132,11 @@ static_assert(LOGFAULT_LED_DARK_MS >= LED_MIN_VISIBLE_MS &&
 static_assert(READY_BLINK_MS >= LED_MIN_VISIBLE_MS &&
               READY_LED_PERIOD_MS - READY_BLINK_MS >= LED_MIN_VISIBLE_MS,
               "the ready heartbeat is shorter than 2 video frames");
+static_assert(NOTZERO_BLINK_MS >= LED_MIN_VISIBLE_MS &&
+              NOTZERO_BLINK_GAP_MS >= NOTZERO_BLINK_MS + LED_MIN_VISIBLE_MS,
+              "the not-zeroed blinks are shorter than 2 video frames, or too close to separate");
+static_assert(NOTZERO_LED_PERIOD_MS >= 2u * NOTZERO_BLINK_GAP_MS + NOTZERO_BLINK_MS + LED_MIN_VISIBLE_MS,
+              "the not-zeroed period leaves no visible dark gap before it repeats");
 // The patterns must stay TELLABLE APART, not just visible: READY is one blink per period and
 // NO LINK is two, so their periods must differ or the eye has only the blink count to go on.
 static_assert(READY_LED_PERIOD_MS >= 2u * NOSIG_LED_PERIOD_MS,

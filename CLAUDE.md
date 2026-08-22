@@ -55,7 +55,11 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     CH4 trigger→volley/sham on pin 5, CH5 **randomness** on pin 6, CH6 amplitude on pin 7 —
     pins are 4–7 not 5–8 because pin 8 was dead on the build board; CH3 at REST is a **master
     off** — it clears the panel LOC latch, so throttle-down is zero pulses; CH5 spans exactly
-    metronome→**1.0, the measured eel**, and deliberately stops there), `panel_control.h`
+    metronome→**1.0, the measured eel**, and deliberately stops there; and **`RcZero` measures the
+    session zero from CH3 once per power-on and applies it to all four channels** — the decoded
+    widths move ~200 µs with the receiver's supply, the pull-up that would fix that in hardware is
+    unavailable on this opto (~0.15 mA of collector current), and the RC path refuses to stimulate
+    until the zero is captured), `panel_control.h`
     (pins 9–11 + the LED-feedback vocabulary — **every on- and off-time in it is ≥ 2 frames of a
     30 fps camera**, static_asserted against `LED_MIN_VISIBLE_MS`; and every device state has a
     pattern, so the only dark LED is a gap between localization pulses) + `eel_fakefish_rc.ino`.

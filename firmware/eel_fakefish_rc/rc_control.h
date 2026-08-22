@@ -11,6 +11,7 @@
 //
 //   CH3  throttle stick (ratcheted)    -> localization ON/OFF (dead-band) + TICK TEMPO
 //                                         (0.5..20 Hz, LOGARITHMIC — see rc_rate_to_hz)
+//                                         ...and it CARRIES THE ZERO for every channel (RcZero)
 //   CH4  right stick axis (self-centre)-> one-shot TRIGGER: throw high = VOLLEY, low = SHAM
 //   CH5  pot                           -> localization RANDOMNESS (0 = metronome .. 1.0 = the eel)
 //   CH6  pot                           -> AMPLITUDE (sets the volley/max; localization = volley/2)
@@ -84,6 +85,82 @@
 #define RC_CAL_AMP_MIN      730
 #define RC_CAL_AMP_MAX      1725
 
+// ===== THE SESSION ZERO — why a fixed calibration is not enough ============
+// The decoded pulse width depends on how hard the receiver drives the PC817's LED, which depends
+// on the receiver's supply, which is the battery. It is not a small effect. Measured on this rig:
+// the 2026-08-07 calibration was taken on a nearly flat pack and read 705 us at the throttle's
+// mechanical stop; a field log recorded on 2026-08-22 with a fresh pack never decoded that same
+// stop below 877 us. All three analog channels moved together by ~200 us, which is a fifth of the
+// full travel — so the bottom fifth of every knob became unreachable, and "throttle down" stopped
+// meaning "off". A pot has no trim to blame; a shared supply does.
+//
+// THE HARDWARE FIX IS NOT AVAILABLE ON THIS BOARD. A low-value pull-up would stiffen the collector
+// node and make the width far less sensitive to LED current, and rc_input_test's header has
+// suggested exactly that for a long time. It was tried on 2026-08-22 and it does not work here:
+// the phototransistor sources only ~0.15 mA, so 10 kOhm leaves the pin at ~1.8 V (above the input
+// threshold, channel dead) and even 22 kOhm — which does switch — tolerates barely a 30 % fall in
+// LED current before it stops, against 61 % for the internal pull-up. Anything stiff enough to
+// help is too stiff to survive a sagging pack. The internal pull-up stays; the fix is here.
+//
+// SO THE ZERO IS MEASURED, ONCE PER POWER-ON, FROM THE THROTTLE ITSELF. The transmitter refuses to
+// transmit at all until the throttle is at its stop (the FS-i6X throttle-position interlock), so
+// the very first frames the receiver ever delivers are guaranteed to carry a throttle at rest.
+// That reading is the zero, taken at the battery state actually in use, and it is applied to
+// EVERY channel: the offset is a property of the shared opto path, not of one stick, and the
+// throttle is the only control the transmitter forces to a known position. The pots may be
+// anywhere at power-on, which is exactly why they cannot calibrate themselves.
+//
+// FOUR PROPERTIES MAKE THIS SAFE, and each is load-bearing:
+//   1. THE ZERO ONLY EVER RATCHETS DOWN. A stale-HIGH zero makes a resting throttle decode
+//      negative, which clamps to 0 and reads OFF — the safe direction. The unsafe direction, a
+//      zero too LOW, needs the resting width to RISE after capture, which needs the pack to gain
+//      charge. It cannot within a session.
+//   2. IT TRACKS THE SAG. As the pack drains the widths shorten and the running minimum follows
+//      them down, so the rate ladder stays anchored instead of drifting for the whole session.
+//   3. IT IS NEVER RESET BY A LINK DROP. Re-capturing on reacquisition would mean sampling
+//      whatever position the stick happened to be in after a dropout — the one case where the
+//      transmitter's interlock does NOT protect us. Captured once per power-on, held.
+//   4. A PLAUSIBILITY WINDOW BOUNDS IT. A width outside RC_ZERO_MIN_US..MAX_US never becomes the
+//      zero, so a failsafe frame or a decode glitch cannot poison it — and because of (1) a
+//      later, truer reading still corrects it downward.
+//
+// UNTIL IT IS CAPTURED, THE RC PATH DOES NOT STIMULATE. Not the localization gate and not the
+// trigger: before the offset is known every threshold on every channel is wrong by the same ~0.2
+// of travel, so an ungated CH4 could fire from a stick that is not actually thrown. The bench
+// panel is deliberately NOT gated — it has no transmitter to wait for. This converts the silent
+// failure ("I cannot stop it") into a loud one ("it will not start"), which is the trade this
+// whole mechanism exists to make.
+#define RC_ZERO_MIN_US        500u   // a resting throttle below this is not a resting throttle
+#define RC_ZERO_MAX_US       1400u   // ...nor above this. Outside the window: ignored, never captured.
+#define RC_ZERO_SETTLE_TICKS   20u   // in-window ticks to sample before arming (~100 ms at 5 ms/tick)
+
+typedef struct {
+  uint32_t zero_us;   // captured resting width (0 == nothing captured yet)
+  uint16_t settle;    // in-window ticks seen; arming completes at RC_ZERO_SETTLE_TICKS
+} RcZero;
+
+static inline void rc_zero_reset(RcZero* z) { z->zero_us = 0; z->settle = 0; }
+
+// Feed ONE raw decoded throttle width per decode tick. Returns 1 once a zero is held (armed).
+//
+// The settle window is a minimum over the first RC_ZERO_SETTLE_TICKS in-window readings rather
+// than a single sample, so one odd width at acquisition cannot set the reference. After arming it
+// keeps taking the minimum — property (2) above — and never rises again, which is property (1).
+static inline int rc_zero_step(RcZero* z, uint32_t width_us) {
+  if (width_us < RC_ZERO_MIN_US || width_us > RC_ZERO_MAX_US)
+    return z->settle >= RC_ZERO_SETTLE_TICKS;      // out of window: no update, arm state unchanged
+  if (z->zero_us == 0 || width_us < z->zero_us) z->zero_us = width_us;
+  if (z->settle < RC_ZERO_SETTLE_TICKS) z->settle++;
+  return z->settle >= RC_ZERO_SETTLE_TICKS;
+}
+static inline int rc_zero_armed(const RcZero* z) { return z->settle >= RC_ZERO_SETTLE_TICKS; }
+
+// The captured zero as a SHIFT to apply to every channel's calibration, in us. Zero until armed,
+// so an un-armed decode is simply the old fixed-calibration behaviour (and is gated off anyway).
+static inline int32_t rc_zero_offset(const RcZero* z, uint32_t cal_min_us) {
+  return rc_zero_armed(z) ? (int32_t)z->zero_us - (int32_t)cal_min_us : 0;
+}
+
 // ===== CH3 throttle: localization on/off + rate ============================
 // On/off is DEBOUNCED + HYSTERETIC so a resting throttle yields ZERO localization pulses even with RC
 // noise: ENABLING requires the RAW throttle unit to stay >= CH3_ON_THRESH for CH3_ON_DEBOUNCE_TICKS
@@ -92,20 +169,19 @@
 // The .ino additionally treats a throttle below the dead-band as a MASTER off: it clears the panel LOC
 // latch that is OR-ed with this gate, so throttle-down means zero pulses whatever the panel did.
 //
-// THE OFF ZONE IS SIZED IN MICROSECONDS, NOT IN PERCENT (widened 0.06/0.12 -> 0.15/0.22 on 2026-08-22).
-// Against the ~995 us calibrated throttle span, 0.06 bought only ~60 us of margin below which the stick
-// must read to shut localization down — and the PC817's error is DIRECTIONAL. The decoder measures the
-// LOW duration at the pin, and the opto's slow turn-off lengthens it; anything that slows it further
-// (a warm box, LED ageing, a weaker pull-up) grows every measured width, resting throttle included, and
-// pushes it up through a 60 us dead-band. Then throttle-down stops meaning off and there is no way to
-// stop the fish from shore. 0.15 is ~149 us of margin against a one-directional drift.
+// THE DEAD-BAND IS NOW A NOISE MARGIN, NOT A DRIFT BUDGET (0.06/0.12 -> 0.15/0.22 -> 0.08/0.15).
+// It was briefly widened to 0.15 to try to outrun the supply-dependent offset, and that was the wrong
+// lever: the offset measured ~200 us and no threshold value covers a drift that big without eating a
+// fifth of the stick. RcZero removes the drift at its source by measuring the zero every power-on, so
+// what is left for this dead-band to cover is only the jitter of a stationary stick around a zero that
+// is re-measured continuously — tens of microseconds. 0.08 is ~80 us of margin against that, and
+// CH3_ON_THRESH sits a further 0.07 above it.
 //
-// It costs TRAVEL, NOT RANGE. rc_throttle_frac renormalises over the above-dead-band travel, so every
-// rung keeps its value and the ladder still spans 0.5-20 Hz; only the stick length spent reaching them
-// shrinks, from 94 % to 85 %. Cheap on a geometric ladder, where a rung is a ratio rather than a slice
-// of travel.
-#define CH3_OFF_DEADBAND  0.15f            // throttle unit below this -> localization OFF (immediate; resting = clean off)
-#define CH3_ON_THRESH     0.22f            // must first EXCEED this (hysteresis margin above the dead-band) to enable
+// It costs TRAVEL, NOT RANGE, either way: rc_throttle_frac renormalises over the above-dead-band
+// travel, so every rung keeps its value and the ladder still spans 0.5-20 Hz — only the stick length
+// spent reaching them changes, and this brings it back to 92 % from the 85 % the wide version cost.
+#define CH3_OFF_DEADBAND  0.08f            // throttle unit below this -> localization OFF (immediate; resting = clean off)
+#define CH3_ON_THRESH     0.15f            // must first EXCEED this (hysteresis margin above the dead-band) to enable
 #define CH3_ON_DEBOUNCE_TICKS 30u          // ...and stay above it this many decode ticks (~150 ms at
                                            // RC_DECODE_PERIOD_MS 5 ms) before localization ENABLES. Raise if a
                                            // noise burst still leaks a pulse; lower for a snappier throttle-on.
@@ -240,6 +316,26 @@ static inline float rc_clampf(float x, float lo, float hi) {
 // Map a measured pulse width (us) to a unit value [0,1], clamped.
 static inline float rc_unit(uint32_t width_us, RcCal cal) {
   float lo = (float)cal.us_min, hi = (float)cal.us_max;
+  if (hi == lo) return 0.0f;
+  return rc_clampf(((float)width_us - lo) / (hi - lo), 0.0f, 1.0f);
+}
+
+// ...the same, shifted by the session zero (see RcZero). BOTH ENDS MOVE by the same offset,
+// because what the opto path adds is a delay, not a gain: rc_input_test's own bench note records
+// the widths sitting ~300 us low of nominal with "full ~1000 us travel preserved on every
+// channel", and the 2026-08-22 log shows every channel saturating normally at the top while only
+// the bottom went missing. So the transfer curve translates and the span is unchanged — shift the
+// window, do not rescale it.
+//
+// This is what lets ONE measured zero calibrate FOUR channels. The offset belongs to the shared
+// opto path, so the throttle — the only control the transmitter forces to a known position at
+// power-on — measures it on behalf of the two pots and the trigger, which could be anywhere.
+// The per-channel residual is small: the 2026-08-22 log put the three analog channels 172, 199
+// and 199 us out, so correcting all of them by the throttle's own figure leaves under 30 us,
+// against the ~200 us it removes.
+static inline float rc_unit_off(uint32_t width_us, RcCal cal, int32_t off) {
+  float lo = (float)((int32_t)cal.us_min + off);
+  float hi = (float)((int32_t)cal.us_max + off);
   if (hi == lo) return 0.0f;
   return rc_clampf(((float)width_us - lo) / (hi - lo), 0.0f, 1.0f);
 }

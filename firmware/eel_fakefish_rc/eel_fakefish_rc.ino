@@ -101,12 +101,18 @@ static volatile float    g_randomness  = 0.0f;     // localization randomness (0
 static volatile float    g_volley_amp  = 0.0f;     // volley (max) amplitude 0..1 — the amplitude control sets THIS
 static volatile float    g_loc_amp     = 0.0f;     // localization amplitude = volley / VOLLEY_AMP_RATIO (always half)
 static volatile bool     g_link_up     = false;    // CH3 (throttle) delivering edges
+static volatile bool     g_rc_zeroed   = false;    // the session zero has been captured (RcZero)
 static volatile bool     g_playing     = false;    // ISR is emitting a playback (owns the LED then)
 // LOGGING IS A PRECONDITION FOR OUTPUT. loop() publishes the log's health here and the ISR
 // latches it: with no working log the device does not stimulate at all (see the block comment
 // above onSampleTick). Starts false so a card that fails in setup() can never be raced by the
 // first sample tick.
 static volatile bool     g_log_ok      = false;    // the SD event log is healthy
+
+// The session zero (rc_control.h -> RcZero). Plain, not volatile: it is loop()-owned end to end —
+// captured, held and applied entirely inside the decode path. The ISR never reads it, and never
+// needs to: what reaches the ISR is the already-corrected knob values and g_rc_zeroed.
+static RcZero g_zero;
 
 // ===== ISR-owned playback state ===========================================
 enum Source { SRC_IDLE, SRC_LOC, SRC_MARKER, SRC_VOLLEY, SRC_SHAM };
@@ -497,6 +503,7 @@ void setup() {
   randomSeed(analogRead(A0));                         // A0 == digital 14; unused elsewhere
   panel_begin();                                     // 3 panel buttons + the LED (pin 13)
   rc_begin();                                        // 4 RC pins + pin-change interrupts
+  rc_zero_reset(&g_zero);                            // no session zero until the throttle supplies one
 
   // Build the coded marker: a fixed-IPI EOD burst (its pulse count is set per fire).
   g_marker_ipi[0] = 0;
@@ -562,6 +569,18 @@ static inline void no_signal_blink(uint32_t now_ms) {
   uint32_t ph = now_ms % NOSIG_LED_PERIOD_MS;
   bool on = (ph < NOSIG_BLINK_MS) ||
             (ph >= NOSIG_BLINK_SPACING_MS && ph < NOSIG_BLINK_SPACING_MS + NOSIG_BLINK_MS);
+  digitalWriteFast(LED_PIN, on ? HIGH : LOW);
+}
+
+// "NOT ZEROED": link up, but the session zero has not been captured, so the RC path is inert.
+// Three quick blinks — one more than the no-link pattern, because both mean "waiting on the RC
+// side" and the count is what tells them apart. Normally invisible: the transmitter's own
+// throttle interlock means the zero lands within ~100 ms of the link appearing.
+static inline void not_zeroed_blink(uint32_t now_ms) {
+  uint32_t ph = now_ms % NOTZERO_LED_PERIOD_MS;
+  bool on = (ph < NOTZERO_BLINK_MS) ||
+            (ph >= NOTZERO_BLINK_GAP_MS && ph < NOTZERO_BLINK_GAP_MS + NOTZERO_BLINK_MS) ||
+            (ph >= 2u * NOTZERO_BLINK_GAP_MS && ph < 2u * NOTZERO_BLINK_GAP_MS + NOTZERO_BLINK_MS);
   digitalWriteFast(LED_PIN, on ? HIGH : LOW);
 }
 
@@ -648,10 +667,22 @@ void loop() {
     g_link_up = thr_present;
 
     if (thr_present) {
-      float raw_thr  = rc_unit(rc_get_width_us(RC_IDX_THROTTLE), RC_CAL[RC_IDX_THROTTLE]);
-      float raw_trig = rc_unit(rc_get_width_us(RC_IDX_TRIGGER),  RC_CAL[RC_IDX_TRIGGER]);
-      float raw_rnd  = rc_unit(rc_get_width_us(RC_IDX_RANDOM),   RC_CAL[RC_IDX_RANDOM]);
-      float raw_amp  = rc_unit(rc_get_width_us(RC_IDX_AMP),      RC_CAL[RC_IDX_AMP]);
+      // THE SESSION ZERO, measured from the throttle and applied to ALL FOUR channels. The
+      // transmitter refuses to transmit until the throttle is at its stop, so the first widths
+      // that ever arrive carry a resting stick; that reading becomes the zero, at the battery
+      // state actually in use. See rc_control.h -> "THE SESSION ZERO" for why a fixed calibration
+      // cannot do this and why the pull-up that would have fixed it in hardware does not work on
+      // this opto. Captured once per power-on and never reset by a link drop — re-capturing on
+      // reacquisition would sample whatever position the stick was left in.
+      const uint32_t thr_us = rc_get_width_us(RC_IDX_THROTTLE);
+      const bool armed = rc_zero_step(&g_zero, thr_us) != 0;
+      const int32_t zoff = rc_zero_offset(&g_zero, RC_CAL_THROTTLE_MIN);
+      g_rc_zeroed = armed;
+
+      float raw_thr  = rc_unit_off(thr_us,                          RC_CAL[RC_IDX_THROTTLE], zoff);
+      float raw_trig = rc_unit_off(rc_get_width_us(RC_IDX_TRIGGER), RC_CAL[RC_IDX_TRIGGER],  zoff);
+      float raw_rnd  = rc_unit_off(rc_get_width_us(RC_IDX_RANDOM),  RC_CAL[RC_IDX_RANDOM],   zoff);
+      float raw_amp  = rc_unit_off(rc_get_width_us(RC_IDX_AMP),     RC_CAL[RC_IDX_AMP],      zoff);
 
       if (!primed) {
         // FIRST decode after (re)acquisition: SNAP filters to the live readings (no EMA ramp) and
@@ -680,8 +711,18 @@ void loop() {
       // CH3: localization on/off (DEBOUNCED + hysteretic, gated on the RAW reading so an RC noise glitch
       // can never fire a stray pulse at rest) + rate. Enable needs raw_thr >= CH3_ON_THRESH held for
       // CH3_ON_DEBOUNCE_TICKS ticks; disable is immediate below CH3_OFF_DEADBAND.
-      rc_loc_state = rc_throttle_gate(raw_thr, rc_loc_state, &thr_on_count,
-                                      CH3_ON_THRESH, CH3_OFF_DEADBAND, CH3_ON_DEBOUNCE_TICKS);
+      // NOT ARMED -> THE RC PATH DOES NOT STIMULATE. Before the zero is known every threshold on
+      // every channel is wrong by the same ~0.2 of travel, so this gates the trigger too, not just
+      // localization: an ungated CH4 could fire from a stick that is not actually thrown. The knob
+      // values above are still updated (harmless — nothing can play), and the bench panel is
+      // deliberately untouched, because it has no transmitter to wait for.
+      if (!armed) {
+        rc_loc_state = false;
+        thr_on_count = 0;
+      } else {
+        rc_loc_state = rc_throttle_gate(raw_thr, rc_loc_state, &thr_on_count,
+                                        CH3_ON_THRESH, CH3_OFF_DEADBAND, CH3_ON_DEBOUNCE_TICKS);
+      }
       // ...AND A THROTTLE AT REST IS A MASTER OFF, not merely one vote in the OR below.
       // g_loc_enabled is `rc_loc_state || panel_loc_state`, so a latched panel LOC toggle used
       // to make localization impossible to stop from the transmitter — which is the ONLY
@@ -713,7 +754,7 @@ void loop() {
       // trial — the ISR draws volley-vs-sham. Throwing low does nothing at all: the
       // operator cannot pick the trial type, so their timing and position cannot correlate
       // with it. The bench panel keeps explicit volley/sham buttons for testing.
-      if (trig_present) {
+      if (trig_present && armed) {
         if (rc_trigger_step(&trig, u_trig, CH4_VOLLEY_THRESH, CH4_CENTER_LO, CH4_CENTER_HI))
           request_trigger(RC_TRIG_RANDOM);
       }
@@ -723,6 +764,9 @@ void loop() {
       primed = false;
       rc_loc_state = false;
       thr_on_count = 0;   // re-debounce the throttle-on when the channel is reacquired
+      // The session zero is deliberately NOT reset here (rc_control.h, property 3): re-capturing
+      // on reacquisition would sample whatever position the stick was left in, which is the one
+      // case the transmitter's throttle interlock does not cover.
     }
     g_loc_enabled = rc_loc_state || panel_loc_state;
   }
@@ -739,8 +783,9 @@ void loop() {
   // the gap between localization pulses — which the ISR owns, because g_playing stays true
   // across a gap. A dark LED therefore means "running, mid-gap"; it never means "wedged".
   if (!g_playing) {
-    if (!plog_healthy(&g_plog)) log_fault_blink(now_ms);
-    else if (!g_link_up)        no_signal_blink(now_ms);
-    else                        ready_blink(now_ms);
+    if (!plog_healthy(&g_plog))      log_fault_blink(now_ms);
+    else if (!g_link_up)             no_signal_blink(now_ms);
+    else if (!g_rc_zeroed)           not_zeroed_blink(now_ms);
+    else                             ready_blink(now_ms);
   }
 }

@@ -271,10 +271,17 @@ Full wiring in [`firmware/README.md`](firmware/README.md).
   without one. Afterwards, read the card with `uv run fakefish-pulse-log info /path/PULS0000.CSV`.
 - **Reading the RC unit's LED**, which is the whole state of the device from shore and is sized so
   a 30 fps camera resolves every blink: *steady on with a dark notch each second* = logging has
-  failed and **output is suppressed**; *two quick blinks a second* = no RC link; *one blink every
-  two seconds* = ready, armed, localization off; *one 70 ms flash per pulse* = running; *three
-  120 ms blinks* = a sham fired. The only time it is dark is a gap between localization pulses —
-  the fitted rhythm makes those multi-second on purpose — so a dark LED never means "wedged".
+  failed and **output is suppressed**; *two quick blinks a second* = no RC link; *three quick blinks
+  a second* = link up but no session zero yet; *one blink every two seconds* = ready, armed,
+  localization off; *one 70 ms flash per pulse* = running; *three 120 ms blinks* = a sham fired. The
+  only time it is dark is a gap between localization pulses — the fitted rhythm makes those
+  multi-second on purpose — so a dark LED never means "wedged".
+- **The RC unit measures its own zero at power-up.** The decoded pulse widths move with the
+  receiver's supply voltage — ~200 µs between a flat and a fresh pack on this rig, a fifth of full
+  travel — so a fixed calibration silently stops meaning what it says. The throttle's resting
+  reading is captured once per power-on and applied to all four channels. It needs no action from
+  you: the transmitter will not transmit until the throttle is down anyway. If the LED sits on three
+  blinks a second, it is waiting for that reading and will not stimulate until it has one.
 
 ### 5 · Tune — no reflash where possible
 

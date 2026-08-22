@@ -15,11 +15,12 @@
       arbitration is log fault → no link → ready, and the only remaining silence is the gap
       between localization pulses, which the ISR owns. A dark LED now means "running, mid-gap"
       and never "wedged". Full table in `firmware/README.md` → the RC section's **LED**.
-- [ ] **Analyze SD card output.** Not done — no log file in the repo to work from. Copy a
-      `/LOGS/PULSnnnn.CSV` off a card into `data/` (or say where it is) and this can be picked
-      up; `uv run fakefish-pulse-log info <file>` is the reader. Worth checking first, given the
-      two items below: whether any `LOC` rows appear while the throttle was at rest, and what
-      `rand_m` / `tick_ipi` actually were during the runs that felt uncontrollable.
+- [x] **Analyze SD card output.** Done — `PULS0024.CSV`, 360 s, integrity clean, 20 blinded trials
+      resolving 10 volley / 10 sham. It settled the item below: rung 0 (the state meaning "throttle
+      below the dead-band") never appears in the file, the throttle never decoded under 877 µs
+      against a 705 µs calibration, and both pots bottom out at ~0.20 of travel. Not noise, not
+      firmware logic — the decoded widths move with the receiver's supply voltage.
+
 - [x] **Throttle down produces zero pulses.** Two changes. The throttle at rest is now a
       **master off**: below `CH3_OFF_DEADBAND` the .ino clears the panel LOC latch that is OR-ed
       with the throttle gate, so a latched panel toggle can no longer make localization
@@ -31,6 +32,15 @@
       turn-off only lengthens it, so a warm box or an ageing LED grows every width, resting
       throttle included. It costs travel, not range: `rc_throttle_frac` renormalises above the
       dead-band, so the ladder's rungs are unchanged.
+
+      **Superseded 2026-08-22 by the session zero.** Widening the dead-band was the wrong lever:
+      the log showed the offset is ~200 µs, a fifth of full travel, and no threshold absorbs that
+      without eating the stick. The pull-up that would have fixed it in hardware does not work on
+      this opto — the phototransistor sources only ~0.15 mA, so 2k2 and 10k both stop the channels
+      decoding entirely, and 22k survives barely a 30 % fall in LED current against 61 % for the
+      internal pull-up. `RcZero` now measures the zero from the throttle once per power-on and
+      applies it to all four channels; `CH3_OFF_DEADBAND` came back to 0.08 as a plain noise margin.
+      The RC path refuses to stimulate before the zero is captured (LED: three blinks a second).
 - [x] **Randomness knob spans metronome → the eel, and stops there.** `LOC_RANDOMNESS_MAX`
       1.5 → **1.0**. Hard down is a perfect frequency-locked train; hard up is randomness 1.0,
       the measured eel, with the fitted model in undiluted control. The old top third had no
@@ -39,9 +49,22 @@
       1940/259/133/211 ms, took a genuine 4.3 s silence, then collapsed to a near-constant 38 ms
       for fifty pulses. `rc_control_selftest` now pins both endpoints as literals.
 
-> The four ticked items are **code + gate green** (`make check`), not bench-verified. The LED
+> Everything ticked here is **code + gate green** (`make check`), not bench-verified. The LED
 > timings in particular are arithmetic against a 30 fps assumption — point the actual camera at
 > the actual LED before trusting them.
+>
+> **Still outstanding on the bench:** confirm the session zero works in the water. Two checks in a
+> log: rung 0 (`tick_ipi` = 100000) must appear whenever the throttle is at rest, and `rand_m` must
+> reach 0 with the randomness pot hard down. Neither was possible on the old calibration. Also
+> worth recording the full-vs-flat width swing with `rc_input_test` — `RcZero` makes it much less
+> critical, but it is the number that would size `CH3_OFF_DEADBAND` if the jitter turns out larger
+> than assumed.
+>
+> **Follow-up worth deciding:** the pulse log records only the *commanded* rung, never the raw
+> decoded width, which is why diagnosing this needed inverting the quantiser through the rate
+> ladder. Logging the four raw widths (and the captured zero) would make a calibration fault a
+> one-glance read. It is a log format change — v3 plus the golden file and the Python reader, per
+> invariant 9 — so it is a deliberate decision, not a drive-by.
 
 # TODO
 
