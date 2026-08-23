@@ -141,17 +141,26 @@ def _panel_state(ax, log_file, runs, trial_list) -> None:
 
 
 def _panel_raster(ax, log_file) -> None:
-    """Every pulse that entered the water, by kind. The figure's subject."""
+    """Every pulse that entered the water, by kind. The figure's subject.
+
+    Only kinds that actually occur get a row. The RC device stopped emitting markers on
+    2026-08-22, so a current log has none — and an empty labelled row is non-data ink that
+    also invites the reader to wonder what went missing. Older logs still have the row,
+    because they still have the pulses.
+    """
     rate = float(log_file.sample_rate_hz)
-    for row, (kind, label, colour) in enumerate(_PULSE_ROWS):
-        ticks = [r.tick for r in log_file.pulses(kind) if r.tick is not None]
-        if not ticks:
-            continue
-        t = np.array(ticks, dtype=float) / rate
+    present = [
+        (label, colour, np.array(
+            [r.tick for r in log_file.pulses(kind) if r.tick is not None], dtype=float
+        ) / rate)
+        for kind, label, colour in _PULSE_ROWS
+        if log_file.pulses(kind)
+    ]
+    for row, (_, colour, t) in enumerate(present):
         ax.vlines(t, row + 0.12, row + 0.88, color=colour, linewidth=0.35, alpha=0.9)
-    ax.set_ylim(-0.1, len(_PULSE_ROWS))
-    ax.set_yticks([i + 0.5 for i in range(len(_PULSE_ROWS))])
-    ax.set_yticklabels([label for _, label, _ in _PULSE_ROWS])
+    ax.set_ylim(-0.1, max(len(present), 1))
+    ax.set_yticks([i + 0.5 for i in range(len(present))])
+    ax.set_yticklabels([label for label, _, _ in present])
     ax.tick_params(axis="y", length=0)
 
 
@@ -303,6 +312,16 @@ def stats(
         s.ipi_median_s * 1e3,
         s.ipi_cv2,
     )
+
+    # ALIGNMENT WARNING. With the RC marker removed (2026-08-22) a sham leaves no trace in a
+    # recording at all, so placing the log against it rests entirely on the localization
+    # train's irregularity. An exact metronome has no fingerprint to correlate against.
+    if np.isfinite(s.randomness_min) and s.randomness_max < 0.05:
+        log.warning(
+            "  randomness never exceeded %.3f — a near-metronome train has little fingerprint, "
+            "and with no marker in the water this session may be hard to align to a recording",
+            s.randomness_max,
+        )
 
     if s.throttle_reached_zero is None:
         log.info("  raw decode: not recorded (pre-v3 log)")

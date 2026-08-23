@@ -17,15 +17,22 @@
     "  * pins, thresholds, debounce, calibration. Those are per-surface (L3) or per-board (L1)",
     "    and live in firmware/eel_core/config.h or the sketch's own control header.",
     "",
-    "BOTH DEVICES NOW MARK WITH EEL PULSES, BUT WITH DIFFERENT CODES. NOT UNIFIED.",
+    "ONE MARKER CODE, AND ONLY THE SD DEVICE HAS IT.",
     "  sd_path.pulse_marker = 6 EOD pulses at a fixed 10 Hz with ALTERNATING polarity,",
     "                         baked into the WAVs by build_sd_card.py. Identifies a playback.",
     "                         Emitted as SD_MARKER_*.",
-    "  rc_path.pulse_marker = 2 or 4 EOD pulses at a fixed 100 Hz, SAME polarity, synthesised",
-    "                         live by the RC device. The COUNT tags volley vs sham.",
-    "                         Emitted as PULSE_MARKER_*.",
-    "The distinct prefixes are deliberate: a bare MARKER_* name in a repo with two marker",
-    "codes is a trap.",
+    "",
+    "The RC device's count-coded marker (rc_path.pulse_marker: 2 pulses = volley, 4 = sham,",
+    "at 100 Hz) was REMOVED on 2026-08-22 and PULSE_MARKER_* is gone with it. Two reasons.",
+    "It was redundant -- the per-pulse SD log is a precondition for output, so a trial and",
+    "its outcome are already on the card with a 20 us tick. And it was NOT redundant for a",
+    "sham, it was a stimulus: the no-stimulus control emitted four eel pulses before going",
+    "quiet, which is not a control. The SD device keeps its marker because it has no log at",
+    "all, so the lead-in is the only record that a playback happened -- the premise that",
+    "retired the RC one does not hold there.",
+    "",
+    "The SD_MARKER_* prefix stays as it is. It was distinct to keep two codes apart and now",
+    "there is one, but renaming a shipped constant to celebrate a deletion is churn.",
     "",
     "(History: the SD device used a 10 kHz SINE tone until 2026-08-17. It was removed because",
     "the per-channel 2-pole output filter attenuates 10 kHz by ~21.8 dB, and because everything",
@@ -108,19 +115,6 @@
       "Consumed today by the RC sketch (C). NOMINAL levels only — on the 36 V DRV8871 stage",
       "amplitude 1.0 means the full rail, so these are rail fractions, not volts."
     ],
-    "pulse_marker": {
-      "_comment": [
-        "Coded preamble: a short EOD burst at a fixed IPI, tagged by PULSE COUNT — a volley is",
-        "pulses_volley pulses then the discharge, a sham is pulses_sham pulses then silence.",
-        "ipi_samp 500 @ 50 kHz = 10 ms = 100 Hz: clearly above localization (<=20 Hz) and below",
-        "the volley peak (~300-400 Hz). max_pulses sizes the static marker IPI table."
-      ],
-      "ipi_samp": 500,
-      "pulses_volley": 2,
-      "pulses_sham": 4,
-      "max_pulses": 8,
-      "amp": 0.5
-    },
     "trial": {
       "_comment": [
         "BLINDED TRIALS. The RC trigger fires in ONE direction only, and the firmware draws",

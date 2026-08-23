@@ -7,11 +7,12 @@
 // (STIM_SAMPLE_RATE_HZ), so it is stated exactly once in the whole repo. Every
 // sample-unit figure below is derived from it by the preprocessor.
 //
-// BOTH DEVICES MARK WITH EEL PULSES, but with DIFFERENT codes — not unified:
+// ONE MARKER, AND ONLY THE SD DEVICE HAS IT:
 //   SD_MARKER_*    6 pulses at a fixed 10 Hz with ALTERNATING polarity, baked into
-//                  the WAV card by build_sd_card.py. Identifies a playback.
-//   PULSE_MARKER_* 2 or 4 pulses at a fixed 100 Hz, SAME polarity, synthesised live
-//                  by the RC device. The COUNT tags volley vs sham.
+//                  the WAV card by build_sd_card.py. Identifies a playback. It is that
+//                  device's ONLY record — it writes no pulse log.
+//   The RC device had a count-coded 100 Hz burst until 2026-08-22. Removed: its log is
+//   a precondition for output, and a SHAM was emitting four pulses before going quiet.
 #pragma once
 #include <stdint.h>
 #include "eel_stimuli.h"   // STIM_SAMPLE_RATE_HZ — the one place the rate is defined
@@ -56,13 +57,13 @@
 // in water the source impedance divides against the load. Operator-set nominal only.
 #define SD_FULLSCALE_PULSE_PEAK_MV 3313.0f
 
-// ===== RC path — the coded pulse-burst marker ==============================
-// A short EOD burst at a fixed IPI, tagged by PULSE COUNT: volley vs sham.
-#define PULSE_MARKER_IPI_SAMP      500u   // 500 samp @ 50 kHz == 10 ms == 100 Hz
-#define PULSE_MARKER_PULSES_VOLLEY 2u
-#define PULSE_MARKER_PULSES_SHAM   4u
-#define PULSE_MARKER_MAX_PULSES    8u   // sizes the static marker IPI table
-#define PULSE_MARKER_AMP           0.5f // fixed, independent of the amplitude control
+// ===== RC path — NO MARKER ================================================
+// The RC device emitted a count-coded EOD burst before every trial (2 pulses volley,
+// 4 sham, 100 Hz) until 2026-08-22. PULSE_MARKER_* is gone: the per-pulse SD log is a
+// precondition for output, so the trial was already recorded — and for a SHAM the burst
+// was not redundant at all, it was a stimulus in the no-stimulus control.
+// The SD device keeps SD_MARKER_* above; it has no log, so its lead-in is the only
+// record a playback happened.
 
 // ===== RC path — blinded trial draw ========================================
 // The RC trigger fires in ONE direction and does not say WHICH trial to run; the

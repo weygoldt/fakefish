@@ -31,10 +31,11 @@ export-generated ``eel_stimuli.h`` (``STIM_SAMPLE_RATE_HZ``) and
 ``export_teensy_stimuli.PLAYBACK_RATE_HZ``. Every sample-unit figure below is *derived*
 from it — in C by the preprocessor, in Python at import — so the rate is stated once.
 
-**The two markers are different mechanisms** and are emitted under distinct prefixes
-(``SD_MARKER_*`` = the SD card's 6-pulse alternating-polarity lead-in; ``PULSE_MARKER_*``
-= the RC device's count-coded 100 Hz burst). Both are made of eel pulses now, but they
-encode different things. Do not unify them.
+**There is one marker left, and only the SD device has it** (``SD_MARKER_*`` = the card's
+6-pulse alternating-polarity lead-in). The RC device's count-coded 100 Hz burst was removed
+on 2026-08-22: its per-pulse log cannot be absent, so the trial was already recorded, and
+for a SHAM the burst was not redundant but a stimulus inside the no-stimulus control. The
+SD device keeps its own because it writes no log at all.
 """
 
 from __future__ import annotations
@@ -174,10 +175,15 @@ def validate(c: dict, rate_hz: int, eod_len: int | None = None) -> None:
     if loc["max_hz"] <= loc["min_hz"]:
         raise ValueError("rc_path.loc_rate.max_hz must exceed min_hz")
 
-    # (8) The RC marker IPI table is sized by max_pulses; both tags must fit.
-    rcm = c["rc_path"]["pulse_marker"]
-    if max(rcm["pulses_volley"], rcm["pulses_sham"]) > rcm["max_pulses"]:
-        raise ValueError("rc_path.pulse_marker.max_pulses is smaller than a tag it must hold")
+    # (8) The RC device has no marker any more, so nothing to check here. Guard against it
+    # coming back by accident rather than by decision: re-adding the block without re-adding
+    # its emitter would leave a JSON key that silently generates nothing.
+    if "pulse_marker" in c["rc_path"]:
+        raise ValueError(
+            "rc_path.pulse_marker is back in the JSON but nothing emits it. The RC marker was "
+            "removed on 2026-08-22 because a sham — the no-stimulus control — was emitting four "
+            "pulses before going quiet. Re-adding it is a protocol decision, not a config edit."
+        )
 
 
 def _f(x: float) -> str:
@@ -190,7 +196,7 @@ def render_header(c: dict) -> str:
     sd, rc = c["sd_path"], c["rc_path"]
     lvl, ses = sd["levels"], sd["session"]
     sdm, cal = sd["pulse_marker"], sd["calibration"]
-    pm, amp, loc, trial = rc["pulse_marker"], rc["amp"], rc["loc_rate"], rc["trial"]
+    amp, loc, trial = rc["amp"], rc["loc_rate"], rc["trial"]
 
     L = []
     a = L.append
@@ -203,11 +209,12 @@ def render_header(c: dict) -> str:
     a("// (STIM_SAMPLE_RATE_HZ), so it is stated exactly once in the whole repo. Every")
     a("// sample-unit figure below is derived from it by the preprocessor.")
     a("//")
-    a("// BOTH DEVICES MARK WITH EEL PULSES, but with DIFFERENT codes — not unified:")
+    a("// ONE MARKER, AND ONLY THE SD DEVICE HAS IT:")
     a("//   SD_MARKER_*    6 pulses at a fixed 10 Hz with ALTERNATING polarity, baked into")
-    a("//                  the WAV card by build_sd_card.py. Identifies a playback.")
-    a("//   PULSE_MARKER_* 2 or 4 pulses at a fixed 100 Hz, SAME polarity, synthesised live")
-    a("//                  by the RC device. The COUNT tags volley vs sham.")
+    a("//                  the WAV card by build_sd_card.py. Identifies a playback. It is that")
+    a("//                  device's ONLY record — it writes no pulse log.")
+    a("//   The RC device had a count-coded 100 Hz burst until 2026-08-22. Removed: its log is")
+    a("//   a precondition for output, and a SHAM was emitting four pulses before going quiet.")
     a("#pragma once")
     a('#include <stdint.h>')
     a('#include "eel_stimuli.h"   // STIM_SAMPLE_RATE_HZ — the one place the rate is defined')
@@ -252,13 +259,13 @@ def render_header(c: dict) -> str:
     a("// in water the source impedance divides against the load. Operator-set nominal only.")
     a(f"#define SD_FULLSCALE_PULSE_PEAK_MV {_f(sd['fullscale_pulse_peak_mv'])}")
     a("")
-    a("// ===== RC path — the coded pulse-burst marker ==============================")
-    a("// A short EOD burst at a fixed IPI, tagged by PULSE COUNT: volley vs sham.")
-    a(f"#define PULSE_MARKER_IPI_SAMP      {pm['ipi_samp']}u   // {pm['ipi_samp']} samp @ 50 kHz == 10 ms == 100 Hz")
-    a(f"#define PULSE_MARKER_PULSES_VOLLEY {pm['pulses_volley']}u")
-    a(f"#define PULSE_MARKER_PULSES_SHAM   {pm['pulses_sham']}u")
-    a(f"#define PULSE_MARKER_MAX_PULSES    {pm['max_pulses']}u   // sizes the static marker IPI table")
-    a(f"#define PULSE_MARKER_AMP           {_f(pm['amp'])} // fixed, independent of the amplitude control")
+    a("// ===== RC path — NO MARKER ================================================")
+    a("// The RC device emitted a count-coded EOD burst before every trial (2 pulses volley,")
+    a("// 4 sham, 100 Hz) until 2026-08-22. PULSE_MARKER_* is gone: the per-pulse SD log is a")
+    a("// precondition for output, so the trial was already recorded — and for a SHAM the burst")
+    a("// was not redundant at all, it was a stimulus in the no-stimulus control.")
+    a("// The SD device keeps SD_MARKER_* above; it has no log, so its lead-in is the only")
+    a("// record a playback happened.")
     a("")
     a("// ===== RC path — blinded trial draw ========================================")
     a("// The RC trigger fires in ONE direction and does not say WHICH trial to run; the")

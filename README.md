@@ -82,14 +82,12 @@ while it is stale.
 | **Needs an SD card** | **yes** — to *read* the stimulus WAVs | **yes** — to *write* the per-pulse log (no WAVs needed; it creates `/LOGS/` itself) |
 | **Logs to the card** | not yet ([`TODO.md`](TODO.md) §5) | **every pulse**, with its exact 50 kHz sample tick — and it **will not stimulate without a working card** |
 
-**The two markers are deliberately not unified.** Both are made of eel pulses now — nothing either
-device emits is out of band — but they carry **different codes**, because they answer different
-questions. The SD device's is a 6-pulse, 10 Hz burst with **alternating polarity**: it says *this
-is a playback*, and the alternation is a pattern no eel produces and the firmware's random polarity
-flip cannot erase. The RC device's is a 2- or 4-pulse, 100 Hz burst at a **single polarity**, where
-the *count* tags volley vs sham. Same material, different codes — which is why the constants carry
-distinct `SD_MARKER_*` / `PULSE_MARKER_*` prefixes; a bare `MARKER_*` name in this repo would be a
-trap.
+**One marker, and only the SD device has it.** It is a 6-pulse, 10 Hz burst with **alternating
+polarity**: it says *this is a playback*, and the alternation is a pattern no eel produces and the
+firmware's random polarity flip cannot erase. It is that device's only record — it writes no log.
+**The RC device's marker was removed on 2026-08-22.** Its per-pulse log cannot be absent, so a
+trial was already recorded; and for a **sham** the burst was not redundant but a stimulus — the
+no-stimulus control was emitting four eel pulses before going quiet.
 
 ---
 
@@ -127,16 +125,17 @@ summed by the overlap-add engine.
   localization is the experiment**, so the SD WAVs are absolute-scaled, never peak-normalised.
 - **Localize → strike** — a localization lead, a short gap, then the volley (SD program D);
   one marker and one polarity span the whole sequence.
-- **Sham** (RC only) — the coded marker fires and the LED shows it, but **nothing** goes into
-  the water: the no-stimulus control.
+- **Sham** (RC only) — **nothing at all** goes into the water; the LED shows it and the log
+  records it. The no-stimulus control, literally so since the RC marker was removed.
 
-**Why any marker at all.** The same grids and lines that record wild fish also record whatever
-the fakefish plays at them, so downstream we must know which pulses were ours. The marker
-locates each playback in the recording and pins the recorder-vs-playback clock drift. The SD
-device's marker used to be a 10 kHz sine tone; it was retired because the output filter is 21.8 dB
-down at 10 kHz, and because everything the device puts in the water should be made of eel pulses.
-The full rationale for both codes — why alternation, why an even pulse count, why the RC device
-counts instead — is in [`firmware/README.md`](firmware/README.md).
+**Why a marker at all.** The same grids and lines that record wild fish also record whatever the
+fakefish plays at them, so downstream we must know which pulses were ours. On the SD device the
+marker is the only thing that says so, and it also pins the recorder-vs-playback clock drift. On
+the RC device the per-pulse log does that job instead — which is why the marker could go, and why
+running the randomness knob at exactly 0 during a recorded session is now a bad idea: aligning the
+log to the recording needs the localization train to have a fingerprint, and a metronome has none.
+Full rationale, including what the SD marker's alternation and even pulse count buy, is in
+[`firmware/README.md`](firmware/README.md).
 
 **Polarity is randomised per playback.** The eel EOD is monophasic on purpose, so each pulse
 injects net charge; flipping the sign of a whole playback at random keeps the net near zero

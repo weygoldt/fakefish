@@ -203,11 +203,34 @@ def test_validate_rejects_an_out_of_range_level():
         gc.validate(c, gc.RATE_HZ)
 
 
-def test_validate_rejects_a_marker_tag_that_does_not_fit():
+def test_validate_rejects_a_returning_rc_marker():
+    """The RC marker is gone, and coming back has to be a decision rather than an edit.
+
+    Removed 2026-08-22: the per-pulse log is a precondition for output, so a trial was
+    already recorded — and for a SHAM the burst was not redundant at all, it was four eel
+    pulses inside the no-stimulus control. Re-adding the JSON block without re-adding an
+    emitter would leave a key that silently generates nothing, so the validator refuses it
+    outright and says why.
+    """
     c = gc.load_constants()
-    c["rc_path"]["pulse_marker"]["pulses_sham"] = 99
-    with pytest.raises(ValueError, match="max_pulses"):
+    assert "pulse_marker" not in c["rc_path"], "the RC marker must stay out of the JSON"
+    c["rc_path"]["pulse_marker"] = {"ipi_samp": 500, "pulses_volley": 2, "pulses_sham": 4}
+    with pytest.raises(ValueError, match="no-stimulus control"):
         gc.validate(c, gc.RATE_HZ)
+
+
+def test_the_sd_marker_survived_the_rc_one():
+    """Deleting one marker must not delete the other.
+
+    The SD device writes no pulse log at all, so its 6-pulse alternating lead-in is the
+    only record that a playback happened — the premise that retired the RC marker simply
+    does not hold there.
+    """
+    c = gc.load_constants()
+    assert c["sd_path"]["pulse_marker"]["n_pulses"] == 6
+    header = gc.render_header(c)
+    assert "SD_MARKER_N_PULSES" in header
+    assert "PULSE_MARKER_IPI_SAMP" not in header
 
 
 def test_the_shipped_json_passes_its_own_validators():

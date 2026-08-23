@@ -146,8 +146,32 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    would move every train by up to one sample and destroy that property for nothing). The 6
    SYNTHETIC localization items (107–112) move whenever the rhythm changes, by design — the
    2026-08-21 re-export moved exactly those six and nothing else, which is the check to repeat.
-4. **TWO MARKER CODES, deliberately not unified.** Both devices mark with **eel pulses** —
-   nothing this project emits is out of band any more — but the *codes* differ.
+4. **ONE MARKER CODE, and only the SD device has it.** It marks with **eel pulses** — nothing
+   this project emits is out of band any more.
+
+   **The RC device's count-coded marker was REMOVED on 2026-08-22** (2 pulses = volley, 4 = sham,
+   at 100 Hz; `PULSE_MARKER_*` and `SRC_MARKER` are gone — do not reintroduce those names). Two
+   reasons, and the second is the one that matters. It was redundant: the per-pulse SD log is a
+   precondition for output (invariant 9), so a trial and its resolved outcome are already on the
+   card with a 20 µs tick. And it was **not** redundant for a SHAM — it was a stimulus inside the
+   no-stimulus control, four eel pulses at 100 Hz before the silence. `gen_constants.validate`
+   now REFUSES a returning `rc_path.pulse_marker` block by name, because re-adding it is a
+   protocol decision rather than a config edit.
+
+   What it costs, recorded so nobody rediscovers it in the field: a sham leaves **no trace at all**
+   in a recording, and a volley has no lead-in flag, so log↔recording alignment rests entirely on
+   the localization train's irregularity. That is what the alignment procedure was designed around
+   (firmware/README.md → "Aligning a log to a recording"), but it makes **CH5 at exactly 0 a bad
+   setting for a recorded session** — a metronome has no fingerprint. Both field logs to date ran
+   at randomness ≥ 0.067, never 0.
+
+   **The SD device keeps its marker, and that is not an inconsistency.** It writes no pulse log at
+   all, so its lead-in is the only record that a playback happened; the premise that retired the RC
+   marker does not hold there. The `SD_MARKER_*` prefix stays as-is — it was distinct to keep two
+   codes apart and now there is one, but renaming a shipped constant to celebrate a deletion is
+   churn.
+
+   The surviving code:
    - **Button/SD:** **6 pulses at a fixed 10 Hz (IPI 5000 samples = 100 ms) with ALTERNATING
      polarity**, at level 0.5, baked into every `/B`/`/C`/`/D` WAV by
      `build_sd_card.render_pulse_marker` (`SD_MARKER_*` in C, `MARKER_*` in `_constants.py`).
@@ -157,11 +181,6 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      so **detect the pattern, never the sign**; and the count is **EVEN**, which makes the burst
      charge-balanced (the codegen asserts evenness). The per-item lead gap is unchanged:
      `[marker] → [STIM_LEAD_GAP_SAMP] → [stimulus]`.
-   - **RC:** a **live coded burst at 100 Hz, SINGLE polarity**, tagged by pulse count —
-     volley = 2, sham = 4 (`PULSE_MARKER_*`).
-
-   The distinct prefixes are the point: a bare `MARKER_*` name in a repo with two marker codes is
-   a trap. Do not "unify" them.
 
    Program **A** on the card changed with the marker: it is a 10 s **single-polarity** eel-pulse
    train at 50 Hz (`CAL_*`, level 0.45), not a tone — single-polarity on purpose, so it reads as a

@@ -83,6 +83,23 @@
 > fully down — and the two are indistinguishable in a v2 log. The next v3 log settles it directly
 > from `ch5_us` against `zero_us`.
 
+## Marker removal (2026-08-22) — one bench check left
+
+The RC device's count-coded marker is gone: the per-pulse log is a precondition for output, so a
+trial was already recorded, and for a **sham** the burst was not redundant but a stimulus — the
+no-stimulus control was emitting four eel pulses at 100 Hz before going quiet. The SD device keeps
+its own marker, because it writes no log and the lead-in is its only record.
+
+- [ ] **Confirm a session still aligns to a recording without the marker.** This is the cost, and
+      it is the one thing only a real recording settles: a sham now leaves no trace at all, and a
+      volley has no lead-in flag, so the cross-correlation rests entirely on the localization
+      train's irregularity. Run one session with a recorder going and check the log places against
+      it. `fakefish-session stats` warns when a session's randomness stayed under 0.05, which is
+      the setting that would make this fail.
+- [ ] **Decide whether CH5 should have a floor.** If alignment proves marginal, the cheap fix is a
+      non-zero minimum on the randomness pot rather than bringing the marker back — a metronome is
+      the only setting with no fingerprint, and nothing else about it is worth having.
+
 # TODO
 
 Open items after the 3-layer merge. Everything here is **owner/bench work** or a decision that

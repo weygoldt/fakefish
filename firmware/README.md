@@ -39,7 +39,7 @@ firmware/
     config.h                   L1  pins, carrier, sample clock, LED, AMP_DEBUG
     out_hal.h                  L1  out_begin / out_write / out_silence / out_brake
     stim_levels.h              GENERATED from shared/stim_constants.json — do not edit
-    eel_player.{h,cpp}         L2  overlap-add engine (marker + volley)
+    eel_player.{h,cpp}         L2  overlap-add engine (volley playback)
     eel_stimuli.{h,cpp}        L2  generated stimulus library (byte-frozen)
     sd_player.h                L2  SD WAV streaming runtime
     locgen.h                   L2  renders one localization pulse
@@ -450,7 +450,7 @@ direct-pin stage and still has to be **scoped** before it goes near an animal.
 
 - **`eel_player`** — the overlap-add engine. Reconstructs an item from the stored inter-pulse
   intervals and per-pulse relative amplitudes, summing pulses that out-run the EOD length.
-  Pure-pull `int16`, no ISR of its own. Used for the RC device's marker and volley.
+  Pure-pull `int16`, no ISR of its own. Used for the RC device's volley playback.
 - **`sd_player`** — SD WAV streaming: header parse, ring buffer, per-button random pick. The ISR
   never touches the card; `loop()` refills the ring (single-producer/single-consumer). Used by
   the button device.
@@ -558,7 +558,7 @@ leaving how it varies over time alone, so every setting still sounds like a fish
 
 The model also carries `interrupt()`: the fish's own decision to launch a fast run, about **1 in
 49 resting pulses**. It is **not** ported. This surface runs a blinded trial design in which a
-marker's pulse count *is* the trial record, so a spontaneous burst would be an unmarked volley in
+log *is* the trial record, so a spontaneous burst would be an unlogged volley in
 the water, and one landing inside a sham would destroy the no-stimulus control. Every volley this
 device emits is operator-requested. The generated header carries no hazard constants at all, and
 `tests/test_loc_model.py` asserts that, so it cannot be wired up by accident.
@@ -621,13 +621,25 @@ not a defect; pick a faster rung if program D needs a denser lead.
 
 ---
 
-## The two markers — different codes, deliberately not unified
+## The marker — one code, and only the SD device has it
 
-Both devices tag their trials so the recording can tell playback from wild fish, and both now do it
-with **eel pulses**. What differs is the **code**, because the two markers answer different
-questions: the SD marker says *this is a playback*, the RC marker says *what comes next is a volley
-/ a sham*. The constants carry distinct prefixes (`SD_MARKER_*` vs `PULSE_MARKER_*`) precisely
-because a bare `MARKER_*` name in this repo would be a trap.
+The SD device tags its playbacks with a burst of **eel pulses** so a recording can tell them from
+wild fish. It is that device's *only* record: it writes no pulse log at all.
+
+**The RC device's marker was removed on 2026-08-22.** It was a count-coded 100 Hz burst — 2 pulses
+then a volley, 4 then silence — and it went for two reasons. It was redundant, because the RC
+device's per-pulse log is a *precondition for output* (see [Pulse logging](#pulse-logging)), so the
+trial and its resolved outcome are already on the card with a 20 µs tick. And for a **sham** it was
+not redundant at all: the no-stimulus control was emitting four eel pulses at 100 Hz before going
+quiet, which is not a control. `PULSE_MARKER_*` and `SRC_MARKER` are gone, and
+`gen_constants.validate` refuses a returning `rc_path.pulse_marker` block by name — putting it back
+is a protocol decision, not a config edit.
+
+**What that costs.** A sham now leaves no trace whatsoever in a recording, and a volley has no
+lead-in flag, so aligning a log to a recording rests entirely on the localization train's
+irregularity. That is what the alignment procedure was built around (see below), but it makes
+**CH5 at exactly 0 a bad setting for a recorded session** — an exact metronome has no fingerprint
+to correlate against. Both field logs to date ran at randomness ≥ 0.067, never 0.
 
 ### SD device: 6 pulses at 10 Hz, alternating polarity (baked into the WAVs)
 
@@ -664,14 +676,6 @@ well as open-circuit.
 `SD_CAL_RATE_HZ` (**50 Hz**, `SD_CAL_IPI_SAMP` = 1000 samples) at level `SD_LEVEL_CALIBRATION`
 (**0.45**) — a plain reference signal for setting gain and checking the rig. Single-polarity is
 deliberate: it is not a code, and it can never be mistaken for the alternating lead-in.
-
-### RC device: 2 or 4 pulses at 100 Hz, same polarity (synthesised live)
-
-A short EOD burst at a fixed 100 Hz IPI, tagged by **pulse count**: `PULSE_MARKER_PULSES_VOLLEY`
-(2) then the discharge, or `PULSE_MARKER_PULSES_SHAM` (4) then silence. 100 Hz sits clearly above
-localization (≤ 20 Hz) and below the volley peak (~330 Hz sustained). Polarity is **not** alternated —
-the burst shares the single randomised polarity of the playback it precedes, so here it is the
-*count*, not a pattern, that carries the information.
 
 ---
 
@@ -737,7 +741,8 @@ happened to precede a throw, so the operator's rate knob would silently reach in
 came out volleys.
 
 This blinds the *choice*, not the *record*: the LED still shows its distinct sham pattern
-afterwards, and the marker's pulse count still tags which trial fired — analysis needs that.
+afterwards, and the log records which trial fired — analysis needs that, and since 2026-08-22 the
+log is the only place it exists.
 
 **Failsafe:** losing CH3 turns localization off; the trigger cannot fire without a live throw, so
 signal loss can never *start* a trial. A volley already playing always runs to completion.
@@ -809,7 +814,7 @@ first:
 | two 80 ms blinks per second | **no RC link** — including a unit that has never seen one |
 | three 80 ms blinks per second | link up, **no session zero yet** — the RC path cannot stimulate |
 | one 80 ms blink every 2 s | **ready**: healthy, armed, localization off |
-| one 70 ms flash per emitted pulse | running — localization, marker or volley |
+| one 70 ms flash per emitted pulse | running — localization or volley |
 | 3 × (120 ms on, 120 ms off) | a **sham** fired (it produces no output — it is the no-stimulus control) |
 
 The inverse blink is deliberately the only *inverted* pattern in the set: it is the one condition
@@ -860,7 +865,7 @@ sample tick that placed it. Core: `eel_core/pulse_log.h`. Reader: `fakefish-puls
 
 ### Why
 
-Volley and sham **trials** are already identifiable in a recording — the count-coded marker tags
+Volley and sham **trials** used to be identifiable in a recording — the count-coded marker tagged
 them (2 pulses volley, 4 sham). The **localization train is not**. It is single-polarity EOD
 pulses from a rhythm **fitted to real resting eels**, and since 2026-08-21 it is a closer forgery
 than it ever was — it reproduces the wander that used to be the one giveaway. Nothing in the
@@ -880,7 +885,7 @@ lesser failure.
 
 What "blocking" means precisely:
 
-- **Nothing in flight is ever truncated.** A marker, volley or sham already playing runs to
+- **Nothing in flight is ever truncated.** A volley or sham already playing runs to
   completion, exactly as an RC link loss never aborts one. A half-played volley is not "no data",
   it is an artefact that looks like data. Only playback *starts* are gated, plus localization
   stopping at a clean pulse boundary.
@@ -973,7 +978,7 @@ Three properties of the schema are load-bearing:
 `item` + `pulse` together also buy a real integrity check: look up the *expected* IPI in the
 library and compare it against the logged tick deltas. That confirms the engine emitted what it
 was told to, and makes a partial volley obvious rather than looking like a short one. The volley
-item index is recoverable from **nowhere else** — not from the marker, not from the settings, and
+item index is recoverable from **nowhere else** — not from the settings, and
 from a recording only by matching the IPI sequence against all 18 candidates.
 
 ### Aligning a log to a recording
@@ -1009,8 +1014,9 @@ rather than the texture, run CH5 low.
 
 **What CH5 at 0 actually costs.** An exact metronome has no fingerprint — sliding the log by any
 whole interval fits as well as the true offset, so the localization train stops being usable for
-alignment. It is not fatal: each trial's coded marker burst is short and distinctive, so it still
-gives a sharp unambiguous anchor, and the drift can be interpolated between those anchors. So the
+alignment. **This got sharper on 2026-08-22**, when the RC marker was removed: the coded burst used
+to be a short, distinctive anchor that survived a metronome train, and it is gone. A volley still
+anchors well — a 300–400 Hz burst is unmistakable — but a *sham* now leaves nothing at all. So the
 real cost scales with how often you fire: frequent trials, workable; long quiet stretches between
 them, and you are interpolating drift across a gap with nothing to check it against. The better
 reason to keep CH5 near 1.0 is simply that 0 is not a fish — no eel discharges at a fixed

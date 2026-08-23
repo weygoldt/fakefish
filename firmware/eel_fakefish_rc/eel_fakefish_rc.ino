@@ -11,23 +11,39 @@
 //                    or sham); throw low does NOTHING
 //   CH5 pot       -> localization RANDOMNESS      CH6 pot -> AMPLITUDE (sets volley/max; loc = quarter)
 //
-// A VOLLEY and a SHAM both begin with a coded PULSE MARKER preamble (a short EOD burst, tagged by
-// pulse count) so the recording can tell them apart; the volley then plays the discharge, the
-// sham stays silent (the no-stimulus control) while the LED shows a distinct pattern.
+// A VOLLEY plays a discharge; a SHAM emits NOTHING AT ALL — it is the no-stimulus control, and
+// since 2026-08-22 that is literal. Both used to open with a count-coded PULSE MARKER so the
+// recording could tell them apart, which meant a "silent" control put four pulses in the water.
+// The per-pulse SD log is a precondition for output (invariant 9), so the trial record already
+// exists on the card with an exact 50 kHz tick; the marker was a second copy of it bought at the
+// price of contaminating the control. See "THE MARKER IS GONE" below.
 //
 // BLINDING. The operator throws "fire a trial" and the FIRMWARE decides which it is (see
-// begin_marker + TRIAL_P_VOLLEY), so when and where they trigger cannot correlate with the trial
-// type. The marker's pulse count still records the truth for analysis.
+// begin_trial + TRIAL_P_VOLLEY), so when and where they trigger cannot correlate with the trial
+// type. The PLOG_TRIAL row records the truth for analysis.
 //
-// NOTE this is the RC device's COUNT-CODED marker (2 pulses = volley, 4 = sham, at 100 Hz, same
-// polarity). The SD device uses a different code — 6 pulses at 10 Hz with ALTERNATING polarity,
-// for identification rather than trial type. See shared/stim_constants.json; do not unify them.
+// THE MARKER IS GONE (2026-08-22). It was 2 pulses for a volley and 4 for a sham, at 100 Hz. Two
+// reasons it went, and the second is the one that matters:
+//   1. It is redundant. The log cannot be absent — no working log means no output at all — so the
+//      trial and its outcome are already recorded, with a tick 20 us wide.
+//   2. IT WAS NOT REDUNDANT FOR THE SHAM, IT WAS A STIMULUS. A sham is the no-stimulus control,
+//      and it was emitting four eel pulses at 100 Hz before staying quiet. Whatever the animal did
+//      next, "nothing happened" was not what it experienced.
+// What this costs: a sham now leaves NO trace in a recording, and a volley has no "here it comes"
+// flag, so log->recording alignment rests entirely on the localization train. That is workable —
+// the train's irregularity is the fingerprint the alignment procedure was designed around — but it
+// makes CH5 at exactly 0 a genuinely bad setting for a recorded session, because a metronome has no
+// fingerprint at all. firmware/README.md -> "Aligning a log to a recording" has the argument.
+//
+// THE SD DEVICE KEEPS ITS OWN MARKER, and that is not an inconsistency: it has no pulse log, so
+// its 6-pulse alternating lead-in is the ONLY record that a playback happened. The premise that
+// retired this one — "the session is recorded anyway" — is simply not true over there.
 //
 // LAYERING. This sketch is a CONTROL SURFACE (L3) only. It owns the input decode, the session
 // state machine and the ISR that wires them together; it does NOT own the output stage or the
 // sample producers:
 //   L1  src/eel_core/out_hal.h + config.h   the DRV8871 complementary output stage (36 V, 100 kHz)
-//   L2  src/eel_core/eel_player.{h,cpp}     overlap-add engine (marker + volley)
+//   L2  src/eel_core/eel_player.{h,cpp}     overlap-add engine (volley playback)
 //       src/eel_core/locgen.h               renders the localization pulse
 //       src/eel_core/loc_rhythm.h           the FITTED resting rhythm — decides when
 //       src/eel_core/eel_stimuli.{h,cpp}    the generated stimulus library
@@ -45,11 +61,11 @@
 //
 // The model also carries a burst hazard — the fish's own decision to fire a fast run, about 1
 // in 49 resting pulses. It is DELIBERATELY not wired up. This surface runs a blinded trial
-// design in which a marker's pulse count is the trial record, so a spontaneous burst would be
+// design in which the log is the trial record, so a spontaneous burst would be
 // an unmarked volley in the water, and one landing inside a sham would destroy the no-stimulus
 // control. Every volley this device emits is operator-requested.
 //
-// PULSE LOGGING. Every pulse this device emits — localization, marker and volley alike — is
+// PULSE LOGGING. Every pulse this device emits — localization and volley alike — is
 // logged to the SD card with its exact sample tick, one row per pulse, never summarised. That
 // is what makes the localization train separable from real fish in a recording (nothing else
 // can: it is built to look exactly like a cruising eel), and it is the on-device ground truth
@@ -58,7 +74,7 @@
 // src/eel_core/pulse_log.h and firmware/README.md.
 //
 // CONCURRENCY MODEL. The 50 kHz sample-clock ISR (onSampleTick) is the SINGLE OWNER of all
-// playback-engine state (the localization scheduler + the shared EelPlayer used for the marker
+// playback-engine state (the localization scheduler + the shared EelPlayer used for the volley
 // and the volley). loop() only decodes the RC/panel inputs and publishes target parameters +
 // a trigger request through volatile words, LATCHED by the ISR at pulse boundaries. Each shared
 // value is a single aligned 32-bit word (atomic on the M7), written by exactly one side. The
@@ -66,10 +82,10 @@
 // perturbed by input capture.
 #include <IntervalTimer.h>
 #include "src/eel_core/config.h"        // L1: output stage, sample clock, LED pin
-#include "src/eel_core/stim_levels.h"   // generated playback constants (PULSE_MARKER_*, PANEL_*)
+#include "src/eel_core/stim_levels.h"   // generated playback constants (TRIAL_*, PANEL_*)
 #include "src/eel_core/out_hal.h"       // L1: out_begin/out_write/out_silence (+ AMP_DEBUG)
 #include "src/eel_core/eel_stimuli.h"   // L2: EOD_HV[] + STIM_ITEMS[] (volley snippets)
-#include "src/eel_core/eel_player.h"    // L2: shared overlap-add engine (marker + volley playback)
+#include "src/eel_core/eel_player.h"    // L2: shared overlap-add engine (volley playback)
 #include "src/eel_core/locgen.h"        // L2: renders one localization pulse
 #include "src/eel_core/loc_rhythm.h"    // L2: the fitted resting rhythm (when the next one is)
 #include "src/eel_core/pulse_log.h"     // L2: per-pulse SD event log (ISR pushes, loop() writes)
@@ -129,43 +145,26 @@ static volatile uint16_t g_ch_us[RC_N_CHANNELS];   // raw width per channel, us 
 static volatile uint16_t g_zero_us = PLOG_ABSENT_U16;  // the captured session zero, us
 
 // ===== ISR-owned playback state ===========================================
-enum Source { SRC_IDLE, SRC_LOC, SRC_MARKER, SRC_VOLLEY, SRC_SHAM };
+enum Source { SRC_IDLE, SRC_LOC, SRC_VOLLEY, SRC_SHAM };
 static volatile Source src = SRC_IDLE;
-static EelPlayer  player;                           // marker + volley engine (touched ONLY in the ISR)
+static EelPlayer  player;                           // volley engine (touched ONLY in the ISR)
 static LocGen     loc;                               // localization pulse renderer (ISR only)
 static LocRhythm  rhythm;                            // the fitted resting rhythm (ISR only)
 // Tick of the last localization ONSET, 64-bit so the difference below cannot wrap. The rhythm
 // relaxes in WALL-CLOCK time, so every draw must be told how long it has actually been since
-// the previous pulse — including time spent on a marker, a volley, or with the throttle at
+// the previous pulse — including time spent on a volley, or with the throttle at
 // rest. Feeding back the interval the model last *scheduled* would be wrong twice over: a
 // trial preempts the localization train part-way through an interval that is then never
 // realised, and the time the trial itself took would go unbooked.
 static uint64_t   g_loc_last_onset = 0;
 static uint32_t   g_trig_seen = 0;                   // last consumed trigger seq (ISR only)
-static int        g_post_marker = RC_TRIG_NONE;      // what follows the marker: VOLLEY burst / SHAM
-static int8_t     g_playback_pol = 1;                // polarity shared by a marker + its volley
+static int8_t     g_playback_pol = 1;                // polarity drawn per trial
 static float      g_playback_volley_amp = 0.0f;      // volley amplitude latched at the throw (volley start)
 static uint32_t   g_tick = 0;                        // monotonic sample counter (ISR only)
 static uint32_t   g_led_off_at = 0;                  // g_tick at which the per-pulse flash ends
-static uint32_t   g_marker_onset = 0;                // detect marker pulse onsets for the LED
 static uint32_t   g_volley_onset = 0;                // detect volley pulse onsets for the LED
 static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM LED pattern
 
-// The marker StimItem: a short EOD burst at a fixed IPI, count = the volley/sham tag.
-//
-// This item is BUILT AT RUNTIME (setup(), below) rather than exported, so it is outside the
-// Python gate that holds every library item to eel_player's minimum onset spacing. A
-// runtime-built item has to carry that check itself, here, or a marker faster than the engine
-// can mix would drop pulses in the ISR — and the marker is the on-water ground truth for the
-// blind. At 500 samples (100 Hz) against a 131-sample EOD it is nowhere near the limit; the
-// assertion exists so that retuning the marker cannot quietly cross it.
-static_assert(PULSE_MARKER_IPI_SAMP >= EEL_PLAYER_MIN_IPI_SAMP,
-              "PULSE_MARKER_IPI_SAMP is tighter than eel_player can mix — raise the marker's "
-              "IPI, or widen EEL_PLAYER_MIN_IPI_SAMP and pay for it on every ISR tick");
-// uint32_t, matching StimItem::ipi_samp since library format v4 widened it (the
-// localization items now carry multi-second silences that a uint16 cannot hold).
-static uint32_t   g_marker_ipi[PULSE_MARKER_MAX_PULSES];
-static StimItem   g_marker_item;
 
 // ===== pulse log (ISR-owned counters; the FILE is owned by loop()) ========
 static PulseLog   g_plog;                             // ring + open file (see pulse_log.h)
@@ -247,55 +246,13 @@ static inline void begin_loc() {
   g_playing = true;
   log_event(PLOG_LOCON);
 }
-// A trigger (volley or sham) always starts with the coded marker; g_post_marker records what
-// follows. One polarity is chosen here and shared by the marker + the volley it precedes.
-//
-// THE BLINDED DRAW HAPPENS HERE. The RC lever requests RC_TRIG_RANDOM ("run a trial") and this
-// is where it becomes a volley or a sham — in the ISR, at the moment of playback. Two reasons
-// it lives here rather than in loop(): random() is called from the ISR elsewhere (polarity, the
-// volley item pick) and must stay single-caller, and drawing at playback time means a request
-// that is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM buttons pass
-// through unchanged, so the bench stays deterministic.
-//
-// The localization rhythm is deliberately NOT on this stream — it runs its own generator (see
-// loc_rhythm.h). Sharing one would make the blinded sequence depend on how many localization
-// pulses happened to precede a throw, so the operator's rate knob would silently reach into
-// which trials came out volleys.
-static inline void begin_marker(int kind) {
-  out_silence();                                 // ...and for the marker + whatever follows it
-  if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
-  const int requested = kind;                    // BEFORE the blinded draw — see log_trig_code
-  if (kind == RC_TRIG_RANDOM)
-    kind = (random(TRIAL_DRAW_RANGE) < TRIAL_VOLLEY_CUTOFF) ? RC_TRIG_VOLLEY : RC_TRIG_SHAM;
-  g_playback_pol = rand_polarity();
-  g_playback_volley_amp = g_volley_amp;   // latch volley amplitude at the throw, held for the volley
-  g_marker_item.n = (uint16_t)((kind == RC_TRIG_VOLLEY) ? PULSE_MARKER_PULSES_VOLLEY : PULSE_MARKER_PULSES_SHAM);
-  eel_player_start_item(&player, &g_marker_item, PULSE_MARKER_AMP, g_playback_pol);
-  g_marker_onset = 0xFFFFFFFFu;
-  g_post_marker = kind;
-  g_volley_item = PLOG_ABSENT_ITEM;   // no item drawn yet; a sham never draws one at all
-  g_trig_seen = g_trig_seq;   // consume the request (one playback per throw; later throws ignored)
-  src = SRC_MARKER;
-  g_playing = true;
-  // THE ON-DEVICE GROUND TRUTH FOR THE BLIND. The marker's pulse count records the outcome in
-  // the water; this row records it on the card. Two independent records of the same fact, by
-  // design — and this one also captures what was REQUESTED, which the water cannot show.
-  g_trial_id++;
-  PlogRec r;
-  log_fill(&r, PLOG_TRIAL);
-  r.trial = g_trial_id;
-  r.pol   = g_playback_pol;
-  r.req   = log_trig_code(requested);
-  r.res   = log_trig_code(kind);
-  plog_push(&g_plog, &r);
-}
 static inline void begin_volley_burst() {
   out_silence();                                 // clean seam into the volley; harmless and explicit
   uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
-  eel_player_start_item(&player, &STIM_ITEMS[idx], g_playback_volley_amp, g_playback_pol);   // latched amp + marker's polarity
+  eel_player_start_item(&player, &STIM_ITEMS[idx], g_playback_volley_amp, g_playback_pol);   // latched amp + the trial's polarity
   g_volley_onset = 0xFFFFFFFFu;
-  // WHICH pattern fired is recoverable from NOWHERE else — not from the marker, not from the
-  // settings, and from a recording only by matching the IPI sequence against all 18 candidates.
+  // WHICH pattern fired is recoverable from NOWHERE else — not from the settings, and from a
+  // recording only by matching the IPI sequence against all 100 candidates.
   g_volley_item = (int8_t)idx;
   src = SRC_VOLLEY;
 }
@@ -308,6 +265,47 @@ static inline void begin_sham() {   // no water output — just the distinct LED
   log_fill(&r, PLOG_SHAM);
   r.trial = g_trial_id;
   plog_push(&g_plog, &r);
+}
+// A trigger resolves to a volley or a sham HERE, and plays it immediately — there is no preamble
+// any more (see "THE MARKER IS GONE" at the top of this file).
+//
+// THE BLINDED DRAW HAPPENS HERE. The RC lever requests RC_TRIG_RANDOM ("run a trial") and this is
+// where it becomes a volley or a sham — in the ISR, at the moment of playback. Two reasons it
+// lives here rather than in loop(): random() is called from the ISR elsewhere (polarity, the
+// volley item pick) and must stay single-caller, and drawing at playback time means a request that
+// is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM buttons pass through
+// unchanged, so the bench stays deterministic.
+//
+// The localization rhythm is deliberately NOT on this stream — it runs its own generator (see
+// loc_rhythm.h). Sharing one would make the blinded sequence depend on how many localization
+// pulses happened to precede a throw, so the operator's rate knob would silently reach into which
+// trials came out volleys.
+static inline void begin_trial(int kind) {
+  out_silence();                                 // clean seam into whatever this resolves to
+  if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
+  const int requested = kind;                    // BEFORE the blinded draw — see log_trig_code
+  if (kind == RC_TRIG_RANDOM)
+    kind = (random(TRIAL_DRAW_RANGE) < TRIAL_VOLLEY_CUTOFF) ? RC_TRIG_VOLLEY : RC_TRIG_SHAM;
+  g_playback_pol = rand_polarity();
+  g_playback_volley_amp = g_volley_amp;   // latch volley amplitude at the throw, held for the volley
+  g_volley_item = PLOG_ABSENT_ITEM;   // no item drawn yet; a sham never draws one at all
+  g_trig_seen = g_trig_seq;   // consume the request (one playback per throw; later throws ignored)
+  g_playing = true;
+
+  // THE ONLY RECORD THIS TRIAL LEAVES, now that the water carries no code. It captures what was
+  // REQUESTED alongside what was RESOLVED — the distinction between a genuinely blinded lever
+  // throw and a bench-forced panel press, which nothing else can reconstruct.
+  g_trial_id++;
+  PlogRec r;
+  log_fill(&r, PLOG_TRIAL);
+  r.trial = g_trial_id;
+  r.pol   = g_playback_pol;
+  r.req   = log_trig_code(requested);
+  r.res   = log_trig_code(kind);
+  plog_push(&g_plog, &r);
+
+  if (kind == RC_TRIG_VOLLEY) begin_volley_burst();
+  else                        begin_sham();
 }
 static inline void go_idle() {
   out_silence();                                 // nothing playing, nothing scheduled -> hard brake, no drain
@@ -330,7 +328,7 @@ static inline void resume_after_playback() {
 // localization pulse is indistinguishable from a real fish, so putting one in the water
 // silently poisons the recording. The gate is applied only where a playback would START
 // (SRC_IDLE, and the silent gap / interval boundary of SRC_LOC) — never mid-playback: a
-// marker, volley or sham already in flight always runs to completion, exactly as an RC link
+// volley or sham already in flight always runs to completion, exactly as an RC link
 // loss never aborts one. A truncated volley is not "no data", it is an artefact that looks
 // like data.
 static void onSampleTick() {
@@ -363,31 +361,6 @@ static void onSampleTick() {
   }
 
   switch (src) {
-    case SRC_MARKER: {
-      int16_t s;
-      if (eel_player_next(&player, &s)) {
-        if (s == 0) out_silence(); else out_write(s);
-        if (player.last_onset != g_marker_onset) {
-          g_marker_onset = player.last_onset;
-          led_flash();
-          // eel_player_next() has already advanced k past the pulse it just started, so the
-          // pulse whose onset this is has index k-1. No item: the marker is a StimItem built
-          // at runtime in setup(), not a library entry — so its item column stays EMPTY.
-          PlogRec r;
-          log_fill(&r, PLOG_MARKER);
-          r.pulse = (uint16_t)(player.k - 1);
-          r.trial = g_trial_id;
-          r.pol   = g_playback_pol;
-          r.amp_m = plog_milli(PULSE_MARKER_AMP);
-          plog_push(&g_plog, &r);
-        }
-        led_service();
-      } else {
-        if (g_post_marker == RC_TRIG_VOLLEY) begin_volley_burst();
-        else begin_sham();   // RC_TRIG_SHAM
-      }
-      break;
-    }
     case SRC_VOLLEY: {
       int16_t s;
       if (eel_player_next(&player, &s)) {
@@ -446,7 +419,7 @@ static void onSampleTick() {
         // A logging failure stops the train HERE, in the silent gap — a clean seam that
         // truncates nothing. It is checked first because it outranks both other reasons.
         if (!g_log_ok) { go_idle(); break; }
-        if (trig_pending()) { begin_marker(g_trig_kind); break; }
+        if (trig_pending()) { begin_trial(g_trig_kind); break; }
         if (!g_loc_enabled) { go_idle(); break; }
       }
       int onset, boundary;
@@ -478,7 +451,7 @@ static void onSampleTick() {
       // queued, matching how a throw made during a playback is ignored — otherwise a stale
       // request would fire without warning the moment the card recovered.
       if (!g_log_ok) { g_trig_seen = g_trig_seq; break; }
-      if (trig_pending()) { begin_marker(g_trig_kind); }
+      if (trig_pending()) { begin_trial(g_trig_kind); }
       else if (g_loc_enabled) { begin_loc(); }
       // LED in idle is owned by loop() (dark, the no-RC-signal blink, or the log-fault
       // inverse-blink).
@@ -489,14 +462,10 @@ static void onSampleTick() {
 
 // L3 provenance appended to EVERY log file's header (including one opened by a mid-session
 // recovery — it is stored as a hook, not called once). These are the surface-specific
-// constants an analysis needs to interpret the rows: the marker code that tags a trial in the
+// constants an analysis needs to interpret the rows: the trial draw that decides a trial in the
 // water, the range the volley item index is drawn from, and the blind probability.
 static void log_header_hook(PulseLog* L) {
   plog_header_kv(L, "surface", 0);                 // 0 == eel_fakefish_rc
-  plog_header_kv(L, "marker_ipi_samp", PULSE_MARKER_IPI_SAMP);
-  plog_header_kv(L, "marker_pulses_volley", PULSE_MARKER_PULSES_VOLLEY);
-  plog_header_kv(L, "marker_pulses_sham", PULSE_MARKER_PULSES_SHAM);
-  plog_header_kv(L, "marker_amp_milli", plog_milli(PULSE_MARKER_AMP));
   plog_header_kv(L, "volley_item_first", RC_VOLLEY_ITEM_FIRST);
   plog_header_kv(L, "volley_item_count", RC_VOLLEY_ITEM_COUNT);
   plog_header_kv(L, "trial_p_volley_milli", plog_milli(TRIAL_P_VOLLEY));
@@ -521,15 +490,6 @@ void setup() {
   rc_begin();                                        // 4 RC pins + pin-change interrupts
   rc_zero_reset(&g_zero);                            // no session zero until the throttle supplies one
   for (int i = 0; i < RC_N_CHANNELS; i++) g_ch_us[i] = PLOG_ABSENT_U16;   // "never seen", not 0 us
-
-  // Build the coded marker: a fixed-IPI EOD burst (its pulse count is set per fire).
-  g_marker_ipi[0] = 0;
-  for (uint16_t i = 1; i < PULSE_MARKER_MAX_PULSES; i++) g_marker_ipi[i] = PULSE_MARKER_IPI_SAMP;
-  g_marker_item.ipi_samp = g_marker_ipi;
-  g_marker_item.rel_amp = NULL;
-  g_marker_item.n = PULSE_MARKER_PULSES_VOLLEY;
-  g_marker_item.kind = 0;
-  g_marker_item.group = 0;
 
   // Panel defaults so a bench unit (no transmitter) has a rate/randomness/amplitude.
   g_rate_tempo    = loc_rhythm_rate_for_hz(PANEL_RATE_HZ);
