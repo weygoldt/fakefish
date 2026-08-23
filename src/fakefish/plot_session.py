@@ -313,14 +313,22 @@ def stats(
         s.ipi_cv2,
     )
 
-    # ALIGNMENT WARNING. With the RC marker removed (2026-08-22) a sham leaves no trace in a
-    # recording at all, so placing the log against it rests entirely on the localization
-    # train's irregularity. An exact metronome has no fingerprint to correlate against.
-    if np.isfinite(s.randomness_min) and s.randomness_max < 0.05:
+    # ALIGNMENT WARNING — and the condition is NO ANCHORS, not low randomness.
+    #
+    # A volley anchors a recording extremely well: 46-364 pulses at 300-400 Hz whose exact IPI
+    # sequence is recoverable from the library via the logged item index. A sham emits nothing,
+    # but its time interpolates between volley anchors — at ~1 ms over a typical 10-26 s gap,
+    # which is why removing the marker cost so little. What cannot be placed is a session with
+    # no volley at all AND a localization train too regular to fingerprint; an earlier version
+    # of this warning fired on low randomness alone and would have cried wolf on every session
+    # that simply ran the knob down.
+    anchorless = s.n_volley == 0 and (
+        s.n_loc == 0 or (np.isfinite(s.randomness_max) and s.randomness_max < 0.05)
+    )
+    if anchorless:
         log.warning(
-            "  randomness never exceeded %.3f — a near-metronome train has little fingerprint, "
-            "and with no marker in the water this session may be hard to align to a recording",
-            s.randomness_max,
+            "  no volley pulses and no irregular localization — this session may have nothing "
+            "a recording can be aligned against (the RC marker was removed 2026-08-22)"
         )
 
     if s.throttle_reached_zero is None:

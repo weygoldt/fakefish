@@ -158,12 +158,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
    now REFUSES a returning `rc_path.pulse_marker` block by name, because re-adding it is a
    protocol decision rather than a config edit.
 
-   What it costs, recorded so nobody rediscovers it in the field: a sham leaves **no trace at all**
-   in a recording, and a volley has no lead-in flag, so log↔recording alignment rests entirely on
-   the localization train's irregularity. That is what the alignment procedure was designed around
-   (firmware/README.md → "Aligning a log to a recording"), but it makes **CH5 at exactly 0 a bad
-   setting for a recorded session** — a metronome has no fingerprint. Both field logs to date ran
-   at randomness ≥ 0.067, never 0.
+   **It costs almost nothing for alignment**, contrary to the first version of this note. A volley
+   is the anchor, and a better one than the marker ever was: 46–364 pulses (median ~100) at
+   300–400 Hz whose exact IPI sequence is recoverable from the library through the logged `item`
+   index, against the marker's two pulses. A sham emits nothing, but its time comes from
+   interpolating between volley anchors — on both field logs volleys land every ~10 s (largest gap
+   26 s), over which 40 ppm of clock drift is **~1 ms**. The only session alignment cannot place is
+   one with no volley *and* no localization, which is a session that put nothing in the water.
 
    **The SD device keeps its marker, and that is not an inconsistency.** It writes no pulse log at
    all, so its lead-in is the only record that a playback happened; the premise that retired the RC

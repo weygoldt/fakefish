@@ -90,15 +90,13 @@ trial was already recorded, and for a **sham** the burst was not redundant but a
 no-stimulus control was emitting four eel pulses at 100 Hz before going quiet. The SD device keeps
 its own marker, because it writes no log and the lead-in is its only record.
 
-- [ ] **Confirm a session still aligns to a recording without the marker.** This is the cost, and
-      it is the one thing only a real recording settles: a sham now leaves no trace at all, and a
-      volley has no lead-in flag, so the cross-correlation rests entirely on the localization
-      train's irregularity. Run one session with a recorder going and check the log places against
-      it. `fakefish-session stats` warns when a session's randomness stayed under 0.05, which is
-      the setting that would make this fail.
-- [ ] **Decide whether CH5 should have a floor.** If alignment proves marginal, the cheap fix is a
-      non-zero minimum on the randomness pot rather than bringing the marker back — a metronome is
-      the only setting with no fingerprint, and nothing else about it is worth having.
+- [ ] **Confirm a session still aligns to a recording without the marker.** Worth one check, but
+      the arithmetic says it should be comfortable: a volley is 46–364 pulses at 300–400 Hz whose
+      exact IPI sequence the log's `item` index looks up in the library — a far richer anchor than
+      the marker's two pulses — and a sham's time interpolates between volley anchors at ~1 ms over
+      the 10–26 s gaps seen in both field logs. Run one session with a recorder going and confirm
+      the log places against it. `fakefish-session stats` warns only when a session has **no
+      volleys and no irregular localization**, i.e. nothing in the water to anchor on at all.
 
 # TODO
 

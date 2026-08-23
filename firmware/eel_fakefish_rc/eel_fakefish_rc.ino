@@ -29,11 +29,13 @@
 //   2. IT WAS NOT REDUNDANT FOR THE SHAM, IT WAS A STIMULUS. A sham is the no-stimulus control,
 //      and it was emitting four eel pulses at 100 Hz before staying quiet. Whatever the animal did
 //      next, "nothing happened" was not what it experienced.
-// What this costs: a sham now leaves NO trace in a recording, and a volley has no "here it comes"
-// flag, so log->recording alignment rests entirely on the localization train. That is workable —
-// the train's irregularity is the fingerprint the alignment procedure was designed around — but it
-// makes CH5 at exactly 0 a genuinely bad setting for a recorded session, because a metronome has no
-// fingerprint at all. firmware/README.md -> "Aligning a log to a recording" has the argument.
+// What this costs for ALIGNMENT: almost nothing. A volley is the anchor and a far better one than
+// the marker was — 46..364 pulses at 300-400 Hz whose exact IPI sequence the log's `item` index
+// looks up in the library, against the marker's two. A sham emits nothing, but its time comes from
+// interpolating between volley anchors, and on both field logs volleys land every ~10 s (largest
+// gap 26 s), over which 40 ppm of clock drift is about 1 ms. The only unplaceable session is one
+// with no volley AND no localization — which put nothing in the water to place.
+// firmware/README.md -> "Aligning a log to a recording" has the argument.
 //
 // THE SD DEVICE KEEPS ITS OWN MARKER, and that is not an inconsistency: it has no pulse log, so
 // its 6-pulse alternating lead-in is the ONLY record that a playback happened. The premise that

@@ -635,11 +635,13 @@ quiet, which is not a control. `PULSE_MARKER_*` and `SRC_MARKER` are gone, and
 `gen_constants.validate` refuses a returning `rc_path.pulse_marker` block by name — putting it back
 is a protocol decision, not a config edit.
 
-**What that costs.** A sham now leaves no trace whatsoever in a recording, and a volley has no
-lead-in flag, so aligning a log to a recording rests entirely on the localization train's
-irregularity. That is what the alignment procedure was built around (see below), but it makes
-**CH5 at exactly 0 a bad setting for a recorded session** — an exact metronome has no fingerprint
-to correlate against. Both field logs to date ran at randomness ≥ 0.067, never 0.
+**What that costs — less than it first appears.** A **volley** is the alignment anchor, and a better one than the marker ever was: 46–364 pulses
+(median ~100) at 300–400 Hz, whose exact IPI sequence is recoverable from the library through the
+logged `item` index — against the marker's two. A **sham** emits nothing, but its time is recovered
+by interpolating between volley anchors, and that is cheap: on both field logs volleys land every
+~10 s (largest gap 26 s), over which 40 ppm of clock drift is **~1 ms**. Alignment only has nothing
+to work with in a session containing no volley *and* no localization — which is a session that put
+nothing in the water.
 
 ### SD device: 6 pulses at 10 Hz, alternating polarity (baked into the WAVs)
 
@@ -1014,9 +1016,10 @@ rather than the texture, run CH5 low.
 
 **What CH5 at 0 actually costs.** An exact metronome has no fingerprint — sliding the log by any
 whole interval fits as well as the true offset, so the localization train stops being usable for
-alignment. **This got sharper on 2026-08-22**, when the RC marker was removed: the coded burst used
-to be a short, distinctive anchor that survived a metronome train, and it is gone. A volley still
-anchors well — a 300–400 Hz burst is unmistakable — but a *sham* now leaves nothing at all. So the
+alignment. **The RC marker's removal on 2026-08-22 barely touches this.** The coded burst was two
+pulses; a volley is 46–364 of them at 300–400 Hz, and the log's `item` index names which library
+entry played, so the expected IPI sequence can be looked up and matched exactly. A *sham* leaves
+nothing, but its time interpolates between volley anchors at ~1 ms over a typical 10–26 s gap. So the
 real cost scales with how often you fire: frequent trials, workable; long quiet stretches between
 them, and you are interpolating drift across a gap with nothing to check it against. The better
 reason to keep CH5 near 1.0 is simply that 0 is not a fish — no eel discharges at a fixed
