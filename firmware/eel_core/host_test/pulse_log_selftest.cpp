@@ -330,9 +330,9 @@ static void test_format_pulse_rows() {
 // silently returns the LAST item instead of raising, so a leaked -1 would misattribute
 // every localization and marker pulse without anything appearing to fail.
 static void test_absent_never_leaks() {
-  const uint8_t evs[] = {PLOG_BOOT, PLOG_LOC, PLOG_MARKER, PLOG_VOLLEY, PLOG_TRIAL,
-                         PLOG_SHAM, PLOG_LOCON, PLOG_LOCOFF, PLOG_LINK, PLOG_ANCHOR,
-                         PLOG_DROP, PLOG_GAP};
+  const uint8_t evs[] = {PLOG_BOOT, PLOG_LOC, PLOG_MARKER, PLOG_VOLLEY, PLOG_BASE,
+                         PLOG_TRIAL, PLOG_SHAM, PLOG_LOCON, PLOG_LOCOFF, PLOG_LINK,
+                         PLOG_ANCHOR, PLOG_DROP, PLOG_GAP};
   for (uint8_t ev : evs) {
     PlogRec r;
     plog_rec_init(&r, ev, 1);
@@ -463,7 +463,7 @@ static void test_kv_and_header() {
   std::string out;
   plog_emit_header(&h, sink_str, &out);
   CHECK(out.rfind("#fakefish-pulse-log\n", 0) == 0, "header starts with the magic line");
-  CHECK(out.find("#format_version=3\n") != std::string::npos, "header carries the version");
+  CHECK(out.find("#format_version=4\n") != std::string::npos, "header carries the version");
   CHECK(out.find("#rtc_valid=1\n") != std::string::npos, "a plausible RTC is marked valid");
   CHECK(out.find("#eod_net_integral_x1000=41577\n") != std::string::npos, "library fingerprint");
   CHECK(out.find("#build=Jan  1 2026 00:00:00\n") != std::string::npos, "build stamp");
@@ -523,7 +523,11 @@ static void emit_golden() {
   plog_emit_kv(sink_str, &out, "marker_amp_milli", 500);
   plog_emit_kv(sink_str, &out, "volley_item_first", 7);
   plog_emit_kv(sink_str, &out, "volley_item_count", 18);
-  plog_emit_kv(sink_str, &out, "trial_p_volley_milli", 500);
+  plog_emit_kv(sink_str, &out, "trial_w_volley_milli", 334);
+  plog_emit_kv(sink_str, &out, "trial_w_baseline_milli", 333);
+  plog_emit_kv(sink_str, &out, "trial_w_silence_milli", 333);
+  plog_emit_kv(sink_str, &out, "trial_base_tick_milli_hz", 3150);
+  plog_emit_kv(sink_str, &out, "trial_base_randomness_milli", 1000);
   plog_emit_kv(sink_str, &out, "loc_refractory_samp", 250);
   plog_emit_columns(sink_str, &out);
 
@@ -568,6 +572,7 @@ static void emit_golden() {
   plog_rec_init(&r, PLOG_LOCOFF, 130000); ctx(r); rows.push_back(r);
   plog_rec_init(&r, PLOG_TRIAL, 130000);
   r.trial = 1; r.pol = 1; r.req = PLOG_KIND_RANDOM; r.res = PLOG_KIND_VOLLEY;
+  r.item = 13;   // v4: the drawn item, on the TRIAL row, for every arm
   ctx(r); rows.push_back(r);
   for (uint16_t i = 0; i < 2; i++) {     // marker: no item, it is built at runtime
     plog_rec_init(&r, PLOG_MARKER, 130000 + (uint64_t)i * 500);
@@ -593,30 +598,34 @@ static void emit_golden() {
   plog_rec_init(&r, PLOG_DROP, 152400); r.val = 3; rows.push_back(r);
   plog_rec_init(&r, PLOG_LOC, 152400); r.amp_m = LOC_AMP; r.pol = -1; ctx(r); rows.push_back(r);
 
-  // A BLINDED trial that drew SHAM: marker of 4 pulses, then NO water output at all — the
+  // A BLINDED trial that drew SILENCE: marker of 4 pulses, then NO water output at all — the
   // SHAM row is the only thing that makes the trial visible in the log.
   plog_rec_init(&r, PLOG_LOCOFF, 160000); ctx(r); rows.push_back(r);
   plog_rec_init(&r, PLOG_TRIAL, 160000);
   r.trial = 2; r.pol = -1; r.req = PLOG_KIND_RANDOM; r.res = PLOG_KIND_SHAM;
+  r.item = 18;   // the item whose LENGTH this silent arm borrowed
   ctx(r); rows.push_back(r);
   for (uint16_t i = 0; i < 4; i++) {
     plog_rec_init(&r, PLOG_MARKER, 160000 + (uint64_t)i * 500);
     r.pulse = i; r.trial = 2; r.pol = -1; r.amp_m = 500;
     ctx(r); rows.push_back(r);
   }
-  plog_rec_init(&r, PLOG_SHAM, 161500); r.trial = 2; ctx(r); rows.push_back(r);
+  plog_rec_init(&r, PLOG_SHAM, 161500); r.trial = 2; r.item = 18; ctx(r); rows.push_back(r);
 
-  // resume_after_playback() restarts the train once the sham's LED pattern finishes, so every
+  // resume_after_playback() restarts the train once the silence arm's duration elapses, so every
   // LOCOFF in this file is matched by a LOCON — the grammar the firmware actually emits.
   plog_rec_init(&r, PLOG_LOCON, 163000); ctx(r); rows.push_back(r);
   plog_rec_init(&r, PLOG_LOC, 163000); r.amp_m = LOC_AMP; r.pol = 1; ctx(r); rows.push_back(r);
 
-  // An explicit BENCH trial from a panel button: requested VOLLEY, so not blinded. It runs the
-  // same marker + volley as any other volley trial — a TRIAL row is ALWAYS followed by its
-  // marker pulses, so the grammar here matches what the firmware can actually produce.
+  // A trial whose REQUEST was an explicit VOLLEY rather than RANDOM. No input can produce this
+  // any more — the panel's explicit buttons became one blinded TRIAL button on 2026-08-24 — but
+  // v2/v3 files contain such rows, and the reader must keep reading them. Kept as legacy
+  // coverage for the `req` column, alongside the MARKER rows above, which are legacy for the
+  // same reason (the marker was deleted in 30e2dca).
   plog_rec_init(&r, PLOG_LOCOFF, 170000); ctx(r); rows.push_back(r);
   plog_rec_init(&r, PLOG_TRIAL, 170000);
   r.trial = 3; r.pol = 1; r.req = PLOG_KIND_VOLLEY; r.res = PLOG_KIND_VOLLEY;
+  r.item = 20;
   ctx(r); rows.push_back(r);
   for (uint16_t i = 0; i < 2; i++) {
     plog_rec_init(&r, PLOG_MARKER, 170000 + (uint64_t)i * 500);
@@ -635,9 +644,38 @@ static void emit_golden() {
   plog_rec_init(&r, PLOG_LOCON, 180000); ctx(r); rows.push_back(r);
   plog_rec_init(&r, PLOG_LOC, 180000); r.amp_m = LOC_AMP; r.pol = 1; ctx(r); rows.push_back(r);
 
+  // A BLINDED trial that drew BASELINE (v4) — the third arm. A fish that is present and NOT
+  // hunting: resting-rhythm pulses at LOCALIZATION amplitude, for exactly as long as the drawn
+  // volley (item 22, ~0.5 s == 25000 samples) would have run.
+  //
+  // Three things here are the whole reason the arm exists, and all three are visible in the rows:
+  //   * they are BASE rows, not LOC. Both sit at localization amplitude, so once the ambient
+  //     train resumes beside them nothing else could separate the treatment from the fish
+  //     ticking along. A shared row type would make the arm unrecoverable.
+  //   * the FIRST pulse is at the TRIAL row's own tick (181100). The arm is ANCHORED at onset,
+  //     exactly as a volley's first pulse is. Unanchored, at the measured 3.15 Hz tick, 40 % of
+  //     these arms would hold no pulse at all and be indistinguishable from a SILENCE arm.
+  //   * `item` is on the TRIAL row AND on every BASE row. That is the only record of how long a
+  //     non-volley arm was meant to last — nothing was emitted at its end to measure.
+  // The intervals are a heavy-tailed resting draw, not a metronome: 235 ms then 188 ms.
+  plog_rec_init(&r, PLOG_LOCOFF, 181000); ctx(r); rows.push_back(r);
+  plog_rec_init(&r, PLOG_TRIAL, 181100);
+  r.trial = 4; r.pol = 1; r.req = PLOG_KIND_RANDOM; r.res = PLOG_KIND_BASELINE;
+  r.item = 22;
+  ctx(r); rows.push_back(r);
+  const uint64_t base_ticks[] = {181100, 192850, 202250};
+  for (uint16_t i = 0; i < 3; i++) {
+    plog_rec_init(&r, PLOG_BASE, base_ticks[i]);
+    r.item = 22; r.trial = 4; r.pol = 1; r.amp_m = LOC_AMP;
+    ctx(r); rows.push_back(r);
+  }
+  // The arm ends at 181100 + 25000 == 206100; the train resumes just after.
+  plog_rec_init(&r, PLOG_LOCON, 207000); ctx(r); rows.push_back(r);
+  plog_rec_init(&r, PLOG_LOC, 207000); r.amp_m = LOC_AMP; r.pol = 1; ctx(r); rows.push_back(r);
+
   // RC link lost -> the throttle drops -> localization stops. The LINK row explains the gap.
-  plog_rec_init(&r, PLOG_LINK, 200000);  r.val = 0; ctx(r); rows.push_back(r);
-  plog_rec_init(&r, PLOG_LOCOFF, 200000); ctx(r); rows.push_back(r);
+  plog_rec_init(&r, PLOG_LINK, 260000);  r.val = 0; ctx(r); rows.push_back(r);
+  plog_rec_init(&r, PLOG_LOCOFF, 260000); ctx(r); rows.push_back(r);
 
   // A later anchor with a DEAD coin cell. The Teensy RTC does not read 0 in that case — it
   // FREE-RUNS UPWARD from a small value after every power cycle — so the row carries a

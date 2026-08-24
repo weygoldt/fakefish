@@ -117,7 +117,13 @@ def loc_runs(log: PulseLogFile) -> list[LocRun]:
 
 @dataclass(frozen=True)
 class Trial:
-    """One blinded (or bench-forced) trial, from its marker to the end of its volley."""
+    """One trial and everything it emitted — which for one of the three arms is nothing.
+
+    The three arms (v4) are VOLLEY, BASELINE and SILENCE. They are all the same
+    LENGTH: every trial draws a library item and the two non-volley arms hold for
+    exactly the duration that item would have taken. :attr:`item` is therefore
+    populated for all three, and is the only record of how long a silent arm ran.
+    """
 
     trial_id: int
     start_s: float
@@ -126,14 +132,31 @@ class Trial:
     blinded: bool
     marker_pulses: int
     volley_pulses: int
+    base_pulses: int
+    """Pulses emitted by a BASELINE arm — a fish present and not hunting. Counted
+    separately from the ambient localization train because they sit at the same
+    amplitude, so nothing else could tell the treatment from the fish beside it."""
     item: Optional[int]
     volley_span_s: float
-    """Onset of the first volley pulse to onset of the last. 0.0 for a sham, which
-    emits nothing at all — that is the no-stimulus control, not a missing measurement."""
+    """Onset of the first emitted pulse to onset of the last, for whichever arm ran.
+    0.0 for SILENCE, which emits nothing at all — that is the no-stimulus control, not
+    a missing measurement, and it is also 0.0 for a BASELINE arm that emitted a single
+    pulse, which is common: the median arm carries about two."""
 
     @property
     def is_volley(self) -> bool:
         return self.resolved == "V"
+
+    @property
+    def is_baseline(self) -> bool:
+        """A resting-rhythm arm: a fish is present and NOT hunting."""
+        return self.resolved == "B"
+
+    @property
+    def is_silence(self) -> bool:
+        """The no-stimulus arm. ``S`` is the SILENCE arm; the code is the old two-arm
+        SHAM character, kept because the quantity is unchanged."""
+        return self.resolved == "S"
 
 
 def trials(log: PulseLogFile) -> list[Trial]:
@@ -151,8 +174,17 @@ def trials(log: PulseLogFile) -> list[Trial]:
         rows = by_id.get(rec.trial, [])
         markers = [r for r in rows if r.event == "MARKER"]
         volleys = [r for r in rows if r.event == "VOLLEY" and r.tick is not None]
-        span = (volleys[-1].tick - volleys[0].tick) / rate if len(volleys) > 1 else 0.0
-        item = next((r.item for r in volleys if r.item is not None), None)
+        bases = [r for r in rows if r.event == "BASE" and r.tick is not None]
+        # Whichever arm ran, the span is over ITS pulses. A volley and a baseline arm
+        # never coexist in one trial, so concatenating is unambiguous.
+        emitted = volleys + bases
+        span = (emitted[-1].tick - emitted[0].tick) / rate if len(emitted) > 1 else 0.0
+        # v4 puts the drawn item on the TRIAL row for every arm, which is the only place
+        # a SILENCE arm records one. Fall back to the pulses so v2/v3 files still resolve
+        # a volley's item, where the TRIAL row's column was empty.
+        item = rec.item
+        if item is None:
+            item = next((r.item for r in emitted if r.item is not None), None)
         out.append(
             Trial(
                 trial_id=rec.trial,
@@ -162,6 +194,7 @@ def trials(log: PulseLogFile) -> list[Trial]:
                 blinded=bool(rec.blinded),
                 marker_pulses=len(markers),
                 volley_pulses=len(volleys),
+                base_pulses=len(bases),
                 item=item,
                 volley_span_s=span,
             )
@@ -299,9 +332,20 @@ class SessionSummary:
     n_loc: int
     n_marker: int
     n_volley: int
+    n_base: int
+    """Pulses emitted by BASELINE arms, across the whole session. Kept apart from
+    ``n_loc`` on purpose: both are localization-amplitude pulses, so pooling them would
+    make the treatment unrecoverable from the summary."""
     n_trials: int
     n_volley_trials: int
+    n_baseline_trials: int
     n_sham_trials: int
+    """Trials that resolved to the SILENCE arm. Named for the ``S`` code, which is the
+    two-arm design's SHAM character kept because the quantity never changed."""
+    n_unresolved_trials: int
+    """Trials whose ``res`` this reader does not recognise — a newer firmware, or a
+    corrupt column. Counted rather than folded into an arm, so the three arm totals
+    always mean what they say."""
     n_blinded: int
 
     loc_runs_total: int
@@ -382,9 +426,12 @@ def summarise(log: PulseLogFile) -> SessionSummary:
         n_loc=len(log.pulses("LOC")),
         n_marker=len(log.pulses("MARKER")),
         n_volley=len(log.pulses("VOLLEY")),
+        n_base=len(log.pulses("BASE")),
         n_trials=len(tr),
         n_volley_trials=sum(1 for t in tr if t.resolved == "V"),
+        n_baseline_trials=sum(1 for t in tr if t.resolved == "B"),
         n_sham_trials=sum(1 for t in tr if t.resolved == "S"),
+        n_unresolved_trials=sum(1 for t in tr if t.resolved not in ("V", "B", "S")),
         n_blinded=sum(1 for t in tr if t.blinded),
         loc_runs_total=len(runs),
         loc_runs_gate=sum(1 for r in runs if r.ended_by == ENDED_BY_GATE),

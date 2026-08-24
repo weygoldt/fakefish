@@ -48,8 +48,14 @@ app = typer.Typer(
 #: Pulse kinds in the raster, bottom row first. The localization train is the dense,
 #: continuous thing a session is *made of*, so it sits at the base; the trial pulses
 #: that interrupt it stack above.
+#: Pulse kinds, in the order they appear as raster rows. BASE sits next to LOC because
+#: the two are the same pulse at the same amplitude — the difference is only that one is
+#: the ambient fish and the other is a trial arm. Giving them separate rows is the whole
+#: reason the log records them as separate events: pooled, the treatment would be
+#: indistinguishable from the background it is meant to be compared against.
 _PULSE_ROWS = (
     ("LOC", "localization", CATEGORICAL[0]),
+    ("BASE", "baseline arm", CATEGORICAL[2]),
     ("MARKER", "marker", CATEGORICAL[4]),
     ("VOLLEY", "volley", CATEGORICAL[1]),
 )
@@ -85,11 +91,22 @@ def _label_at(ax, x, y, text, colour, *, va="center", ha="left"):
 def _panel_state(ax, log_file, runs, trial_list) -> None:
     """What the operator did: localization on/off, and each trial's outcome.
 
-    Three labelled rows, so nothing has to be decoded from a colour. Trials get one row
-    per outcome rather than a letter per trial — twelve letters across 260 s collide,
-    and a row you can scan carries the same information without any of them.
+    Labelled rows, so nothing has to be decoded from a colour. Trials get one row per
+    ARM rather than a letter per trial — twelve letters across 260 s collide, and a row
+    you can scan carries the same information without any of them.
+
+    The rows are ordered by how much the arm puts in the water: nothing, then a resting
+    fish, then a hunting one. That makes vertical position carry the comparison the
+    experiment is actually about, which is what the figure guidelines ask of position.
+
+    All trial marks share ONE colour on purpose. The arm is already encoded by the row,
+    and the guidelines are explicit that a variable should not be encoded twice; the
+    previous two-arm version coloured the marks as well, which meant the pale end of the
+    cycle had to be avoided for legibility at 8 pt — a constraint that disappears once
+    colour is not carrying anything.
     """
-    y_loc, y_sham, y_volley = 0.0, 1.0, 2.0
+    y_loc, y_silence, y_base, y_volley = 0.0, 1.0, 2.0, 3.0
+    arm_row = {"S": y_silence, "B": y_base, "V": y_volley}
 
     for run in runs:
         ax.add_patch(
@@ -121,22 +138,26 @@ def _panel_state(ax, log_file, runs, trial_list) -> None:
             )
 
     for tr in trial_list:
-        y = y_volley if tr.resolved == "V" else y_sham
-        # Indigo, not the palette's light green: a sham mark is a single 8 pt tick and
-        # the pale end of the cycle disappears against white at that size.
-        colour = CATEGORICAL[1] if tr.resolved == "V" else CATEGORICAL[5]
+        y = arm_row.get(tr.resolved)
+        if y is None:
+            # An arm this reader does not know. Drawing it on one of the three rows
+            # would silently attribute it to the wrong condition, so it is skipped
+            # here and counted in SessionSummary.n_unresolved_trials instead.
+            continue
         ax.plot(
             [tr.start_s], [y], marker="|", ms=8, mew=1.5,
-            color=colour, markeredgecolor=colour, zorder=3,
+            color=CATEGORICAL[1], markeredgecolor=CATEGORICAL[1], zorder=3,
         )
 
     for rec in log_file.events("LINK"):
         if rec.tick is not None and rec.val == 0:
             ax.axvline(rec.tick / log_file.sample_rate_hz, color="0.55", ls=":", lw=0.8)
 
-    ax.set_yticks([y_loc, y_sham, y_volley])
-    ax.set_yticklabels(["localization on", "sham trial", "volley trial"])
-    ax.set_ylim(-0.95, 2.5)
+    ax.set_yticks([y_loc, y_silence, y_base, y_volley])
+    ax.set_yticklabels(
+        ["localization on", "silence trial", "baseline trial", "volley trial"]
+    )
+    ax.set_ylim(-0.95, 3.5)
     ax.tick_params(axis="y", length=0)
 
 
@@ -289,13 +310,19 @@ def stats(
 
     log.info("session: %.1f s of device time", s.duration_s)
     log.info(
-        "  pulses: %d localization, %d marker, %d volley", s.n_loc, s.n_marker, s.n_volley
+        "  pulses: %d localization, %d baseline-arm, %d marker, %d volley",
+        s.n_loc,
+        s.n_base,
+        s.n_marker,
+        s.n_volley,
     )
     log.info(
-        "  trials: %d (%d volley / %d sham), %d blinded",
+        "  trials: %d (%d volley / %d baseline / %d silence%s), %d blinded",
         s.n_trials,
         s.n_volley_trials,
+        s.n_baseline_trials,
         s.n_sham_trials,
+        f" / {s.n_unresolved_trials} UNRECOGNISED" if s.n_unresolved_trials else "",
         s.n_blinded,
     )
     # The split is the point: a bare LOCOFF count conflates the operator with the protocol.
@@ -316,14 +343,21 @@ def stats(
     # ALIGNMENT WARNING — and the condition is NO ANCHORS, not low randomness.
     #
     # A volley anchors a recording extremely well: 46-364 pulses at 300-400 Hz whose exact IPI
-    # sequence is recoverable from the library via the logged item index. A sham emits nothing,
-    # but its time interpolates between volley anchors — at ~1 ms over a typical 10-26 s gap,
-    # which is why removing the marker cost so little. What cannot be placed is a session with
-    # no volley at all AND a localization train too regular to fingerprint; an earlier version
-    # of this warning fired on low randomness alone and would have cried wolf on every session
-    # that simply ran the knob down.
-    anchorless = s.n_volley == 0 and (
-        s.n_loc == 0 or (np.isfinite(s.randomness_max) and s.randomness_max < 0.05)
+    # sequence is recoverable from the library via the logged item index. The SILENCE arm emits
+    # nothing, but its time interpolates between volley anchors — at ~1 ms over a typical
+    # 10-26 s gap, which is why removing the marker cost so little. What cannot be placed is a
+    # session with no volley at all AND no irregular pulse train to fingerprint; an earlier
+    # version of this warning fired on low randomness alone and would have cried wolf on every
+    # session that simply ran the knob down.
+    #
+    # BASELINE-arm pulses count as anchorable material regardless of the CH5 knob. The arm runs
+    # at TRIAL_BASE_RANDOMNESS, a fixed constant, precisely so it does not follow the live
+    # controls — so its train is irregular by construction even in a session whose ambient
+    # localization was run as a metronome.
+    anchorless = (
+        s.n_volley == 0
+        and s.n_base == 0
+        and (s.n_loc == 0 or (np.isfinite(s.randomness_max) and s.randomness_max < 0.05))
     )
     if anchorless:
         log.warning(
@@ -366,7 +400,8 @@ def timeline(
     target = (out_dir or (FIGS_DIR / "sessions")) / f"session_{stem}"
     title = (
         f"{stem} · {summary.duration_s:.0f} s · {summary.n_loc} loc, "
-        f"{summary.n_trials} trials ({summary.n_volley_trials}V/{summary.n_sham_trials}S)"
+        f"{summary.n_trials} trials ({summary.n_volley_trials}V/"
+        f"{summary.n_baseline_trials}B/{summary.n_sham_trials}S)"
     )
     fig = build_timeline(log_file, title=title)
     written = save_figure(fig, target, fmt=fmt)

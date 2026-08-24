@@ -158,10 +158,49 @@ def validate(c: dict, rate_hz: int, eod_len: int | None = None) -> None:
     if c["rc_path"]["amp"]["volley_amp_ratio"] <= 0.0:
         raise ValueError("rc_path.amp.volley_amp_ratio must be > 0 (localization = volley / ratio)")
 
-    # (7) The blinded draw is a probability.
-    p = c["rc_path"]["trial"]["p_volley"]
-    if not 0.0 <= p <= 1.0:
-        raise ValueError(f"rc_path.trial.p_volley = {p} is not a probability in 0..1")
+    # (7) The blinded draw picks one of THREE arms, so the weights are a partition, not a
+    #     probability. Integer per-mille summing to exactly 1000: the C draws random(1000) and
+    #     walks two cutoffs, so weights that sum to anything else silently bias the last arm
+    #     (short) or make it unreachable (long) without any runtime complaint.
+    trial = c["rc_path"]["trial"]
+    if "p_volley" in trial:
+        raise ValueError(
+            "rc_path.trial.p_volley is from the two-arm (volley/sham) design and is refused "
+            "by name. The trial is now three-armed — volley / baseline / silence — and needs "
+            "rc_path.trial.weights. Reinstating a two-arm draw is a protocol decision, not a "
+            "config edit: the baseline arm is what separates 'a discharge happened' from "
+            "'a fish is present at all'."
+        )
+    weights = trial["weights"]
+    missing = {"volley", "baseline", "silence"} - set(weights)
+    if missing:
+        raise ValueError(f"rc_path.trial.weights is missing {sorted(missing)}")
+    if extra := set(weights) - {"volley", "baseline", "silence"}:
+        raise ValueError(f"rc_path.trial.weights has unknown arms {sorted(extra)}")
+    for name, w in weights.items():
+        if not isinstance(w, int) or isinstance(w, bool) or w < 0:
+            raise ValueError(
+                f"rc_path.trial.weights.{name} = {w!r} must be a non-negative integer per-mille"
+            )
+    total = sum(weights.values())
+    if total != 1000:
+        raise ValueError(
+            f"rc_path.trial.weights sum to {total}, not 1000 — the C draws random(1000) and "
+            f"walks two cutoffs, so any other total silently biases or strands an arm"
+        )
+
+    # (7b) The baseline arm's own rhythm knobs. It runs its OWN LocRhythm precisely so it works
+    #      with live localization off, so these cannot fall back to the CH3/CH5 controls.
+    if trial["baseline_tick_hz"] <= 0.0:
+        raise ValueError(
+            f"rc_path.trial.baseline_tick_hz = {trial['baseline_tick_hz']} must be > 0 — it is "
+            f"a tick tempo in Hz, and the rhythm divides by it"
+        )
+    if not 0.0 <= trial["baseline_randomness"] <= 1.0:
+        raise ValueError(
+            f"rc_path.trial.baseline_randomness = {trial['baseline_randomness']} is outside "
+            f"0..1 (0 = metronome, 1 = the measured eel)"
+        )
 
     # (8a) The CH3 rate ladder is GEOMETRIC (rc_rate_to_hz raises max/min to a fraction),
     #      so a zero or negative floor is not merely odd, it is undefined. A ladder that does
@@ -267,14 +306,36 @@ def render_header(c: dict) -> str:
     a("// The SD device keeps SD_MARKER_* above; it has no log, so its lead-in is the only")
     a("// record a playback happened.")
     a("")
-    a("// ===== RC path — blinded trial draw ========================================")
-    a("// The RC trigger fires in ONE direction and does not say WHICH trial to run; the")
-    a("// firmware draws volley-vs-sham at playback time, so the operator cannot choose and")
-    a("// their timing cannot correlate with the trial type. The draw happens in the sample-")
-    a("// clock ISR, never in loop(), because random() must stay single-caller.")
-    a(f"#define TRIAL_P_VOLLEY      {_f(trial['p_volley'])} // P(volley); the rest are shams")
-    a("#define TRIAL_DRAW_RANGE    10000   // draw random(TRIAL_DRAW_RANGE)...")
-    a("#define TRIAL_VOLLEY_CUTOFF ((long)(TRIAL_P_VOLLEY * (float)TRIAL_DRAW_RANGE))  // ...< this = volley")
+    w = trial["weights"]
+    a("// ===== RC path — blinded THREE-ARM trial draw ==============================")
+    a("// The trigger fires in ONE direction and does not say WHICH arm to run; the firmware")
+    a("// draws at playback time, so the operator cannot choose and their timing cannot")
+    a("// correlate with the arm. The draw happens in the sample-clock ISR, never in loop(),")
+    a("// because random() must stay single-caller.")
+    a("//")
+    a("//   VOLLEY   — a library discharge (the treatment)")
+    a("//   BASELINE — resting-rhythm pulses at localization amplitude: a fish is present and")
+    a("//              NOT hunting. This is the arm that separates 'a discharge happened' from")
+    a("//              'a fish is there at all', which a volley-vs-nothing design confounds.")
+    a("//   SILENCE  — nothing at all (what the two-arm design called a SHAM).")
+    a("//")
+    a("// All three last the SAME length: every trial draws a volley item and the two silent")
+    a("// arms hold for exactly its duration, so the arms match in duration BY CONSTRUCTION.")
+    a("// Weights are per-mille and sum to 1000 (gen_constants.validate enforces it); the C")
+    a("// draws random(TRIAL_DRAW_RANGE) once and walks the two cutoffs in this order.")
+    a(f"#define TRIAL_W_VOLLEY_MILLI   {w['volley']}   // per-mille; the three sum to 1000")
+    a(f"#define TRIAL_W_BASELINE_MILLI {w['baseline']}")
+    a(f"#define TRIAL_W_SILENCE_MILLI  {w['silence']}")
+    a("#define TRIAL_DRAW_RANGE       1000   // draw random(TRIAL_DRAW_RANGE)...")
+    a("#define TRIAL_CUT_VOLLEY       (TRIAL_W_VOLLEY_MILLI)                          // ...< this = VOLLEY")
+    a("#define TRIAL_CUT_BASELINE     (TRIAL_W_VOLLEY_MILLI + TRIAL_W_BASELINE_MILLI) // ...< this = BASELINE, else SILENCE")
+    a("")
+    a("// The BASELINE arm's own rhythm knobs, deliberately NOT the CH3/CH5 controls: the")
+    a("// control condition is 'a resting eel', not 'a resting eel at whatever tempo the knob")
+    a("// was left at' — and the arm must work with live localization switched fully off,")
+    a("// which is exactly when CH3 reads REST. 3.15 Hz is the measured animal.")
+    a(f"#define TRIAL_BASE_TICK_HZ     {_f(trial['baseline_tick_hz'])}")
+    a(f"#define TRIAL_BASE_RANDOMNESS  {_f(trial['baseline_randomness'])}")
     a("")
     a("// ===== RC path — amplitude =================================================")
     a("// The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.")

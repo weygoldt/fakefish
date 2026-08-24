@@ -412,14 +412,21 @@ static inline float rc_rate_to_tempo(int rate_level, int rate_steps) {
 // (armed starts true only if the first read is centred) -> no boot-time fire.
 //
 // The LOW half of the axis is completely inert: it cannot fire, and it does not consume the
-// arm either, so throwing the wrong way costs nothing. The trial TYPE is not chosen here at
-// all — the caller requests RC_TRIG_RANDOM and the firmware draws volley-vs-sham at playback
-// time, which is what blinds the operator.
+// arm either, so throwing the wrong way costs nothing. The trial ARM is not chosen here at
+// all — the caller requests RC_TRIG_RANDOM and the firmware draws volley / baseline / silence
+// at playback time, which is what blinds the operator.
+//
+// SINCE 2026-08-24 RC_TRIG_RANDOM IS THE ONLY REQUEST ANYTHING MAKES. The panel's explicit
+// VOLLEY/SHAM buttons became one blinded TRIAL button, so no input can force an arm. The other
+// three values survive as the RESOLVED arm — what the ISR drew, which is what the log records
+// and what the ISR switches on. Do not wire an input back to them without saying so in the
+// protocol: forcing an arm is exactly the operator-choice correlation the blinding removes.
 typedef enum {
-  RC_TRIG_NONE   = 0,
-  RC_TRIG_VOLLEY = 1,   // an explicit volley (the bench panel button)
-  RC_TRIG_SHAM   = 2,   // an explicit sham   (the bench panel button)
-  RC_TRIG_RANDOM = 3,   // "run a trial" — the ISR draws volley or sham (the RC lever)
+  RC_TRIG_NONE     = 0,
+  RC_TRIG_VOLLEY   = 1,   // resolved: a library discharge
+  RC_TRIG_BASELINE = 2,   // resolved: resting-rhythm pulses (a fish present, not hunting)
+  RC_TRIG_SILENCE  = 3,   // resolved: nothing at all (the old two-arm SHAM)
+  RC_TRIG_RANDOM   = 4,   // "run a trial" — the ISR draws which arm. The only REQUEST.
 } RcTrigKind;
 typedef struct { uint8_t armed; uint8_t init; } RcTrigger;
 

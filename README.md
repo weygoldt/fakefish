@@ -73,12 +73,12 @@ while it is stale.
 | | **`eel_fakefish_button`** — hand-held | **`eel_fakefish_rc`** — boat |
 |---|---|---|
 | **Who holds it** | the operator, in the hand, at the fish | a catamaran airboat; operator on the transmitter |
-| **Trigger** | 6 program buttons (pins 5–10), one press = one complete playback, uninterruptible | 4 RC channels via a PC817 opto-isolator (pins 4–7) **OR-ed** with 3 panel buttons (pins 9–11) for the bench |
+| **Trigger** | 6 program buttons (pins 5–10), one press = one complete playback, uninterruptible | 4 RC channels via a PC817 opto-isolator (pins 4–7) **OR-ed** with 2 panel buttons (pins 9–10) for the bench — **both blinded** |
 | **Stimulus source** | **pre-rendered SD WAVs** — mono `int16` @ 50 kHz, one directory per button, built by `fakefish-build-card` | **live synthesis** on-device — `locgen` for the localization train, `eel_player` for the volley, over the mean EOD |
-| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous resting train from the **fitted rhythm** (tempo + randomness) · one-shot **blinded trial** (volley or sham, drawn by the firmware) |
-| **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **coded EOD burst @ 100 Hz, single polarity**, live: 2 pulses = volley, 4 = sham (`PULSE_MARKER_*`) |
+| **What it can play** | calibration train · localization · volley · loc→volley · song | continuous resting train from the **fitted rhythm** (tempo + randomness) · one-shot **blinded trial** — volley / baseline / silence, drawn by the firmware at 1/3 each |
+| **Marker** | **6 EOD pulses @ 10 Hz, alternating polarity**, baked into every WAV (`SD_MARKER_*`) | **none** — removed 2026-08-22; the per-pulse log is the trial record (`PULSE_MARKER_*` is gone and must not return) |
 | **Level control** | `MASTER_GAIN` in the `.ino` (per-stimulus levels baked into the WAVs) | CH6 amplitude pot sets the volley; localization is derived at a quarter (`PANEL_VOLLEY_AMP` on the bench) |
-| **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse; distinct pattern for a sham; double-blink = RC link lost; **inverse blink = logging failed, output suppressed** |
+| **LED (pin 13)** | solid while streaming; ~1 Hz blink = no SD card | flash per pulse of the **ambient** train; **one identical pattern for all three trial arms**; double-blink = RC link lost; **inverse blink = logging failed, output suppressed** |
 | **Needs an SD card** | **yes** — to *read* the stimulus WAVs | **yes** — to *write* the per-pulse log (no WAVs needed; it creates `/LOGS/` itself) |
 | **Logs to the card** | not yet ([`TODO.md`](TODO.md) §5) | **every pulse**, with its exact 50 kHz sample tick — and it **will not stimulate without a working card** |
 
@@ -88,6 +88,12 @@ firmware's random polarity flip cannot erase. It is that device's only record �
 **The RC device's marker was removed on 2026-08-22.** Its per-pulse log cannot be absent, so a
 trial was already recorded; and for a **sham** the burst was not redundant but a stimulus — the
 no-stimulus control was emitting four eel pulses before going quiet.
+
+**The trial has three arms since 2026-08-24** — volley, **baseline** (resting-rhythm pulses:
+a fish present and not hunting) and silence — because volley-vs-nothing cannot separate
+*a hunting discharge happened* from *a conspecific is present at all*. All three last the same
+length, drawn per trial from the volley library, and the LED shows the same pattern for each, so
+nothing on the device reveals the arm. See [`CLAUDE.md`](CLAUDE.md) invariant 12.
 
 ---
 

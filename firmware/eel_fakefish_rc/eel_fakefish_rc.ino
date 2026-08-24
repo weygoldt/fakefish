@@ -2,25 +2,47 @@
 //
 // A dipole EOD playback stimulator on a catamaran airboat, driven by an RC transmitter (FlySky
 // FS-i6X / FS-iA6B) over an optically-isolated 4-channel PC817 link (see rc_control.h) — AND,
-// with the same binary and no transmitter, by three panel buttons for the bench (panel_control.h).
+// with the same binary and no transmitter, by two panel buttons for the bench (panel_control.h).
 // Both input sources are OR-ed. It LIVE-GENERATES its stimuli over the mean-EOD waveform (EOD_HV):
 //
 //   CH3 throttle  -> localization ON/OFF + TICK TEMPO 0.5..20 Hz, log ladder. At REST it is a
 //                    MASTER off: it also clears the panel LOC latch, so throttle-down is zero pulses
-//   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws volley
-//                    or sham); throw low does NOTHING
+//   CH4 trigger   -> one-shot: throw high = run ONE BLINDED TRIAL (the firmware draws the arm);
+//                    throw low does NOTHING
 //   CH5 pot       -> localization RANDOMNESS      CH6 pot -> AMPLITUDE (sets volley/max; loc = quarter)
 //
-// A VOLLEY plays a discharge; a SHAM emits NOTHING AT ALL — it is the no-stimulus control, and
-// since 2026-08-22 that is literal. Both used to open with a count-coded PULSE MARKER so the
-// recording could tell them apart, which meant a "silent" control put four pulses in the water.
-// The per-pulse SD log is a precondition for output (invariant 9), so the trial record already
-// exists on the card with an exact 50 kHz tick; the marker was a second copy of it bought at the
-// price of contaminating the control. See "THE MARKER IS GONE" below.
+// THREE ARMS (2026-08-24), each drawn with probability 1/3:
 //
-// BLINDING. The operator throws "fire a trial" and the FIRMWARE decides which it is (see
-// begin_trial + TRIAL_P_VOLLEY), so when and where they trigger cannot correlate with the trial
-// type. The PLOG_TRIAL row records the truth for analysis.
+//   VOLLEY   — a library discharge. The treatment.
+//   BASELINE — resting-rhythm pulses at localization amplitude: a fish is PRESENT and NOT
+//              hunting. This arm is the reason the design changed. A volley-vs-nothing
+//              experiment cannot separate "a hunting discharge happened" from "a conspecific is
+//              here at all", and that is exactly the confound in questions like "do volleys
+//              attract other eels" — the thing being tested and the thing being controlled for
+//              arrive together. With three arms the contrast is nothing / a resting fish / a
+//              hunting fish, and the middle one is what makes the outer two interpretable.
+//   SILENCE  — nothing at all. What the two-arm design called a SHAM; the name survives in the
+//              log's PLOG_SHAM because the quantity is identical.
+//
+// ALL THREE ARE THE SAME LENGTH, and it is drawn per trial from the volley library: every trial
+// picks an item, VOLLEY plays it, and the other two hold for exactly its duration. So the arms
+// match in duration BY CONSTRUCTION. Until 2026-08-24 the sham was instead as long as its own
+// LED animation — a fixed 720 ms, longer than 80 % of the library's volleys — which meant the
+// hole a control left in the localization train was systematically LONGER than the hole a volley
+// left, and an analyst scoring gaps could have separated the arms without hearing a volley.
+//
+// THE BASELINE ARM RUNS ITS OWN RHYTHM (trial_rhythm), on its own fixed knobs, seeded
+// independently. It has to: the arm exists to be a control for "the throttle is down and nothing
+// is happening", which is precisely the state in which the ambient rhythm is not running. Its
+// first pulse is anchored at trial onset — see begin_base() for why that is load-bearing and not
+// a detail.
+//
+// BLINDING, END TO END. The operator throws "run a trial" and the FIRMWARE draws the arm (see
+// begin_trial), so when and where they trigger cannot correlate with it. Since 2026-08-24
+// NOTHING can force an arm — the panel's explicit VOLLEY/SHAM buttons became one blinded TRIAL
+// button — and the LED shows ONE pattern for all three arms, so neither an observer on shore nor
+// anyone scoring the GoPro afterwards can read the arm off the device. The PLOG_TRIAL row is the
+// only unblinding key.
 //
 // THE MARKER IS GONE (2026-08-22). It was 2 pulses for a volley and 4 for a sham, at 100 Hz. Two
 // reasons it went, and the second is the one that matters:
@@ -28,7 +50,9 @@
 //      trial and its outcome are already recorded, with a tick 20 us wide.
 //   2. IT WAS NOT REDUNDANT FOR THE SHAM, IT WAS A STIMULUS. A sham is the no-stimulus control,
 //      and it was emitting four eel pulses at 100 Hz before staying quiet. Whatever the animal did
-//      next, "nothing happened" was not what it experienced.
+//      next, "nothing happened" was not what it experienced. (The 2026-08-24 three-arm change is
+//      the same argument one step further: it is not enough for the control to be silent, the
+//      design also needs an arm in which a fish is present without hunting.)
 // What this costs for ALIGNMENT: almost nothing. A volley is the anchor and a far better one than
 // the marker was — 46..364 pulses at 300-400 Hz whose exact IPI sequence the log's `item` index
 // looks up in the library, against the marker's two. A sham emits nothing, but its time comes from
@@ -147,11 +171,27 @@ static volatile uint16_t g_ch_us[RC_N_CHANNELS];   // raw width per channel, us 
 static volatile uint16_t g_zero_us = PLOG_ABSENT_U16;  // the captured session zero, us
 
 // ===== ISR-owned playback state ===========================================
-enum Source { SRC_IDLE, SRC_LOC, SRC_VOLLEY, SRC_SHAM };
+// SRC_SHAM is the SILENCE arm. Its name is kept from the two-arm design, like the log's
+// PLOG_SHAM: the quantity is unchanged and renaming a shipped token is churn.
+enum Source { SRC_IDLE, SRC_LOC, SRC_VOLLEY, SRC_BASE, SRC_SHAM };
 static volatile Source src = SRC_IDLE;
 static EelPlayer  player;                           // volley engine (touched ONLY in the ISR)
 static LocGen     loc;                               // localization pulse renderer (ISR only)
 static LocRhythm  rhythm;                            // the fitted resting rhythm (ISR only)
+
+// ===== the BASELINE arm's OWN generator ===================================
+// A THIRD independent stream, and the independence is the point. The baseline arm has to work
+// with live localization switched fully off — that is its whole purpose as a control, and it is
+// exactly the state in which `rhythm` is not running at all. Sharing `rhythm` would also make
+// the arm's pulse train depend on how long the ambient train had been ticking, and (worse) make
+// the ambient train's relaxation state depend on how many baseline arms had fired. Neither is
+// acceptable in a blinded design: the operator's rate knob would reach into the control
+// condition. Same reasoning as loc_rhythm.h's own "the rhythm has its OWN PRNG".
+//
+// Its knobs are TRIAL_BASE_* — fixed constants, never CH3/CH5. See stim_constants.json.
+static LocGen     trial_loc;                         // baseline-arm pulse renderer (ISR only)
+static LocRhythm  trial_rhythm;                      // baseline-arm rhythm (ISR only)
+static uint64_t   g_base_last_onset = 0;             // wall-clock ageing for trial_rhythm
 // Tick of the last localization ONSET, 64-bit so the difference below cannot wrap. The rhythm
 // relaxes in WALL-CLOCK time, so every draw must be told how long it has actually been since
 // the previous pulse — including time spent on a volley, or with the throttle at
@@ -165,7 +205,21 @@ static float      g_playback_volley_amp = 0.0f;      // volley amplitude latched
 static uint32_t   g_tick = 0;                        // monotonic sample counter (ISR only)
 static uint32_t   g_led_off_at = 0;                  // g_tick at which the per-pulse flash ends
 static uint32_t   g_volley_onset = 0;                // detect volley pulse onsets for the LED
-static uint32_t   g_sham_phase = 0;                  // drives the distinct SHAM LED pattern
+static uint32_t   g_trial_phase = 0;                 // samples elapsed in the current trial —
+                                                     // drives BOTH the silent arms' length and
+                                                     // the ONE trial LED pattern (all arms)
+static uint32_t   g_trial_dur_samp = 0;              // this trial's length, drawn from the
+                                                     // library so all three arms match
+
+// EVERY TRIAL LASTS AS LONG AS A VOLLEY, because every trial draws one. A volley's length is
+// the sum of its item's ipi_samp table plus the last pulse's own width; the two silent arms
+// then hold for exactly that many samples. The arms therefore match in duration BY
+// CONSTRUCTION, not by a matched constant that could drift out of step with the library.
+//
+// The table is built once in setup() rather than summed in the ISR: an item runs to 457 pulses,
+// and a 457-iteration loop inside begin_trial() would be ~8 us of a 20 us tick on the Teensy
+// 3.5. 100 entries x 4 bytes = 400 bytes of RAM to make the trial start free.
+static uint32_t   g_item_dur_samp[RC_VOLLEY_ITEM_COUNT];
 
 
 // ===== pulse log (ISR-owned counters; the FILE is owned by loop()) ========
@@ -183,6 +237,22 @@ static bool       g_link_seen    = false;             // last g_link_up the ISR 
 // ----- LED (per-pulse flash from the KNOWN onset; never a |sample| threshold) --
 static inline void led_flash() { digitalWriteFast(LED_PIN, HIGH); g_led_off_at = g_tick + RC_LED_FLASH_SAMP; }
 static inline void led_service() { if ((int32_t)(g_tick - g_led_off_at) >= 0) digitalWriteFast(LED_PIN, LOW); }
+
+// THE TRIAL LED IS IDENTICAL FOR ALL THREE ARMS, and that is a protocol requirement, not a
+// simplification. Until 2026-08-24 a volley flashed once per emitted pulse and a sham ran a
+// distinct 3-blink pattern, so the LED announced the arm — to anyone on shore, and to anyone
+// scoring the GoPro footage afterwards. With a camera on every session that unblinds the
+// behavioural scoring, which is the measurement the blinding exists to protect.
+//
+// So during a trial the LED is a plain square wave of a fixed period, driven by g_trial_phase,
+// for the trial's whole length. It leaks the trial's DURATION — but duration is drawn from the
+// same distribution for every arm, so it carries no information about which arm ran. The pulse
+// log is the only unblinding key.
+static inline void led_trial() {
+  uint32_t period = TRIAL_LED_ON_SAMP + TRIAL_LED_OFF_SAMP;
+  digitalWriteFast(LED_PIN,
+                   ((g_trial_phase % period) < TRIAL_LED_ON_SAMP) ? HIGH : LOW);
+}
 
 // ----- pulse log (ISR side: fill + push; NEVER touches the card) ----------
 // The ISR only ever fills a POD record and pushes it into the lock-free ring; loop() formats
@@ -208,10 +278,11 @@ static inline void log_event(uint8_t ev) { PlogRec r; log_fill(&r, ev); plog_pus
 // indistinguishable, and a bench test would silently contaminate the trial set.
 static inline uint8_t log_trig_code(int kind) {
   switch (kind) {
-    case RC_TRIG_RANDOM: return PLOG_KIND_RANDOM;
-    case RC_TRIG_VOLLEY: return PLOG_KIND_VOLLEY;
-    case RC_TRIG_SHAM:   return PLOG_KIND_SHAM;
-    default:             return PLOG_KIND_NONE;
+    case RC_TRIG_RANDOM:   return PLOG_KIND_RANDOM;
+    case RC_TRIG_VOLLEY:   return PLOG_KIND_VOLLEY;
+    case RC_TRIG_BASELINE: return PLOG_KIND_BASELINE;
+    case RC_TRIG_SILENCE:  return PLOG_KIND_SHAM;   // 'S' — the silence arm, name kept
+    default:               return PLOG_KIND_NONE;
   }
 }
 
@@ -238,6 +309,23 @@ static inline uint32_t draw_loc_ipi() {
   return loc_rhythm_next_ipi_samp(&rhythm, loc_elapsed_samp(),
                                   (uint32_t)SAMPLE_RATE_HZ, LOC_REFRACTORY_SAMP);
 }
+// The BASELINE arm's interval, from its OWN rhythm and its OWN fixed knobs. Deliberately not
+// draw_loc_ipi(): that one latches g_rate_tempo/g_randomness, the live CH3/CH5 controls, and
+// this arm must be identical whatever the operator left those at — including "off", which is
+// the state the arm exists to be a control for.
+//
+// It ages in wall-clock time from its own last onset, exactly as the ambient rhythm does. On
+// the first baseline arm of a power-on that elapsed time is the uptime, which is the right
+// answer for the same reason it is right there: the fish was resting quietly beforehand.
+static inline uint32_t draw_base_ipi() {
+  loc_rhythm_set_knobs(&trial_rhythm, loc_rhythm_rate_for_hz(TRIAL_BASE_TICK_HZ),
+                       TRIAL_BASE_RANDOMNESS);
+  uint64_t now = plog_tick_value(&g_tick64);
+  uint64_t d   = (now > g_base_last_onset) ? (now - g_base_last_onset) : 0;
+  uint32_t el  = (d > (uint64_t)LOC_ELAPSED_CAP_SAMP) ? LOC_ELAPSED_CAP_SAMP : (uint32_t)d;
+  return loc_rhythm_next_ipi_samp(&trial_rhythm, el, (uint32_t)SAMPLE_RATE_HZ,
+                                  LOC_REFRACTORY_SAMP);
+}
 static inline bool trig_pending() { return g_trig_seq != g_trig_seen; }
 
 // ----- ISR-side state transitions (single owner) --------------------------
@@ -250,47 +338,84 @@ static inline void begin_loc() {
 }
 static inline void begin_volley_burst() {
   out_silence();                                 // clean seam into the volley; harmless and explicit
-  uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
-  eel_player_start_item(&player, &STIM_ITEMS[idx], g_playback_volley_amp, g_playback_pol);   // latched amp + the trial's polarity
+  // The item was drawn in begin_trial(), for EVERY arm — see the note there.
+  eel_player_start_item(&player, &STIM_ITEMS[(uint8_t)g_volley_item],
+                        g_playback_volley_amp, g_playback_pol);   // latched amp + the trial's polarity
   g_volley_onset = 0xFFFFFFFFu;
-  // WHICH pattern fired is recoverable from NOWHERE else — not from the settings, and from a
-  // recording only by matching the IPI sequence against all 100 candidates.
-  g_volley_item = (int8_t)idx;
   src = SRC_VOLLEY;
 }
-static inline void begin_sham() {   // no water output — just the distinct LED pattern
-  out_silence();                                 // a sham emits nothing at all — 0 V, like every gap
-  g_sham_phase = 0;
+// The BASELINE arm: a fish that is present and NOT hunting, for exactly as long as the volley
+// would have lasted. Its FIRST PULSE IS AT TRIAL ONSET — locgen_reset() leaves phase at 0, so
+// the very next tick is an onset. That is the correct parallel to a volley (whose first pulse is
+// also at t=0) and it is load-bearing besides: at the measured 3.15 Hz tick an unanchored arm of
+// one volley-duration is EMPTY in 40 % of trials, which would make the baseline and silence arms
+// physically identical four times in ten. Do not remove the anchor.
+static inline void begin_base() {
+  out_silence();                                 // clean seam into the arm
+  locgen_reset(&trial_loc, draw_base_ipi(),
+               g_playback_volley_amp / VOLLEY_AMP_RATIO,   // localization level, from the
+               g_playback_pol);                            // amplitude latched at the throw
+  src = SRC_BASE;
+}
+static inline void begin_sham() {   // the SILENCE arm — no water output at all
+  out_silence();                                 // a silence arm emits nothing — 0 V, like every gap
   src = SRC_SHAM;
-  // A sham emits NOTHING into the water, so without this row the trial is invisible in the log.
+  // It emits NOTHING into the water, so without this row the trial is invisible in the log.
   PlogRec r;
   log_fill(&r, PLOG_SHAM);
   r.trial = g_trial_id;
+  r.item  = g_volley_item;   // the item whose LENGTH this arm borrowed
   plog_push(&g_plog, &r);
 }
-// A trigger resolves to a volley or a sham HERE, and plays it immediately — there is no preamble
-// any more (see "THE MARKER IS GONE" at the top of this file).
+// A trigger resolves to ONE OF THREE ARMS here and plays it immediately — there is no preamble
+// (see "THE MARKER IS GONE" at the top of this file).
 //
-// THE BLINDED DRAW HAPPENS HERE. The RC lever requests RC_TRIG_RANDOM ("run a trial") and this is
-// where it becomes a volley or a sham — in the ISR, at the moment of playback. Two reasons it
-// lives here rather than in loop(): random() is called from the ISR elsewhere (polarity, the
-// volley item pick) and must stay single-caller, and drawing at playback time means a request that
-// is later discarded never consumes a draw. The panel's explicit VOLLEY/SHAM buttons pass through
-// unchanged, so the bench stays deterministic.
+//   VOLLEY   — a library discharge (the treatment)
+//   BASELINE — resting-rhythm pulses at localization amplitude: a fish is present and NOT
+//              hunting. This arm is what separates "a discharge happened" from "a fish is there
+//              at all", which a volley-vs-nothing design confounds — and that confound is fatal
+//              to the questions this device exists to ask ("do volleys attract other eels?").
+//   SILENCE  — nothing at all (what the two-arm design called a SHAM)
 //
-// The localization rhythm is deliberately NOT on this stream — it runs its own generator (see
-// loc_rhythm.h). Sharing one would make the blinded sequence depend on how many localization
-// pulses happened to precede a throw, so the operator's rate knob would silently reach into which
-// trials came out volleys.
+// EVERY ARM DRAWS AN ITEM, AND THAT IS WHAT SETS ITS LENGTH. The two silent arms hold for
+// exactly the duration the drawn volley would have taken, so the arms are matched in duration BY
+// CONSTRUCTION. The old sham was instead as long as its own LED animation — 720 ms, longer than
+// 80 % of the library's volleys — so the gap it left in the localization train was systematically
+// longer than the gap a volley left, and gap length alone leaked the arm.
+//
+// THE BLINDED DRAW HAPPENS HERE, in the ISR at the moment of playback. Two reasons it is not in
+// loop(): random() is called from the ISR elsewhere (polarity, the item pick) and must stay
+// single-caller, and drawing at playback time means a request that is later discarded never
+// consumes a draw. Nothing can force an arm any more — the panel's explicit buttons became one
+// blinded TRIAL button on 2026-08-24 — so `req` is always 'R' in new files.
+//
+// Neither rhythm is on this stream: the ambient train has its own generator and the baseline arm
+// has a third (see loc_rhythm.h, and trial_rhythm above). Sharing any of them would make the
+// blinded sequence depend on how many localization pulses happened to precede a throw, so the
+// operator's rate knob would silently reach into which arms came out.
 static inline void begin_trial(int kind) {
   out_silence();                                 // clean seam into whatever this resolves to
   if (src == SRC_LOC) log_event(PLOG_LOCOFF);   // a trial preempts the localization train
   const int requested = kind;                    // BEFORE the blinded draw — see log_trig_code
-  if (kind == RC_TRIG_RANDOM)
-    kind = (random(TRIAL_DRAW_RANGE) < TRIAL_VOLLEY_CUTOFF) ? RC_TRIG_VOLLEY : RC_TRIG_SHAM;
+  if (kind == RC_TRIG_RANDOM) {
+    long d = random(TRIAL_DRAW_RANGE);
+    kind = (d < TRIAL_CUT_VOLLEY)   ? RC_TRIG_VOLLEY
+         : (d < TRIAL_CUT_BASELINE) ? RC_TRIG_BASELINE
+                                    : RC_TRIG_SILENCE;
+  }
   g_playback_pol = rand_polarity();
-  g_playback_volley_amp = g_volley_amp;   // latch volley amplitude at the throw, held for the volley
-  g_volley_item = PLOG_ABSENT_ITEM;   // no item drawn yet; a sham never draws one at all
+  g_playback_volley_amp = g_volley_amp;   // latch volley amplitude at the throw, held for the trial
+  // THE ITEM IS DRAWN FOR ALL THREE ARMS, not only for a volley. A volley plays it; the two
+  // silent arms borrow only its LENGTH. Drawing unconditionally is also what keeps the draw
+  // itself blind: if only a volley consumed an item, the library's RNG stream would advance at a
+  // rate that depends on the arm sequence.
+  //
+  // WHICH pattern fired is recoverable from NOWHERE else — not from the settings, and from a
+  // recording only by matching the IPI sequence against all 100 candidates.
+  uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
+  g_volley_item    = (int8_t)idx;
+  g_trial_dur_samp = g_item_dur_samp[idx - RC_VOLLEY_ITEM_FIRST];
+  g_trial_phase    = 0;
   g_trig_seen = g_trig_seq;   // consume the request (one playback per throw; later throws ignored)
   g_playing = true;
 
@@ -304,10 +429,14 @@ static inline void begin_trial(int kind) {
   r.pol   = g_playback_pol;
   r.req   = log_trig_code(requested);
   r.res   = log_trig_code(kind);
+  r.item  = g_volley_item;   // v4: populated for ALL THREE ARMS — it is what gives a silent
+                             // arm a length. On a v3 file this column is empty, correctly:
+                             // nothing was drawn for a sham there.
   plog_push(&g_plog, &r);
 
-  if (kind == RC_TRIG_VOLLEY) begin_volley_burst();
-  else                        begin_sham();
+  if      (kind == RC_TRIG_VOLLEY)   begin_volley_burst();
+  else if (kind == RC_TRIG_BASELINE) begin_base();
+  else                               begin_sham();
 }
 static inline void go_idle() {
   out_silence();                                 // nothing playing, nothing scheduled -> hard brake, no drain
@@ -369,7 +498,8 @@ static void onSampleTick() {
         if (s == 0) out_silence(); else out_write(s);
         if (player.last_onset != g_volley_onset) {
           g_volley_onset = player.last_onset;
-          led_flash();
+          // NO per-pulse flash here any more. It would draw the volley's own pulse rate on the
+          // LED, which is exactly the arm the blinding hides — see led_trial().
           // item + pulse index together let an analysis look up the EXPECTED IPI in the
           // library and check it against the logged tick deltas — confirming the engine
           // emitted what it was told to, and making a partial volley obvious rather than
@@ -394,21 +524,54 @@ static void onSampleTick() {
           r.amp_m = plog_milli(applied);
           plog_push(&g_plog, &r);
         }
-        led_service();
+        led_trial();
+        g_trial_phase++;
       } else {
+        digitalWriteFast(LED_PIN, LOW);
         resume_after_playback();   // link loss NEVER aborts a volley — it runs to the end here
       }
       break;
     }
+    // The BASELINE arm: localization-amplitude pulses from the trial's OWN rhythm, for exactly
+    // as long as the drawn volley would have run. Its pulses are logged as BASE, not LOC — both
+    // sit at the same amplitude, so once the ambient train resumes beside them nothing else
+    // could separate the treatment from the fish ticking along.
+    //
+    // Like the ambient train it stops at a PULSE BOUNDARY, never mid-EOD: a truncated pulse is
+    // an artefact that looks like data. The arm therefore overruns its nominal length by at most
+    // one EOD (2.62 ms) — which is why the length check is here and not on the raw phase.
+    case SRC_BASE: {
+      int onset = 0, boundary = 0;
+      int16_t s = locgen_tick(&trial_loc, &onset, &boundary);
+      if (s == 0) out_silence(); else out_write(s);
+      if (onset) {
+        g_base_last_onset = plog_tick_value(&g_tick64);
+        PlogRec r;
+        log_fill(&r, PLOG_BASE);
+        r.trial = g_trial_id;
+        r.item  = g_volley_item;   // the item whose LENGTH this arm borrowed
+        r.pol   = g_playback_pol;
+        r.amp_m = plog_milli(trial_loc.amp);
+        plog_push(&g_plog, &r);
+      }
+      led_trial();
+      g_trial_phase++;
+      // Only ever ends in the silent gap between pulses.
+      if (g_trial_phase >= g_trial_dur_samp && trial_loc.phase >= (uint32_t)EOD_HV_LEN) {
+        digitalWriteFast(LED_PIN, LOW);
+        resume_after_playback();
+      } else if (boundary) {
+        locgen_reset(&trial_loc, draw_base_ipi(), trial_loc.amp, trial_loc.pol);
+      }
+      break;
+    }
+    // The SILENCE arm: nothing in the water for the drawn duration. The LED runs the SAME
+    // pattern as the other two arms — that is the whole point (see led_trial()).
     case SRC_SHAM: {
-      // No electrode output. A distinct blink pattern so a fired sham is visible from shore.
       out_silence();
-      uint32_t period = SHAM_LED_ON_SAMP + SHAM_LED_OFF_SAMP;
-      uint32_t total  = (uint32_t)SHAM_LED_BLINKS * period;
-      if (g_sham_phase < total) {
-        digitalWriteFast(LED_PIN, ((g_sham_phase % period) < SHAM_LED_ON_SAMP) ? HIGH : LOW);
-        g_sham_phase++;
-      } else {
+      led_trial();
+      g_trial_phase++;
+      if (g_trial_phase >= g_trial_dur_samp) {
         digitalWriteFast(LED_PIN, LOW);
         resume_after_playback();
       }
@@ -465,12 +628,22 @@ static void onSampleTick() {
 // L3 provenance appended to EVERY log file's header (including one opened by a mid-session
 // recovery — it is stored as a hook, not called once). These are the surface-specific
 // constants an analysis needs to interpret the rows: the trial draw that decides a trial in the
-// water, the range the volley item index is drawn from, and the blind probability.
+// water, the range the volley item index is drawn from, and the arm weights.
 static void log_header_hook(PulseLog* L) {
   plog_header_kv(L, "surface", 0);                 // 0 == eel_fakefish_rc
   plog_header_kv(L, "volley_item_first", RC_VOLLEY_ITEM_FIRST);
   plog_header_kv(L, "volley_item_count", RC_VOLLEY_ITEM_COUNT);
-  plog_header_kv(L, "trial_p_volley_milli", plog_milli(TRIAL_P_VOLLEY));
+  // The three-arm draw (v4). These REPLACE v3's trial_p_volley_milli, which said "P(volley);
+  // the rest are shams" — in a three-arm design that is not merely incomplete but wrong, since
+  // two thirds of "the rest" is a fish quietly discharging rather than nothing at all.
+  plog_header_kv(L, "trial_w_volley_milli",   TRIAL_W_VOLLEY_MILLI);
+  plog_header_kv(L, "trial_w_baseline_milli", TRIAL_W_BASELINE_MILLI);
+  plog_header_kv(L, "trial_w_silence_milli",  TRIAL_W_SILENCE_MILLI);
+  // The BASELINE arm's own rhythm knobs — fixed constants, NOT the CH3/CH5 columns, so a log
+  // cannot be read as if the arm had followed the live controls.
+  plog_header_kv(L, "trial_base_tick_milli_hz",
+                 (uint64_t)(TRIAL_BASE_TICK_HZ * 1000.0f + 0.5f));
+  plog_header_kv(L, "trial_base_randomness_milli", plog_milli(TRIAL_BASE_RANDOMNESS));
   plog_header_kv(L, "loc_refractory_samp", LOC_REFRACTORY_SAMP);
   // The resting rhythm, so a log can be interpreted without the firmware source: which
   // model produced the localization intervals, and what the two knob columns mean.
@@ -488,7 +661,7 @@ void setup() {
   amp_debug_run();   // never returns: replaces normal operation with the scope-calibration routine
 #endif
   randomSeed(analogRead(A0));                         // A0 == digital 14; unused elsewhere
-  panel_begin();                                     // 3 panel buttons + the LED (pin 13)
+  panel_begin();                                     // 2 panel buttons + the LED (pin 13)
   rc_begin();                                        // 4 RC pins + pin-change interrupts
   rc_zero_reset(&g_zero);                            // no session zero until the throttle supplies one
   for (int i = 0; i < RC_N_CHANNELS; i++) g_ch_us[i] = PLOG_ABSENT_U16;   // "never seen", not 0 us
@@ -505,6 +678,24 @@ void setup() {
   // time while the model is observed at its own pulse times.
   loc_rhythm_init(&rhythm, ((uint32_t)random(65536) << 16) ^ (uint32_t)random(65536),
                   g_rate_tempo, g_randomness);
+  // The BASELINE arm's rhythm: a THIRD independent stream, separately seeded, on its own fixed
+  // knobs. Same argument as above one level further out — if it shared `rhythm`, the control
+  // condition would depend on how long the ambient train had been running, and the ambient
+  // train's relaxation state would depend on how many baseline arms had fired.
+  loc_rhythm_init(&trial_rhythm, ((uint32_t)random(65536) << 16) ^ (uint32_t)random(65536),
+                  loc_rhythm_rate_for_hz(TRIAL_BASE_TICK_HZ), TRIAL_BASE_RANDOMNESS);
+
+  // Every trial's LENGTH comes from this table, whichever arm it resolves to. Summed once here
+  // rather than in begin_trial(): an item runs to 457 pulses and the ISR has a 20 us budget.
+  // ipi_samp[k] is the wait BEFORE pulse k (so [0] == 0); the item ends one EOD after the last
+  // onset, which is what makes the silent arms exactly as long as the volley would have been.
+  for (int i = 0; i < RC_VOLLEY_ITEM_COUNT; i++) {
+    const StimItem* it = &STIM_ITEMS[RC_VOLLEY_ITEM_FIRST + i];
+    uint32_t total = 0;
+    for (uint16_t k = 0; k < it->n; k++) total += it->ipi_samp[k];
+    g_item_dur_samp[i] = total + (uint32_t)EOD_HV_LEN;
+  }
+
   g_volley_amp = PANEL_VOLLEY_AMP;
   g_loc_amp    = rc_loc_amp(PANEL_VOLLEY_AMP);   // localization = half the volley
 
@@ -618,11 +809,11 @@ void loop() {
 
   // ----- panel buttons (OR-ed with RC; every loop so a held button can't retrigger) -----
   static bool panel_loc_state = false;
-  int loc_fell, volley_fell, sham_fell;
-  panel_poll(&loc_fell, &volley_fell, &sham_fell);
-  if (loc_fell)    panel_loc_state = !panel_loc_state;
-  if (volley_fell) request_trigger(RC_TRIG_VOLLEY);
-  if (sham_fell)   request_trigger(RC_TRIG_SHAM);
+  int loc_fell, trial_fell;
+  panel_poll(&loc_fell, &trial_fell);
+  if (loc_fell)   panel_loc_state = !panel_loc_state;
+  // RC_TRIG_RANDOM, not an explicit arm: the panel is blinded like the lever (2026-08-24).
+  if (trial_fell) request_trigger(RC_TRIG_RANDOM);
 
   // ----- RC decode, rate-limited to ~200 Hz -----
   static uint32_t last_decode_ms = 0;

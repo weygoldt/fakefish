@@ -65,14 +65,35 @@
 // The SD device keeps SD_MARKER_* above; it has no log, so its lead-in is the only
 // record a playback happened.
 
-// ===== RC path — blinded trial draw ========================================
-// The RC trigger fires in ONE direction and does not say WHICH trial to run; the
-// firmware draws volley-vs-sham at playback time, so the operator cannot choose and
-// their timing cannot correlate with the trial type. The draw happens in the sample-
-// clock ISR, never in loop(), because random() must stay single-caller.
-#define TRIAL_P_VOLLEY      0.5f // P(volley); the rest are shams
-#define TRIAL_DRAW_RANGE    10000   // draw random(TRIAL_DRAW_RANGE)...
-#define TRIAL_VOLLEY_CUTOFF ((long)(TRIAL_P_VOLLEY * (float)TRIAL_DRAW_RANGE))  // ...< this = volley
+// ===== RC path — blinded THREE-ARM trial draw ==============================
+// The trigger fires in ONE direction and does not say WHICH arm to run; the firmware
+// draws at playback time, so the operator cannot choose and their timing cannot
+// correlate with the arm. The draw happens in the sample-clock ISR, never in loop(),
+// because random() must stay single-caller.
+//
+//   VOLLEY   — a library discharge (the treatment)
+//   BASELINE — resting-rhythm pulses at localization amplitude: a fish is present and
+//              NOT hunting. This is the arm that separates 'a discharge happened' from
+//              'a fish is there at all', which a volley-vs-nothing design confounds.
+//   SILENCE  — nothing at all (what the two-arm design called a SHAM).
+//
+// All three last the SAME length: every trial draws a volley item and the two silent
+// arms hold for exactly its duration, so the arms match in duration BY CONSTRUCTION.
+// Weights are per-mille and sum to 1000 (gen_constants.validate enforces it); the C
+// draws random(TRIAL_DRAW_RANGE) once and walks the two cutoffs in this order.
+#define TRIAL_W_VOLLEY_MILLI   334   // per-mille; the three sum to 1000
+#define TRIAL_W_BASELINE_MILLI 333
+#define TRIAL_W_SILENCE_MILLI  333
+#define TRIAL_DRAW_RANGE       1000   // draw random(TRIAL_DRAW_RANGE)...
+#define TRIAL_CUT_VOLLEY       (TRIAL_W_VOLLEY_MILLI)                          // ...< this = VOLLEY
+#define TRIAL_CUT_BASELINE     (TRIAL_W_VOLLEY_MILLI + TRIAL_W_BASELINE_MILLI) // ...< this = BASELINE, else SILENCE
+
+// The BASELINE arm's own rhythm knobs, deliberately NOT the CH3/CH5 controls: the
+// control condition is 'a resting eel', not 'a resting eel at whatever tempo the knob
+// was left at' — and the arm must work with live localization switched fully off,
+// which is exactly when CH3 reads REST. 3.15 Hz is the measured animal.
+#define TRIAL_BASE_TICK_HZ     3.15f
+#define TRIAL_BASE_RANDOMNESS  1.0f
 
 // ===== RC path — amplitude =================================================
 // The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.

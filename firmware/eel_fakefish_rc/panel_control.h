@@ -1,14 +1,25 @@
 // panel_control.h — L3 control surface: the RC unit's physical panel + LED feedback.
 //
 // A bench input source OR-ed with the RC layer (rc_control.h). The unit is bench-testable with
-// NO transmitter: the panel alone drives the same localization / volley / sham state machine.
+// NO transmitter: the panel alone drives the same localization / trial state machine.
 //
-// THREE momentary buttons (mirroring the RC actions):
+// TWO momentary buttons (mirroring the RC actions):
 //   LOC toggle (pin 9)  — toggle the localization train on/off
-//   VOLLEY     (pin 10) — fire one volley (marker + discharge)
-//   SHAM       (pin 11) — fire one sham   (marker + LED, no water output)
+//   TRIAL      (pin 10) — run ONE BLINDED TRIAL; the ISR draws volley / baseline / silence
 //
-// This file also owns the LED FEEDBACK vocabulary (per-pulse flash, the distinct sham pattern,
+// THE PANEL IS BLIND TOO, since 2026-08-24. It used to have explicit VOLLEY (pin 10) and SHAM
+// (pin 11) buttons so the bench stayed deterministic. Both playback devices now run from the
+// blinded RC surface, so a deterministic bench path buys nothing and costs the one thing that
+// matters: an operator who can force an arm can, even unintentionally, correlate the arm with
+// when and where they fired. One button, one blinded draw, on every surface. Pin 11 is retired
+// rather than reassigned — an unused input is easier to reason about than a repurposed one, and
+// the board is already built.
+//
+// Scoping a volley on the bench therefore means pressing TRIAL until one comes out (p = 1/3).
+// For output-stage work use AMP_DEBUG 1 (config.h), which replaces playback entirely and does
+// not involve the trial machinery at all.
+//
+// This file also owns the LED FEEDBACK vocabulary (per-pulse flash, the arm-blind trial pattern,
 // the no-link double-blink, the ready heartbeat, the log-fault inverse blink) — the LED is a
 // panel output, and what it MEANS is surface-specific. The LED_PIN itself is L1
 // (src/eel_core/config.h): every device in the repo has one. Every duration in that vocabulary
@@ -26,10 +37,10 @@
 
 // ===== Panel wiring ========================================================
 // Each button: one leg to its pin (INPUT_PULLUP), the other to GND -> active-low.
-// Pins 9-11 avoid the DRV pins (0-3), the RC pins (4-7), the LED (13) and A0 (== digital 14).
+// Pins 9-10 avoid the DRV pins (0-3), the RC pins (4-7), the LED (13) and A0 (== digital 14).
+// Pin 11 carried the SHAM button until 2026-08-24 and is now unused — see the header note.
 #define PANEL_LOC_PIN     9                // toggle localization
-#define PANEL_VOLLEY_PIN  10               // fire one volley
-#define PANEL_SHAM_PIN    11               // fire one sham
+#define PANEL_TRIAL_PIN   10               // run one BLINDED trial (the ISR draws the arm)
 #define PANEL_DEBOUNCE_MS 25u
 
 // ===== LED feedback — THE WHOLE VOCABULARY ================================
@@ -58,8 +69,17 @@
 //   NO RC LINK  two 80 ms blinks in a 1 s period               waiting for a transmitter
 //   NOT ZEROED  three 80 ms blinks in a 1 s period             link up, waiting for a throttle zero
 //   READY       one 80 ms blink in a 2 s period                healthy, armed, localization OFF
-//   RUNNING     one 70 ms flash per emitted pulse              localization / marker / volley
-//   SHAM        3 x (120 ms on, 120 ms off)                    a sham fired (no water output)
+//   RUNNING     one 70 ms flash per emitted pulse              the AMBIENT localization train
+//   TRIAL       120 ms on / 120 ms off, for the trial's run    a trial is running — WHICH ARM
+//                                                              IS NOT SHOWN, deliberately
+//
+// THE TRIAL PATTERN IS THE SAME FOR ALL THREE ARMS. Until 2026-08-24 a volley flashed per pulse
+// (so you could read its rate off the LED) and a sham had its own 3-blink pattern, which meant
+// the device announced the arm to anyone on shore AND to anyone scoring the GoPro afterwards.
+// A blinded draw that is then displayed is not blinded. The per-pulse RUNNING flash therefore
+// belongs to the ambient train only; during a trial the LED says "a trial is running" and
+// nothing else. It does leak the trial's DURATION, which is harmless: every arm draws its
+// duration from the same distribution, so duration carries no information about the arm.
 //
 // LOG FAULT is the only INVERTED pattern in the set, deliberately: it is the one condition
 // that is actively preventing stimulation, and a blocked device otherwise looks exactly like an
@@ -75,9 +95,12 @@
 #define LED_MIN_VISIBLE_MS 70u             // 2 frames at 30 fps (66.7 ms), rounded up
 
 #define RC_LED_FLASH_SAMP 3500u            // 70 ms per-pulse flash @ 50 kHz (was 6 ms: invisible on video)
-#define SHAM_LED_BLINKS   3u               // distinct "sham fired" pattern (no water output)
-#define SHAM_LED_ON_SAMP  6000u            // 120 ms on
-#define SHAM_LED_OFF_SAMP 6000u            // 120 ms off
+// The ARM-BLIND trial pattern. No blink COUNT any more: the count was what encoded the arm, and
+// it also fixed the sham's length at 3 x 240 ms = 720 ms — longer than 80 % of the library's
+// volleys, so the silence arm left a systematically longer hole in the localization train than a
+// volley did. The pattern now simply runs for whatever length the trial drew.
+#define TRIAL_LED_ON_SAMP  6000u           // 120 ms on
+#define TRIAL_LED_OFF_SAMP 6000u           // 120 ms off
 
 // "NO RC LINK": two quick blinks per second. Shown from BOOT, not only after a transmitter has
 // been seen once — a unit powered up with its transmitter off used to sit completely dark,
@@ -117,9 +140,9 @@
 // (panel_control_selftest) sees it too.
 static_assert(RC_LED_FLASH_SAMP * 1000u / SAMPLE_RATE_HZ >= LED_MIN_VISIBLE_MS,
               "the per-pulse flash is shorter than 2 video frames — a 30 fps camera may miss it");
-static_assert(SHAM_LED_ON_SAMP * 1000u / SAMPLE_RATE_HZ >= LED_MIN_VISIBLE_MS &&
-              SHAM_LED_OFF_SAMP * 1000u / SAMPLE_RATE_HZ >= LED_MIN_VISIBLE_MS,
-              "the sham pattern's on/off times are shorter than 2 video frames");
+static_assert(TRIAL_LED_ON_SAMP * 1000u / SAMPLE_RATE_HZ >= LED_MIN_VISIBLE_MS &&
+              TRIAL_LED_OFF_SAMP * 1000u / SAMPLE_RATE_HZ >= LED_MIN_VISIBLE_MS,
+              "the trial pattern's on/off times are shorter than 2 video frames");
 static_assert(NOSIG_BLINK_MS >= LED_MIN_VISIBLE_MS,
               "the no-signal blink is shorter than 2 video frames");
 static_assert(NOSIG_BLINK_SPACING_MS >= NOSIG_BLINK_MS + LED_MIN_VISIBLE_MS,
@@ -175,30 +198,30 @@ static inline bool debounce_fell(DebounceState* d, bool raw_high,
 #ifdef ARDUINO
 #include <Arduino.h>
 
-static DebounceState g_panel_loc, g_panel_volley, g_panel_sham;
+static DebounceState g_panel_loc, g_panel_trial;
 
 // Configure the panel button pins + the LED. Call once from setup().
 static inline void panel_begin() {
-  pinMode(PANEL_LOC_PIN,    INPUT_PULLUP);
-  pinMode(PANEL_VOLLEY_PIN, INPUT_PULLUP);
-  pinMode(PANEL_SHAM_PIN,   INPUT_PULLUP);
+  pinMode(PANEL_LOC_PIN,   INPUT_PULLUP);
+  pinMode(PANEL_TRIAL_PIN, INPUT_PULLUP);
   debounce_init(&g_panel_loc);
-  debounce_init(&g_panel_volley);
-  debounce_init(&g_panel_sham);
+  debounce_init(&g_panel_trial);
   pinMode(LED_PIN, OUTPUT);
   digitalWriteFast(LED_PIN, LOW);
 }
 
-// Tick all three debouncers. *_fell are set to 1 on a debounced press. Ticks every call (never
+// Tick both debouncers. *_fell are set to 1 on a debounced press. Ticks every call (never
 // early-returns) so a held button can't spurious-retrigger.
-static inline void panel_poll(int* loc_fell, int* volley_fell, int* sham_fell) {
+//
+// *trial_fell means "run ONE BLINDED TRIAL", not "run a volley" — the caller passes
+// RC_TRIG_RANDOM and the ISR draws the arm. There is deliberately no way to ask for a
+// particular arm from here; see the header note.
+static inline void panel_poll(int* loc_fell, int* trial_fell) {
   const uint32_t now = millis();
-  bool loc_hi    = (digitalRead(PANEL_LOC_PIN)    != LOW);
-  bool volley_hi = (digitalRead(PANEL_VOLLEY_PIN) != LOW);
-  bool sham_hi   = (digitalRead(PANEL_SHAM_PIN)   != LOW);
-  *loc_fell    = debounce_fell(&g_panel_loc,    loc_hi,    now, PANEL_DEBOUNCE_MS) ? 1 : 0;
-  *volley_fell = debounce_fell(&g_panel_volley, volley_hi, now, PANEL_DEBOUNCE_MS) ? 1 : 0;
-  *sham_fell   = debounce_fell(&g_panel_sham,   sham_hi,   now, PANEL_DEBOUNCE_MS) ? 1 : 0;
+  bool loc_hi   = (digitalRead(PANEL_LOC_PIN)   != LOW);
+  bool trial_hi = (digitalRead(PANEL_TRIAL_PIN) != LOW);
+  *loc_fell   = debounce_fell(&g_panel_loc,   loc_hi,   now, PANEL_DEBOUNCE_MS) ? 1 : 0;
+  *trial_fell = debounce_fell(&g_panel_trial, trial_hi, now, PANEL_DEBOUNCE_MS) ? 1 : 0;
 }
 
 #endif  // ARDUINO

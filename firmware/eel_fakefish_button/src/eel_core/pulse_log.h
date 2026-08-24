@@ -74,7 +74,35 @@
 // PULSELOG_RING_SIZE 512, and rows get ~20 % longer (PULS0037 would go from ~120 kB to ~145 kB).
 // Both are affordable, and they buy the format's own stated property — that every row is
 // interpretable on its own, which is what makes a power-cut file readable up to the tear.
-#define PULSELOG_FORMAT_VERSION 3
+// v4 (2026-08-24) ADDS and renames nothing, so a v3 file stays fully readable and every v3
+// column means in v4 exactly what it meant in v3. What it adds is the THIRD TRIAL ARM:
+//   * a new event row `BASE` — one per pulse of a BASELINE arm, the twin of `LOC` but emitted
+//     by the trial's own rhythm rather than the ambient train. They are separate rows for the
+//     same reason `VOLLEY` and `LOC` are: an analysis must be able to say which pulses were the
+//     treatment and which were the fish ticking along beside it, and a shared row type would
+//     make that unrecoverable once the arms overlap in amplitude (they do — both run at
+//     localization level).
+//   * a new trial-kind character 'B' in the `req`/`res` columns.
+//   * `item` is now populated on the TRIAL row for ALL THREE ARMS, where v3 left it empty.
+//     Every trial draws a volley item and the two silent arms hold for exactly its duration,
+//     so this column is what lets an analysis reconstruct a silent arm's length. On v3 files it
+//     reads empty, which is correct there: nothing was drawn for a sham.
+//   * five header keys: `trial_w_volley_milli`, `trial_w_baseline_milli`,
+//     `trial_w_silence_milli`, `trial_base_tick_hz`, `trial_base_randomness`, replacing v3's
+//     single `trial_p_volley_milli`.
+//
+// THE HEADER KEY IS THE ONLY REASON THIS IS A VERSION BUMP rather than a silent addition.
+// `trial_p_volley_milli` said "P(volley); the rest are shams", which in a three-arm design is
+// not merely incomplete but WRONG — it would read as P(volley)=0.334 with 0.666 shams, when
+// two thirds of the remainder is a fish quietly discharging. A reader that kept the old key
+// would mis-state the control condition of every session. So the key is gone, not repurposed,
+// and the version says so.
+//
+// `SHAM` is unchanged and still names the arm that emits NOTHING. It is not renamed to
+// `SILENCE` despite the three-arm vocabulary: the quantity is identical to what v2 and v3
+// wrote, and renaming a shipped token to match a redesign is churn of exactly the kind
+// invariant 4 already refused for SD_MARKER_*.
+#define PULSELOG_FORMAT_VERSION 4
 
 // ===== Event types ====================================================================
 // One row per event. PULSE rows (LOC / MARKER / VOLLEY) are one per emitted pulse, ALWAYS —
@@ -84,8 +112,13 @@ enum PlogEvent {
   PLOG_LOC,         // one localization pulse
   PLOG_MARKER,      // one pulse of the count-coded trial marker
   PLOG_VOLLEY,      // one pulse of a volley
+  PLOG_BASE,        // one pulse of a BASELINE arm — the trial's own rhythm, not the ambient
+                    // train. Distinct from PLOG_LOC on purpose: both run at localization
+                    // amplitude, so once they overlap nothing else could tell the treatment
+                    // from the fish ticking along beside it.
   PLOG_TRIAL,       // a trial began: req = what was asked for, res = what the ISR drew
-  PLOG_SHAM,        // the sham fired — NO water output, so without this row it is invisible
+  PLOG_SHAM,        // the SILENCE arm fired — NO water output, so without this row it is
+                    // invisible. Name kept from the two-arm design; the quantity is identical.
   PLOG_LOCON,       // the localization train started
   PLOG_LOCOFF,      // the localization train stopped (disabled, log fault, or trial preempt)
   PLOG_LINK,        // RC link state changed (val: 1 = acquired, 0 = lost)
@@ -95,14 +128,20 @@ enum PlogEvent {
 };
 
 // Trial-kind codes, stored as their literal CSV characters.
-//   'R' == RANDOM: the RC lever asked for a BLINDED trial and the ISR drew the outcome.
-//   'V' / 'S'     : an explicit panel-button request (bench), or the resolved outcome.
-// Recording BOTH the requested and the resolved kind is what distinguishes a genuinely
-// blinded trial from a bench-forced one; with only the outcome they are indistinguishable.
-#define PLOG_KIND_NONE   0
-#define PLOG_KIND_RANDOM 'R'
-#define PLOG_KIND_VOLLEY 'V'
-#define PLOG_KIND_SHAM   'S'
+//   'R' == RANDOM  : a BLINDED request — the trigger asked for "a trial" and the ISR drew which.
+//   'V' / 'B' / 'S': the three RESOLVED arms — volley, baseline, silence.
+// Recording BOTH the requested and the resolved kind is what distinguishes a genuinely blinded
+// trial from a bench-forced one; with only the outcome they are indistinguishable.
+//
+// Since 2026-08-24 every request is 'R': the panel's explicit VOLLEY/SHAM buttons became one
+// blinded TRIAL button, so nothing can force an arm any more. `req` is therefore constant in
+// new files — but it is kept, and kept honest, because it is the field that would show a
+// bench-forced trial if one ever re-appeared, and because v2/v3 files use it meaningfully.
+#define PLOG_KIND_NONE     0
+#define PLOG_KIND_RANDOM   'R'
+#define PLOG_KIND_VOLLEY   'V'
+#define PLOG_KIND_BASELINE 'B'
+#define PLOG_KIND_SHAM     'S'   // the SILENCE arm; name kept from the two-arm design
 
 // ===== "Absent" sentinels =============================================================
 // Every absent field renders as an EMPTY CSV column, never as a number.
@@ -326,6 +365,7 @@ static inline const char* plog_event_name(uint8_t ev) {
     case PLOG_LOC:    return "LOC";
     case PLOG_MARKER: return "MARKER";
     case PLOG_VOLLEY: return "VOLLEY";
+    case PLOG_BASE:   return "BASE";
     case PLOG_TRIAL:  return "TRIAL";
     case PLOG_SHAM:   return "SHAM";
     case PLOG_LOCON:  return "LOCON";

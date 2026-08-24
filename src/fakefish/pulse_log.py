@@ -74,7 +74,13 @@ app = typer.Typer(
 #: became a MEDIAN one, which differ by about a factor of two on a heavy-tailed
 #: distribution. Reading a v1 file through v2 field names would be silently wrong in a
 #: way no assertion could catch, so v1 files need a v1 reader (``git log`` this file).
-SUPPORTED_FORMAT_VERSIONS = frozenset({2, 3})
+#: v4 (2026-08-24) adds the third trial arm and renames nothing, so a v3 file stays
+#: fully readable: a new ``BASE`` pulse row, a new ``B`` trial kind, ``item`` populated
+#: on the TRIAL row for every arm, and five header keys replacing ``trial_p_volley_milli``.
+#: That last one is why it is a version bump rather than a silent addition — the old key
+#: said "P(volley); the rest are shams", which in a three-arm design would mis-state the
+#: control condition of every session rather than merely omit something.
+SUPPORTED_FORMAT_VERSIONS = frozenset({2, 3, 4})
 
 #: The magic first line every log starts with.
 MAGIC = "#fakefish-pulse-log"
@@ -115,16 +121,40 @@ COLUMNS_V3_EXTRA = ("ch3_us", "ch4_us", "ch5_us", "ch6_us", "zero_us")
 COLUMNS_BY_VERSION: dict[int, tuple[str, ...]] = {
     2: COLUMNS,
     3: COLUMNS + COLUMNS_V3_EXTRA,
+    # v4 adds no COLUMN — the third trial arm rides on the existing ones: a new ``BASE``
+    # value in ``event``, a new ``B`` in ``res``, and ``item`` populated on the TRIAL row
+    # where v3 left it empty. What changed in v4 is the header keys, which is why it is a
+    # version bump at all (see SUPPORTED_FORMAT_VERSIONS).
+    4: COLUMNS + COLUMNS_V3_EXTRA,
 }
 
 #: Events that represent one emitted pulse (one row each, never summarised).
-PULSE_EVENTS = frozenset({"LOC", "MARKER", "VOLLEY"})
+#:
+#: ``BASE`` (v4) is a BASELINE-arm pulse and is deliberately NOT folded into ``LOC``.
+#: Both sit at localization amplitude, so once the ambient train resumes beside a
+#: baseline arm nothing else in the file could separate the treatment from the fish
+#: ticking along. ``MARKER`` is legacy — the marker was deleted in 30e2dca — but v2/v3
+#: files carry it and must keep reading.
+PULSE_EVENTS = frozenset({"LOC", "MARKER", "VOLLEY", "BASE"})
 
-#: Trial-kind codes. ``R`` means the RC lever asked for a *blinded* trial and the
-#: firmware drew the outcome; ``V``/``S`` mean an explicit bench request.
+#: Trial-kind codes. ``R`` is the only *request* a current device makes: it means the
+#: trigger asked for a blinded trial and the firmware drew the arm. ``V``/``B``/``S``
+#: are the three RESOLVED arms — volley, baseline, silence.
+#:
+#: ``B`` and the three-arm design arrived in v4. Before that the draw was two-armed and
+#: ``V``/``S`` could also appear as a *request*, from the panel's explicit bench buttons;
+#: those became one blinded TRIAL button on 2026-08-24, so ``req`` is constant in new
+#: files. v2/v3 files still use it meaningfully, which is why it is still read.
+#:
+#: ``S`` is the SILENCE arm. The name is kept from the two-arm design because the
+#: quantity is identical — see ``PLOG_SHAM`` in ``firmware/eel_core/pulse_log.h``.
 KIND_RANDOM = "R"
 KIND_VOLLEY = "V"
+KIND_BASELINE = "B"
 KIND_SHAM = "S"
+
+#: The three resolved arms, in protocol order.
+TRIAL_ARMS = (KIND_VOLLEY, KIND_BASELINE, KIND_SHAM)
 
 
 class PulseLogError(ValueError):
@@ -379,14 +409,35 @@ class PulseLogFile:
         return self.events("TRIAL")
 
     def volley_items(self) -> dict[int, int]:
-        """Map trial id -> the library item index that trial played.
+        """Map trial id -> the library item index that trial **played**.
 
-        Only volley trials appear: a sham plays no item at all. This index is
+        Only volley trials appear: the other two arms play no item. This index is
         recoverable from nowhere else — not from the marker, not from the
         settings — so it is the record that makes a volley trial reproducible.
+
+        For the item a *silent* arm borrowed its length from, see
+        :meth:`trial_items`, which is a different question with a different answer.
         """
         out: dict[int, int] = {}
         for r in self.pulses("VOLLEY"):
+            if r.trial is not None and r.item is not None:
+                out[r.trial] = r.item
+        return out
+
+    def trial_items(self) -> dict[int, int]:
+        """Map trial id -> the library item that trial **drew** (v4 and later).
+
+        Every arm draws an item; only a volley plays it. The two silent arms borrow
+        its *duration*, which is what makes all three arms the same length by
+        construction rather than by a matched constant. So this is the column that
+        gives a BASELINE or SILENCE arm a known length, and it is the only way to
+        recover one — nothing was emitted to measure.
+
+        Empty for v2/v3 files, correctly: nothing was drawn for a sham there, and the
+        arm's length came from an LED animation instead.
+        """
+        out: dict[int, int] = {}
+        for r in self.trials():
             if r.trial is not None and r.item is not None:
                 out[r.trial] = r.item
         return out
@@ -622,14 +673,20 @@ def info(
 
     trials = lg.trials()
     blinded = sum(1 for t in trials if t.blinded)
-    volleys = sum(1 for t in trials if t.res == KIND_VOLLEY)
+    arms = {k: sum(1 for t in trials if t.res == k) for k in TRIAL_ARMS}
+    # `unresolved` catches a kind this reader does not know — a newer firmware, or a
+    # corrupt column. Counting it separately keeps the three arm totals honest instead
+    # of quietly folding an unknown arm into one of them.
+    unresolved = len(trials) - sum(arms.values())
     log.info(
-        "%d trials (%d blinded, %d bench-forced): %d volley, %d sham",
+        "%d trials (%d blinded, %d bench-forced): %d volley, %d baseline, %d silence%s",
         len(trials),
         blinded,
         len(trials) - blinded,
-        volleys,
-        len(trials) - volleys,
+        arms[KIND_VOLLEY],
+        arms[KIND_BASELINE],
+        arms[KIND_SHAM],
+        f", {unresolved} UNRECOGNISED" if unresolved else "",
     )
     items = lg.volley_items()
     if items:

@@ -35,31 +35,51 @@ static void test_debounce_bounce() {
 }
 
 static void test_panel_pins() {
-  // The three panel buttons must sit on distinct pins that avoid every other GPIO user on this
+  // The two panel buttons must sit on distinct pins that avoid every other GPIO user on this
   // board: the FOUR DRV8871 output pins (L1 HAL — note this is now 0,1,2,3, not just the old
   // 2,3, with IN2 on 22/23 under the complementary drive), the four RC input pins, the
   // indicator LED, and A0 (== digital 14, the randomSeed source).
   //
+  // TWO, not three, since 2026-08-24: the explicit VOLLEY and SHAM buttons became one blinded
+  // TRIAL button and pin 11 is retired. See panel_control.h.
+  //
   // Checked against the REAL macros rather than pin literals, so moving a pin in
   // src/eel_core/config.h or rc_control.h fails HERE instead of on the water.
-  const int pins[3] = { PANEL_LOC_PIN, PANEL_VOLLEY_PIN, PANEL_SHAM_PIN };
+  const int pins[2] = { PANEL_LOC_PIN, PANEL_TRIAL_PIN };
   const int drv[4]  = { DRV_A_IN1_PIN, DRV_A_IN2_PIN, DRV_B_IN1_PIN, DRV_B_IN2_PIN };
   const int rc[4]   = { RC_PIN_THROTTLE, RC_PIN_TRIGGER, RC_PIN_RANDOM, RC_PIN_AMP };
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 2; i++) {
     for (int k = 0; k < 4; k++) {
       CHECK(pins[i] != drv[k], "panel avoids the DRV8871 output pins");
       CHECK(pins[i] != rc[k], "panel avoids the RC input pins");
     }
     CHECK(pins[i] != LED_PIN, "panel avoids the LED pin");
     CHECK(pins[i] != 14, "panel avoids A0 (randomSeed)");
-    for (int j = i + 1; j < 3; j++) CHECK(pins[i] != pins[j], "panel pins distinct");
+    for (int j = i + 1; j < 2; j++) CHECK(pins[i] != pins[j], "panel pins distinct");
   }
+}
+
+// THE PANEL MUST NOT BE ABLE TO NAME AN ARM. The whole point of the 2026-08-24 change is that no
+// input can force volley / baseline / silence — an operator who can choose can correlate the arm
+// with when and where they fired, which is the bias the blinding exists to remove. This is the
+// gate on that: reinstating an explicit button means deleting this test, which is a protocol
+// decision rather than a refactor.
+static void test_panel_is_blind() {
+  CHECK(sizeof((int[]){ PANEL_LOC_PIN, PANEL_TRIAL_PIN }) / sizeof(int) == 2,
+        "the panel has exactly two buttons: LOC and one blinded TRIAL");
+#ifdef PANEL_VOLLEY_PIN
+  CHECK(false, "PANEL_VOLLEY_PIN is back — the panel can force an arm again");
+#endif
+#ifdef PANEL_SHAM_PIN
+  CHECK(false, "PANEL_SHAM_PIN is back — the panel can force an arm again");
+#endif
 }
 
 int main() {
   test_debounce_basic();
   test_debounce_bounce();
   test_panel_pins();
+  test_panel_is_blind();
   if (g_fail == 0) { printf("OK\n"); return 0; }
   printf("%d CHECK(s) FAILED\n", g_fail);
   return 1;

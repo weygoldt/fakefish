@@ -50,9 +50,9 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     `button_control.h` (buttons on pins 5–10 → SD dirs `/A`…`/F`: A calibration, B
     localization, C volley, D loc→volley, E spare, F song) + `eel_fakefish_button.ino`.
     Uses L2 `sd_player` only; `MASTER_GAIN` in the `.ino` is the single output trim.
-  - **`firmware/eel_fakefish_rc/`** — 4-channel **RC + 3-button panel**, **live synthesis**.
+  - **`firmware/eel_fakefish_rc/`** — 4-channel **RC + 2-button panel**, **live synthesis**.
     `rc_control.h` (PC817-isolated decode; CH3 throttle→loc on/off + **tick tempo** on pin 4,
-    CH4 trigger→volley/sham on pin 5, CH5 **randomness** on pin 6, CH6 amplitude on pin 7 —
+    CH4 trigger→**one blinded three-arm trial** on pin 5, CH5 **randomness** on pin 6, CH6 amplitude on pin 7 —
     pins are 4–7 not 5–8 because pin 8 was dead on the build board; CH3 at REST is a **master
     off** — it clears the panel LOC latch, so throttle-down is zero pulses; CH5 spans exactly
     metronome→**1.0, the measured eel**, and deliberately stops there; and **`RcZero` measures the
@@ -60,7 +60,10 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     widths move ~200 µs with the receiver's supply, the pull-up that would fix that in hardware is
     unavailable on this opto (~0.15 mA of collector current), and the RC path refuses to stimulate
     until the zero is captured), `panel_control.h`
-    (pins 9–11 + the LED-feedback vocabulary — **every on- and off-time in it is ≥ 2 frames of a
+    (pins 9–10 — **the panel is blind too** since 2026-08-24: its explicit VOLLEY/SHAM buttons
+    became one TRIAL button that requests `RC_TRIG_RANDOM`, and pin 11 is retired, so **no input
+    on either surface can name an arm** — plus the LED-feedback vocabulary — **every on- and
+    off-time in it is ≥ 2 frames of a
     30 fps camera**, static_asserted against `LED_MIN_VISIBLE_MS`; and every device state has a
     pattern, so the only dark LED is a gap between localization pulses) + `eel_fakefish_rc.ino`.
     Uses L2 `eel_player` +
@@ -230,12 +233,13 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      divergent shaper states.
 
 9. **The RC pulse log is a PRECONDITION FOR OUTPUT, and its format is pinned by a golden file.**
-   `firmware/eel_core/pulse_log.h` logs **one row per emitted pulse** (localization, marker and
-   volley alike) with the exact 50 kHz sample tick. Four things are load-bearing:
+   `firmware/eel_core/pulse_log.h` logs **one row per emitted pulse** (localization, baseline-arm,
+   marker and volley alike) with the exact 50 kHz sample tick. Four things are load-bearing:
    - **No working log ⇒ no stimulation**, at boot *and* mid-session. The localization train is
      built to be indistinguishable from a real eel, so an unlogged pulse silently poisons the
-     recording. But **nothing in flight is ever truncated** — a marker/volley/sham already
-     playing runs to completion, and localization stops at a pulse boundary; only playback
+     recording. But **nothing in flight is ever truncated** — a trial already playing runs to
+     completion (a baseline arm stops at a pulse boundary, so it may overrun its nominal length
+     by up to one EOD), and localization stops at a pulse boundary; only playback
      *starts* are gated. A truncated volley is an artefact that looks like data.
    - **The ISR NEVER touches the card, and is the ring's ONLY producer.** `loop()` is the
      consumer and must never push. An event that originates in `loop()` (e.g. RC link state) is
@@ -246,7 +250,18 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
      recorded volley, so a `0` default would misattribute every localization and marker pulse;
      and `-1` is no safer as a *written* value, because `STIM_ITEMS[-1]` does not raise in
      Python, it quietly returns the last item. `-1` is the in-memory sentinel only.
-   - **The format is at v3; v2 is still read, v1 is refused.** v3 (2026-08-22) APPENDS five
+   - **The format is at v4; v3 and v2 are still read, v1 is refused.** v4 (2026-08-24) carries
+     the third trial arm (invariant 12) and renames nothing: a new `BASE` pulse row, a new `B`
+     trial kind, `item` populated on the `TRIAL` row for **all three arms** where v3 left it
+     empty, and five header keys — `trial_w_{volley,baseline,silence}_milli`,
+     `trial_base_tick_milli_hz`, `trial_base_randomness_milli` — replacing v3's single
+     `trial_p_volley_milli`. **That last one is the only reason it is a version bump** rather
+     than a silent addition: the old key meant "P(volley); the rest are shams", which in a
+     three-arm design is not merely incomplete but wrong — it would read as two thirds shams
+     when two thirds of that remainder is a fish quietly discharging. A reader keeping it would
+     mis-state the control condition of every session, so the key is **gone, not repurposed**.
+     No column was added, so v4 shares v3's column row.
+   - **v3 (2026-08-22) APPENDS five
      columns — `ch3_us`..`ch6_us`, the raw decoded RC pulse width per channel, and `zero_us`,
      the session zero the throttle captured — and renames nothing, so a v2 file stays fully
      readable and the new fields simply read as `None`. That is the whole distinction a version
@@ -392,6 +407,60 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
       antimode (1250 samples = 25 ms) rather than the arbitrary 5 ms it was. Note this is a
       LOWER clamp and is not in tension with leaving the long tail alone — the spec clamps
       both ends and defends the bottom one in exactly these terms.
+
+12. **A TRIAL HAS THREE ARMS, they are the SAME LENGTH, and nothing may name which one ran.**
+    Since 2026-08-24 (pulse log **v4**) a trigger resolves to one of three arms at 1/3 each:
+
+    - **VOLLEY** — a library discharge. The treatment.
+    - **BASELINE** — resting-rhythm pulses at localization amplitude: a fish is **present and
+      not hunting**.
+    - **SILENCE** — nothing at all. This is what the two-arm design called a SHAM, and the log
+      still writes `SHAM` / `'S'` for it because the quantity is identical (invariant 4's rule
+      against renaming a shipped token to celebrate a redesign).
+
+    **The BASELINE arm is the point of the change, not an extra.** Volley-vs-nothing cannot
+    separate "a hunting discharge happened" from "a conspecific is present at all" — the thing
+    under test and the thing to control for arrive together. Questions like *do volleys attract
+    other eels* are unanswerable in a two-arm design for that reason. Deleting this arm is a
+    protocol decision, not a simplification, and `gen_constants.validate` refuses a returning
+    `rc_path.trial.p_volley` **by name** to make that explicit.
+
+    Four things are load-bearing:
+
+    - **Every arm draws a library item, and that is what sets its LENGTH.** VOLLEY plays it;
+      BASELINE and SILENCE hold for exactly its duration. The arms therefore match in duration
+      *by construction*, not by a matched constant that can drift out of step with the library.
+      The old sham was as long as its own **LED animation** — a fixed 720 ms, longer than **80 %
+      of the library's 100 synthetic volleys** — so the gap a control left in the localization
+      train was systematically longer than the gap a volley left, and gap length alone leaked the
+      arm. The item is logged on the `TRIAL` row for all three arms; it is the ONLY record of how
+      long a silent arm ran, because nothing was emitted at its end to measure.
+    - **The BASELINE arm's FIRST PULSE IS ANCHORED AT TRIAL ONSET.** A volley's first pulse is at
+      t = 0, so it is the right parallel — but it is also what makes the arm exist at all.
+      Measured against the fitted rhythm at the 3.15 Hz resting tick, an unanchored arm of one
+      volley-duration is **EMPTY in 40 % of trials** (median 1 pulse); two of the three arms
+      would be physically identical four times in ten. Anchored, the arm carries a mean of 2.6
+      pulses and never zero. Do not remove the anchor.
+    - **The arm runs a THIRD, independently seeded `LocRhythm` on FIXED knobs**
+      (`TRIAL_BASE_TICK_HZ` / `TRIAL_BASE_RANDOMNESS`), never CH3/CH5. Two reasons, both fatal
+      otherwise: the arm must work with live localization switched fully **off**, which is
+      exactly when CH3 reads REST; and sharing the ambient rhythm would make the control
+      condition depend on how long the ambient train had been running *and* make the ambient
+      train's relaxation state depend on how many baseline arms had fired. Same argument as
+      invariant 11's "the rhythm has its OWN PRNG", one level further out.
+    - **The BLINDING IS END TO END, including the LED.** No input on either surface can name an
+      arm — the RC lever always requests `RC_TRIG_RANDOM`, and the panel's explicit VOLLEY/SHAM
+      buttons became one blinded TRIAL button (`panel_control_selftest` fails if
+      `PANEL_VOLLEY_PIN` or `PANEL_SHAM_PIN` come back). And **all three arms show the SAME LED
+      pattern**: a volley used to flash per pulse and a sham had its own 3-blink code, which
+      announced the arm to anyone on shore *and* to anyone scoring the GoPro afterwards. A
+      blinded draw that is then displayed is not blinded. The per-pulse `RUNNING` flash now
+      belongs to the ambient train only. The pattern does leak the trial's *duration*, which is
+      harmless — every arm draws its duration from the same distribution.
+
+    `BASE` pulses are logged as their own event, never folded into `LOC`. Both sit at
+    localization amplitude, so once the ambient train resumes beside a baseline arm nothing else
+    in the file could separate the treatment from the fish ticking along.
 
 ## Toolchain conventions
 

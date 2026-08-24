@@ -559,8 +559,8 @@ leaving how it varies over time alone, so every setting still sounds like a fish
 The model also carries `interrupt()`: the fish's own decision to launch a fast run, about **1 in
 49 resting pulses**. It is **not** ported. This surface runs a blinded trial design in which a
 log *is* the trial record, so a spontaneous burst would be an unlogged volley in
-the water, and one landing inside a sham would destroy the no-stimulus control. Every volley this
-device emits is operator-requested. The generated header carries no hazard constants at all, and
+the water, and one landing inside a SILENCE or BASELINE arm would destroy the control it is
+supposed to be. Every volley this device emits is operator-requested. The generated header carries no hazard constants at all, and
 `tests/test_loc_model.py` asserts that, so it cannot be wired up by accident.
 
 The model also does not carry the **diel cycle** (real eels tick ~1.6× faster in the early night
@@ -726,25 +726,61 @@ Teensy 3.3 V. If widths jitter, add an external 1–2 kΩ pull-up per `Vx`.
 nominal. Flash `rc_input_test`, hold each control at both extremes, and paste the measured
 values into `RC_CAL_*` in `rc_control.h`.
 
-**Blinded trials.** The CH4 lever says *"run a trial"*, not *which* trial. The firmware draws
-volley-vs-sham itself (`TRIAL_P_VOLLEY`, default 0.5) inside the sample-clock ISR at the moment
-of playback, so the operator cannot choose the trial type and their timing and position cannot
-correlate with it. Throwing the lever the other way is completely inert — it cannot fire, and it
-does not even consume the arm. The three-button bench panel keeps **explicit** volley and sham
-buttons, because bench testing needs determinism; blinding is a property of the field instrument.
+**Blinded three-arm trials.** The CH4 lever says *"run a trial"*, not *which* trial. Since
+2026-08-24 the firmware draws one of **three arms** at 1/3 each
+(`TRIAL_W_VOLLEY_MILLI` / `TRIAL_W_BASELINE_MILLI` / `TRIAL_W_SILENCE_MILLI`, 334/333/333)
+inside the sample-clock ISR at the moment of playback, so the operator cannot choose the arm and
+their timing and position cannot correlate with it. Throwing the lever the other way is
+completely inert — it cannot fire, and it does not even consume the arm.
+
+| Arm | What enters the water | What it controls for |
+|---|---|---|
+| **VOLLEY** | a library discharge | the treatment |
+| **BASELINE** | resting-rhythm pulses at localization amplitude | a conspecific is **present but not hunting** |
+| **SILENCE** | nothing at all | no fish (the old two-arm *sham*) |
+
+**Why three.** Volley-vs-nothing confounds *"a hunting discharge happened"* with *"a conspecific
+is present at all"* — for a question like *do volleys attract other eels*, the thing under test
+and the thing to control for arrive together. The BASELINE arm separates them, and it is the
+reason the design changed; it is not an optional extra.
+
+**All three arms are the same length**, drawn per trial from the volley library: every trial
+picks an item, VOLLEY plays it, and the two silent arms hold for exactly its duration. So they
+match in duration *by construction*. The old sham was as long as its own **LED animation** —
+a fixed 720 ms, longer than 80 % of the library's volleys — which meant the hole a control left
+in the localization train was systematically longer than the hole a volley left, and gap length
+alone leaked the arm.
+
+**The BASELINE arm's first pulse is anchored at trial onset.** A volley's first pulse is at
+t = 0, so it is the right parallel — but it is also load-bearing. At the measured 3.15 Hz
+resting tick, an *unanchored* arm lasting one volley-duration is **empty in 40 % of trials**
+(median 1 pulse), which would make two of the three arms physically identical four times in ten.
+
+**The panel is blind too.** Its explicit VOLLEY and SHAM buttons became **one TRIAL button**
+(pin 10) on 2026-08-24 and pin 11 is retired, so no input on either surface can name an arm.
+Bench determinism was the old justification, and it stopped being worth its price once both
+playback devices ran from the RC surface: an operator who *can* force an arm can correlate the
+arm with when and where they fired. To scope a volley, press TRIAL until one comes out (p = 1/3),
+or use `AMP_DEBUG 1`, which replaces playback entirely.
 
 The draw lives in the ISR rather than in `loop()` for a concrete reason: `random()` is already
-called from the ISR (polarity, the volley item pick) and must stay single-caller. Drawing at
+called from the ISR (polarity, the item pick) and must stay single-caller. Drawing at
 playback time also means a request that is later discarded never consumes a draw.
 
-The localization rhythm is deliberately **not** on that stream — it runs its own generator.
-Sharing one would make the blinded volley/sham sequence depend on how many localization pulses
-happened to precede a throw, so the operator's rate knob would silently reach into which trials
-came out volleys.
+Neither rhythm is on that stream: the ambient train has its own generator, and the BASELINE arm
+has a **third**, independently seeded, on fixed knobs (`TRIAL_BASE_TICK_HZ` 3.15,
+`TRIAL_BASE_RANDOMNESS` 1.0) rather than CH3/CH5. It has to — the arm must work with live
+localization switched fully **off**, which is exactly when CH3 reads REST — and sharing would
+make the blinded sequence depend on how many localization pulses happened to precede a throw,
+so the operator's rate knob would silently reach into which arms came out.
 
-This blinds the *choice*, not the *record*: the LED still shows its distinct sham pattern
-afterwards, and the log records which trial fired — analysis needs that, and since 2026-08-22 the
-log is the only place it exists.
+**The blinding now extends to the LED.** All three arms show the *same* pattern (120 ms on /
+120 ms off for the trial's length). A volley used to flash per pulse and a sham had its own
+3-blink code, which announced the arm to anyone on shore **and to anyone scoring the GoPro
+footage afterwards** — a blinded draw that is then displayed is not blinded. The per-pulse
+`RUNNING` flash now belongs to the ambient localization train only. The pattern does leak the
+trial's *duration*, which is harmless: every arm draws its duration from the same distribution.
+The log records which arm fired and is the only place it exists.
 
 **Failsafe:** losing CH3 turns localization off; the trigger cannot fire without a live throw, so
 signal loss can never *start* a trial. A volley already playing always runs to completion.
@@ -816,12 +852,20 @@ first:
 | two 80 ms blinks per second | **no RC link** — including a unit that has never seen one |
 | three 80 ms blinks per second | link up, **no session zero yet** — the RC path cannot stimulate |
 | one 80 ms blink every 2 s | **ready**: healthy, armed, localization off |
-| one 70 ms flash per emitted pulse | running — localization or volley |
-| 3 × (120 ms on, 120 ms off) | a **sham** fired (it produces no output — it is the no-stimulus control) |
+| one 70 ms flash per emitted pulse | running — the **ambient localization train** |
+| 120 ms on / 120 ms off, for the trial's length | **a trial is running** — which arm is *not* shown |
 
 The inverse blink is deliberately the only *inverted* pattern in the set: it is the one condition
 actively preventing stimulation, and a blocked device otherwise looks exactly like an idle one.
 That is also why it outranks the no-link blink.
+
+**The trial pattern is identical for all three arms, deliberately.** Until 2026-08-24 a volley
+flashed once per emitted pulse — so you could read its rate straight off the LED — and a sham had
+its own 3-blink code. Between them the device announced the arm to anyone on shore and, more
+importantly, to anyone scoring the GoPro footage afterwards, which unblinds the behavioural
+measurement the design exists to protect. The per-pulse flash therefore now belongs to the
+ambient train only. The pattern still leaks the trial's *duration*; that is harmless, because
+every arm draws its duration from the same distribution.
 
 **Two rules fix those durations, and both came out of a field session.**
 
@@ -875,9 +919,10 @@ water distinguishes it from biology. Without a log, every analysis of a
 recording made during playback has to treat an unknown subset of pulses as possibly ours — and
 localization is the thing that runs *continuously* for a whole session.
 
-Second reason: the trigger is **blinded** — the firmware draws volley-vs-sham in the ISR and the
-operator does not know which fired. The marker records that in the water; the log records it on
-the card. Two independent records of the same fact, on purpose.
+Second reason: the trigger is **blinded** — the firmware draws the arm in the ISR and the
+operator does not know which fired. Since the marker was removed and the LED stopped
+distinguishing the arms, the log is the *only* record of it, which is why it is a precondition
+for output rather than a convenience.
 
 ### Logging is a precondition for output
 
@@ -887,10 +932,11 @@ lesser failure.
 
 What "blocking" means precisely:
 
-- **Nothing in flight is ever truncated.** A volley or sham already playing runs to
+- **Nothing in flight is ever truncated.** A trial already playing runs to
   completion, exactly as an RC link loss never aborts one. A half-played volley is not "no data",
   it is an artefact that looks like data. Only playback *starts* are gated, plus localization
-  stopping at a clean pulse boundary.
+  stopping at a clean pulse boundary. A BASELINE arm likewise ends at a pulse boundary, so it can
+  overrun its nominal length by up to one EOD (2.62 ms).
 - **A failure is announced, loudly.** The LED switches to the inverse blink described above.
 - **Recovery is automatic and explicit.** `loop()` retries the card every 2 s. On success it opens
   a **new** indexed file — never reopening the interrupted one, whose tail length is unknowable —
@@ -949,10 +995,10 @@ A `#key=value` header block, then a comment column line, then the bare column li
 |---|---|
 | `seq` | monotonic row counter within the file — a break means the file was torn or edited |
 | `tick` | 64-bit sample counter (÷ `sample_rate_hz` for seconds of device time). **Empty on `GAP`**, which `loop()` writes and which therefore has no reading of the ISR-owned counter — `BOOT`'s tick 0 is real |
-| `event` | `BOOT` `LOC` `MARKER` `VOLLEY` `TRIAL` `SHAM` `LOCON` `LOCOFF` `LINK` `ANCHOR` `DROP` `GAP` |
-| `item` | library item index — **empty when the pulse came from no item** |
+| `event` | `BOOT` `LOC` `MARKER` `VOLLEY` `BASE` `TRIAL` `SHAM` `LOCON` `LOCOFF` `LINK` `ANCHOR` `DROP` `GAP` |
+| `item` | library item index — **empty when no item applies**. **v4**: on a `TRIAL` row this is the item the trial DREW, present for all three arms, and it is the only record of how long a silent arm ran |
 | `pulse` | index of this pulse within its item (`MARKER`, `VOLLEY`) |
-| `trial` | trial id, tying a trial's `MARKER` rows to its `VOLLEY` rows or its `SHAM` row |
+| `trial` | trial id, tying a trial's rows (`VOLLEY`, `BASE`, `SHAM`, legacy `MARKER`) to its `TRIAL` row |
 | `pol` | playback polarity, +1 / −1 |
 | `amp_m` | amplitude applied to **this** pulse, ×1000 — for a `VOLLEY` row this includes the item's per-pulse envelope, so it decays down the burst while `master_m` holds |
 | `master_m` | the master (volley) amplitude setting in force, ×1000 |
@@ -961,8 +1007,16 @@ A `#key=value` header block, then a comment column line, then the bare column li
 | `zero_us` | **v3**: the session zero the throttle captured (`RcZero`), µs. Compare against `RC_CAL_THROTTLE_MIN` to read the opto path's drift directly |
 | `tick_ipi` | nominal **median** localization IPI in whole samples — the tick tempo, not the mean |
 | `val` | event-specific: `DROP` records lost, `LINK` 1 = up, `ANCHOR` RTC unix seconds, `GAP`/`BOOT` file index |
-| `req` | trial **requested**: `R` = blinded lever, `V`/`S` = explicit panel button |
-| `res` | trial **resolved**: `V` / `S` — what the firmware actually drew |
+| `req` | trial **requested**: `R` = blinded. Always `R` since 2026-08-24, when the panel's explicit buttons went; `V`/`S` appear in v2/v3 files from a bench-forced trial |
+| `res` | trial **resolved**: `V` = volley, `B` = baseline (**v4**), `S` = silence — what the firmware actually drew |
+
+`BASE` rows are **not** folded into `LOC`, and that separation is load-bearing: both are
+localization-amplitude pulses, so once the ambient train resumes beside a baseline arm nothing
+else in the file could tell the treatment from the fish ticking along.
+
+`SHAM` still names the arm that emits nothing. It was not renamed to `SILENCE` for the three-arm
+vocabulary because the quantity is identical to what v2 and v3 wrote — the same reasoning that
+kept `SD_MARKER_*` after the RC marker was deleted.
 
 Three properties of the schema are load-bearing:
 
@@ -1018,10 +1072,14 @@ rather than the texture, run CH5 low.
 whole interval fits as well as the true offset, so the localization train stops being usable for
 alignment. **The RC marker's removal on 2026-08-22 barely touches this.** The coded burst was two
 pulses; a volley is 46–364 of them at 300–400 Hz, and the log's `item` index names which library
-entry played, so the expected IPI sequence can be looked up and matched exactly. A *sham* leaves
-nothing, but its time interpolates between volley anchors at ~1 ms over a typical 10–26 s gap. So the
-real cost scales with how often you fire: frequent trials, workable; long quiet stretches between
-them, and you are interpolating drift across a gap with nothing to check it against. The better
+entry played, so the expected IPI sequence can be looked up and matched exactly. A *silence* arm
+leaves nothing, but its time interpolates between volley anchors at ~1 ms over a typical 10–26 s gap.
+So the real cost scales with how often you fire: frequent trials, workable; long quiet stretches
+between them, and you are interpolating drift across a gap with nothing to check it against.
+A **BASELINE** arm helps here even at CH5 = 0, and independently of the knob: it runs at
+`TRIAL_BASE_RANDOMNESS` (1.0), a fixed constant, so its train is irregular by construction even
+when the ambient train is a metronome — which is why `fakefish-session stats` counts `BASE` pulses
+as anchorable material. The better
 reason to keep CH5 near 1.0 is simply that 0 is not a fish — no eel discharges at a fixed
 interval. Use 0 when a predictable train is the point of the test.
 
@@ -1037,9 +1095,10 @@ interval. Use 0 when a predictable train is the point of the test.
 > pulses found a recorded pulse within tolerance): it is both the confidence measure and the signal
 > that the device was out of range, or that the card and the recording came from different sessions.
 
-Markers are **useful redundancy, not a requirement** — a 2-or-4 pulse burst at exactly 100 Hz is a
-short distinctive anchor that independently confirms volley vs sham. `pol` is a further independent
-confirmation channel: the log predicts the sign of each playback pulse in the recording.
+Markers, in the v2/v3 files that still carry them, are **useful redundancy, not a requirement** —
+a 2-or-4 pulse burst at exactly 100 Hz is a short distinctive anchor. `pol` is a further independent
+confirmation channel that survives their removal: the log predicts the sign of each playback pulse
+in the recording.
 
 The reader is shipped; the aligner is not yet — see `TODO.md`.
 

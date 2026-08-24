@@ -33,7 +33,7 @@ def test_golden_exists():
 
 
 def test_header_provenance(golden):
-    assert golden.format_version == 3
+    assert golden.format_version == 4
     assert golden.sample_rate_hz == 50000
     assert golden.file_index == 7
     assert golden.rtc_valid is True
@@ -52,15 +52,27 @@ def test_header_carries_l3_surface_keys(golden):
     assert golden.header_int("marker_ipi_samp") == 500
     assert golden.header_int("volley_item_first") == 7
     assert golden.header_int("volley_item_count") == 18
-    assert golden.header_int("trial_p_volley_milli") == 500
+    # v4: three arm weights replacing v3's single trial_p_volley_milli, which said
+    # "P(volley); the rest are shams" and would mis-state a three-arm control condition.
+    assert golden.header_int("trial_w_volley_milli") == 334
+    assert golden.header_int("trial_w_baseline_milli") == 333
+    assert golden.header_int("trial_w_silence_milli") == 333
+    assert golden.header_int("trial_p_volley_milli") is None, (
+        "the two-arm key must be gone, not merely joined by the new ones"
+    )
+    # The BASELINE arm's own rhythm knobs, which are fixed constants and NOT the
+    # CH3/CH5 columns — so a log cannot be read as if the arm followed the live knobs.
+    assert golden.header_int("trial_base_tick_milli_hz") == 3150
+    assert golden.header_int("trial_base_randomness_milli") == 1000
 
 
 def test_row_and_pulse_counts(golden):
-    assert len(golden.records) == 39
-    assert len(golden.pulses()) == 20
-    assert len(golden.pulses("LOC")) == 7
+    assert len(golden.records) == 46
+    assert len(golden.pulses()) == 24
+    assert len(golden.pulses("LOC")) == 8
     assert len(golden.pulses("MARKER")) == 8
     assert len(golden.pulses("VOLLEY")) == 5
+    assert len(golden.pulses("BASE")) == 3
 
 
 def test_seq_is_contiguous(golden):
@@ -71,10 +83,17 @@ def test_seq_is_contiguous(golden):
 def test_golden_event_grammar_is_one_the_firmware_can_emit(golden):
     """The golden is the only worked example of the event grammar anyone will read.
 
-    Two rules the sketch enforces structurally: localization spans are balanced
-    (``begin_loc`` always emits LOCON, and LOCOFF is emitted only when leaving
-    SRC_LOC), and a TRIAL is always followed by its marker pulses, because
-    ``begin_marker`` unconditionally starts the count-coded burst.
+    Two rules the sketch enforces structurally.
+
+    Localization spans are balanced: ``begin_loc`` always emits LOCON, and LOCOFF is
+    emitted only when leaving SRC_LOC.
+
+    And a TRIAL row is immediately followed by a row of its OWN trial — whatever the
+    arm resolved to. That is the durable form of the rule. It used to be stated as
+    "followed by its marker pulses", which stopped being true twice over: the marker
+    was deleted in 30e2dca, and since v4 a trial can resolve to BASELINE, whose next
+    row is a BASE pulse. What has never changed is that ``begin_trial`` pushes the
+    TRIAL row and then immediately enters the arm, so nothing can come between them.
     """
     depth = 0
     for r in golden.records:
@@ -86,10 +105,15 @@ def test_golden_event_grammar_is_one_the_firmware_can_emit(golden):
             depth -= 1
     assert depth == 0, "the log ends mid-localization"
 
+    arm_rows = {"V": {"MARKER", "VOLLEY"}, "B": {"BASE"}, "S": {"MARKER", "SHAM"}}
     for trial in golden.trials():
         following = golden.records[golden.records.index(trial) + 1]
-        assert following.event == "MARKER", (
-            f"trial {trial.trial} is not followed by its marker"
+        assert following.trial == trial.trial, (
+            f"trial {trial.trial} is not followed by a row of its own trial"
+        )
+        assert following.event in arm_rows[trial.res], (
+            f"trial {trial.trial} resolved to {trial.res!r} but is followed by "
+            f"{following.event!r}"
         )
 
 
@@ -98,7 +122,7 @@ def test_every_event_type_is_covered(golden):
     seen = {r.event for r in golden.records}
     assert seen == {
         "BOOT", "ANCHOR", "LINK", "LOCON", "LOC", "LOCOFF",
-        "TRIAL", "MARKER", "VOLLEY", "DROP", "SHAM", "GAP",
+        "TRIAL", "MARKER", "VOLLEY", "BASE", "DROP", "SHAM", "GAP",
     }
 
 
@@ -178,12 +202,39 @@ def test_marker_pulses_carry_a_pulse_index_but_no_item(golden):
 # ===== blinding ============================================================
 def test_requested_vs_resolved_kind_identifies_blinded_trials(golden):
     trials = golden.trials()
-    assert len(trials) == 3
-    # Two blinded trials from the RC lever: requested RANDOM, firmware drew.
+    assert len(trials) == 4
+    # Blinded trials: requested RANDOM, firmware drew the arm. All three arms appear.
     assert trials[0].req == "R" and trials[0].res == "V" and trials[0].blinded is True
     assert trials[1].req == "R" and trials[1].res == "S" and trials[1].blinded is True
-    # One explicit bench trial from a panel button — must NOT be pooled with them.
+    assert trials[3].req == "R" and trials[3].res == "B" and trials[3].blinded is True
+    # One explicit bench trial from a panel button — must NOT be pooled with them. No
+    # current firmware can emit this (the panel went blind on 2026-08-24); it is kept as
+    # coverage for the v2/v3 files that do.
     assert trials[2].req == "V" and trials[2].res == "V" and trials[2].blinded is False
+
+
+def test_every_arm_records_the_item_that_set_its_length(golden):
+    """v4: `item` is on the TRIAL row for all three arms, not only for a volley.
+
+    It is the only record of how long a BASELINE or SILENCE arm was meant to last —
+    nothing was emitted at the end of a silent arm to measure. It is also what makes the
+    three arms the same length by construction rather than by a matched constant.
+    """
+    drawn = golden.trial_items()
+    assert drawn == {1: 13, 2: 18, 3: 20, 4: 22}
+
+    # ...and it is NOT the same question as which item was PLAYED. Only volley trials
+    # play one, so the silence and baseline arms are absent here by design.
+    assert golden.volley_items() == {1: 13, 3: 20}
+
+    first, count = (
+        golden.header_int("volley_item_first"),
+        golden.header_int("volley_item_count"),
+    )
+    for trial, item in drawn.items():
+        assert first <= item < first + count, (
+            f"trial {trial} drew item {item}, outside the device's volley range"
+        )
 
 
 def test_sham_trial_is_visible_despite_emitting_nothing(golden):
@@ -495,23 +546,31 @@ def test_v3_absent_width_is_none_not_zero(golden):
 
 
 def test_v2_file_still_reads(tmp_path):
-    """v3 is ADDITIVE, so a v2 log stays readable with the new columns simply absent.
+    """v3 and v4 are ADDITIVE, so a v2 log stays readable with the new columns absent.
 
     This is the distinction a version number exists to carry: v1 is refused because it reused
-    two column names for different quantities, while v3 only appends. A stored v2 log from an
-    earlier field session must not become unreadable because the firmware moved on.
+    two column names for different quantities, while v3 appended columns and v4 appended only
+    row *values* and header keys. A stored v2 log from an earlier field session must not become
+    unreadable because the firmware moved on.
+
+    The fixture is a SHAPE test — it trims the golden's rows to 14 fields — so it proves the
+    column contract, not that these particular rows could have come off a v2 device.
     """
     text = GOLDEN.read_text()
-    head, _, body = text.partition("#" + ",".join(pl.COLUMNS_BY_VERSION[3]) + "\n")
-    assert body, "golden should carry the v3 column row"
+    head, _, body = text.partition("#" + ",".join(pl.COLUMNS_BY_VERSION[4]) + "\n")
+    assert body, "golden should carry the v4 column row"
     v2_cols = ",".join(pl.COLUMNS)
     lines = []
     for line in body.splitlines():
         if not line or line.startswith("#"):
             continue
         lines.append(",".join(line.split(",")[: len(pl.COLUMNS)]))
-    # rebuild a minimal v2 file: same header, v2 column row, rows trimmed to 14 fields
-    head = head.replace("#format_version=3", "#format_version=2")
+    # rebuild a minimal v2 file: same header, v2 column row, rows trimmed to 14 fields.
+    # Keyed off the golden's ACTUAL version so the next bump does not silently turn this
+    # into a no-op substitution that leaves the fixture claiming to be the newest format.
+    golden_version = pl.read(GOLDEN).format_version
+    assert f"#format_version={golden_version}" in head
+    head = head.replace(f"#format_version={golden_version}", "#format_version=2")
     v2_text = head + "#" + v2_cols + "\n" + v2_cols + "\n" + "\n".join(lines[1:]) + "\n"
     out = tmp_path / "PULS0007.CSV"
     out.write_text(v2_text)
