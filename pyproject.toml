@@ -7,6 +7,9 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.8",
     "numpy>=1.26",
+    # Sidecar CSVs scale with the session: an hours-long playback runs to hundreds of
+    # thousands of pulses, and the reader/writer must stay swift at that size.
+    "polars>=1.0",
     "pyyaml>=6.0",
     "scipy>=1.11",
     "seaborn>=0.13",
@@ -15,6 +18,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    # The aligner came across from playback-explorer with property tests over
+    # offset x drift; they are the reason the estimator survived a negative-offset
+    # bug that only a generated case found.
+    "hypothesis>=6.115",
     "pytest>=8.0",
     "ruff>=0.6",
 ]
@@ -45,6 +52,7 @@ fakefish-synth-volleys = "fakefish.synthetic_volleys:app"
 fakefish-render = "fakefish.render_stimulus:app"
 fakefish-pulse-log = "fakefish.pulse_log:app"
 fakefish-session = "fakefish.plot_session:app"
+fakefish-align-log = "fakefish.align_log:app"
 fakefish-build-card = "fakefish.build_sd_card:app"
 fakefish-simulate = "fakefish.simulate_firmware:app"
 fakefish-gallery-volley = "fakefish.plot_volley_gallery:app"

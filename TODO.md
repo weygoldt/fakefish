@@ -264,13 +264,23 @@ Bench items:
 
 Toolchain follow-up:
 
-- [ ] **`fakefish-align-log` is not written.** The procedure is specified in full in
-      `firmware/README.md` → "Aligning a log to a recording": detect pulses in the recording,
-      cross-correlate against the logged train, fit **offset + drift rate** (a single global
-      offset degrades in ~10 minutes at 40 ppm), and report a **match quality**. Deliberately
-      deferred until there is a real recording to tune the detection thresholds against —
-      written blind it would be plausible and unverifiable. The reader it will build on
-      (`fakefish-pulse-log`) is shipped.
+- [x] **`fakefish-align-log` ships (2026-08-24).** Detects pulses in the recording,
+      cross-correlates against the logged train, fits **offset + drift** and writes a
+      **sidecar CSV** giving every logged pulse its time in the recording. It was deferred
+      until there was a real recording to tune detection against; `experiments/exp2` is that
+      recording, and the command recovers its clock at +14.0 ppm / 28.935 s with a median
+      residual of 66 µs. The estimator came across from playback-explorer with its own tests
+      (see `src/fakefish/clock_align.py`). **The sidecar is a separate file, never a column in
+      the log** — the log is the device's record, its schema is version-pinned, and the offset
+      is a property of a (log, recording) *pair* rather than of a pulse.
+      Still open on it:
+      - [ ] `--model piecewise`. The global 2-parameter fit leaves ~0.5 ms of non-linear
+            wander on exp2 (`residual_ptp_local_s` in every sidecar header says how much).
+            That is two orders inside what per-pulse assignment needs, so this waits until a
+            session's own number says otherwise.
+      - [ ] A windowed WAV reader. `scipy.io.wavfile` cannot memory-map 24-bit, so the whole
+            recording is read: ~2.6 GB per hour of stereo 24-bit. Fine for the minutes-long
+            stereo sessions, not for a grid stream that runs for days.
 - [ ] **The button device could get logging for free.** `pulse_log.h` is L2 and is already
       synced into `eel_fakefish_button/src/eel_core/`; that sketch simply does not include it.
       It has a card mounted already. Not done now, on purpose — the button device's 36 V

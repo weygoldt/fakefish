@@ -502,6 +502,26 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     (`stats` = what the SESSION did, `timeline` = the overview figure). The derived structure
     lives in `src/fakefish/session_stats.py`, which stays matplotlib-free so it is importable
     and testable on its own; `src/fakefish/plot_session.py` owns the figure and the CLI.
+  - **placing a log inside a recording** (no dataset, no library): `fakefish-align-log`.
+    Detects pulses in the WAV, fits `t_rec = scale·t_log + offset` and writes a **sidecar
+    CSV** giving every logged pulse its time in the recording; `--detections-out` also writes
+    every detection with whether the log explains it, which is how the *animal's* pulses get
+    separated from the playback's. Three rules it exists to keep:
+    - **The sidecar is never a column in the pulse log.** The log is the device's record and
+      sits in read-only field data; its schema is version-pinned and the reader raises on an
+      unexpected column row, so a derived column would need a version no firmware could write;
+      and the offset belongs to a (log, recording) **pair**, not to a pulse.
+    - **An unvalidated fit is never written silently.** `validate()` gates the command, which
+      exits non-zero unless `--allow-unvalidated`, and a forced file is branded `validated=0`
+      with its reasons. An unvalidated alignment reaching a viewer looks exactly like a good one.
+    - **Absent stays empty**, exactly as in the log: an unmatched pulse still gets a predicted
+      `t_rec_s` (the fit knows where it should have been) but empty `t_det_s`/`resid_s`.
+    `src/fakefish/clock_align.py` and `src/fakefish/pulse_detect.py` were **adopted from
+    playback-explorer** on 2026-08-24 when that project's browser UI was retired in favour of
+    claudian, along with their 57 tests. Deliberately NOT vendored under the invariant 10/11
+    discipline: those rules keep a copy honest against a *live* upstream, and there is none —
+    fakefish owns this code now. A real dependency was impossible anyway, since
+    playback-explorer depends on fakefish.
   - against the committed library (no dataset): `fakefish-render`, `fakefish-build-card`,
     `fakefish-simulate`, `fakefish-gallery-volley`, `fakefish-gallery-localization`,
     `fakefish-gallery-loc-volley`, `fakefish-anatomy`
