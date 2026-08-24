@@ -353,8 +353,8 @@ static inline void begin_volley_burst() {
 static inline void begin_base() {
   out_silence();                                 // clean seam into the arm
   locgen_reset(&trial_loc, draw_base_ipi(),
-               g_playback_volley_amp / VOLLEY_AMP_RATIO,   // localization level, from the
-               g_playback_pol);                            // amplitude latched at the throw
+               rc_loc_amp(g_playback_volley_amp),   // localization level, derived through the
+               g_playback_pol);                     // one helper, from the amp latched at the throw
   src = SRC_BASE;
 }
 static inline void begin_sham() {   // the SILENCE arm — no water output at all
