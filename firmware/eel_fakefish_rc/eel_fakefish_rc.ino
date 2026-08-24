@@ -189,9 +189,48 @@ static LocRhythm  rhythm;                            // the fitted resting rhyth
 // condition. Same reasoning as loc_rhythm.h's own "the rhythm has its OWN PRNG".
 //
 // Its knobs are TRIAL_BASE_* — fixed constants, never CH3/CH5. See stim_constants.json.
+//
+// EVERY ARM GETS A FRESH, BURNED-IN STATE. The arm is one independent presentation of "a
+// resting fish is present", so it must start from the ensemble of resting fish observed AT one
+// of their own pulses — the arm anchors a pulse at t=0, so that is the state it is standing in.
+//
+// The first version aged ONE persistent rhythm by the wall-clock gap since the previous arm's
+// last pulse (tens of seconds). That is a COLD START, and it is exactly the transient
+// loc_rhythm_init's own comment warns about: the components' stationary law is defined in
+// continuous time, while the model is observed at its PULSE times, which over-visits the fast
+// side. Measured on the shipped C (N=200000): the score at a pulse of a free-running train has
+// median -0.512; after 60 s with no pulses it has median -0.079. So every arm re-entered slow.
+// The first interval's median went 0.32 s -> 0.51 s against a median arm length of 0.47 s, and
+// ONE PULSE became the modal outcome — in exp2's field log, 11 of 13 arms carried only the
+// anchor. A burn-in cannot go in the ISR (~320 intervals is ~4500 libm calls), so loop()
+// pre-warms a spare and the ISR swaps it in: a single-slot SPSC handoff, the same publish/latch
+// idiom this file already uses for g_trig_seq/g_trig_seen.
 static LocGen     trial_loc;                         // baseline-arm pulse renderer (ISR only)
 static LocRhythm  trial_rhythm;                      // baseline-arm rhythm (ISR only)
-static uint64_t   g_base_last_onset = 0;             // wall-clock ageing for trial_rhythm
+static LocRhythm  g_base_spare;                      // warmed by loop(), consumed by the ISR
+static volatile uint8_t g_base_spare_ready = 0;      // 1 = loop() has a burned-in state waiting
+
+// The burn-in length is TRIAL_BASE_BURN_IN, generated from shared/stim_constants.json — see
+// there for the measured bias at each value and why it is not LOC_BURN_IN.
+//
+// loop()'s OWN seed stream for those warm-ups. Not random() — that is an ISR-only caller here
+// (polarity, the item pick, the blinded arm draw) and must stay single-caller; and not one of
+// the LocRhythm PRNGs, for invariant 11's reason. Seeded once in setup().
+static uint32_t   g_base_seed_rng = 0;
+static inline uint32_t base_seed_next() {
+  uint32_t x = g_base_seed_rng;
+  x ^= x << 13; x ^= x >> 17; x ^= x << 5;    // xorshift32, as in loc_rng_next
+  g_base_seed_rng = x;
+  return x;
+}
+// Draw a fresh resting fish, observed at one of its own pulses. ~300 us on a 4.1; loop() only.
+static inline void base_warm_spare() {
+  loc_rhythm_init(&g_base_spare, base_seed_next() | 1u,
+                  loc_rhythm_rate_for_hz(TRIAL_BASE_TICK_HZ), TRIAL_BASE_RANDOMNESS);
+  float dt = 0.0f;   // fed back exactly as loc_rhythm_init's own burn-in does
+  for (int i = LOC_BURN_IN; i < TRIAL_BASE_BURN_IN; i++)
+    dt = loc_rhythm_next_s(&g_base_spare, dt);
+}
 // Tick of the last localization ONSET, 64-bit so the difference below cannot wrap. The rhythm
 // relaxes in WALL-CLOCK time, so every draw must be told how long it has actually been since
 // the previous pulse — including time spent on a volley, or with the throttle at
@@ -314,16 +353,15 @@ static inline uint32_t draw_loc_ipi() {
 // this arm must be identical whatever the operator left those at — including "off", which is
 // the state the arm exists to be a control for.
 //
-// It ages in wall-clock time from its own last onset, exactly as the ambient rhythm does. On
-// the first baseline arm of a power-on that elapsed time is the uptime, which is the right
-// answer for the same reason it is right there: the fish was resting quietly beforehand.
-static inline uint32_t draw_base_ipi() {
+// `elapsed_samp` is how long the state should age before drawing, and the caller decides:
+//   * begin_base() passes 0 — the state was just swapped in from a burned-in spare, so it is
+//     ALREADY standing at a pulse. Ageing it there is the bug this replaced.
+//   * the boundary inside an arm passes the interval that just completed, which is exactly the
+//     time since the previous onset. Within an arm the rhythm free-runs, as a real fish does.
+static inline uint32_t draw_base_ipi(uint32_t elapsed_samp) {
   loc_rhythm_set_knobs(&trial_rhythm, loc_rhythm_rate_for_hz(TRIAL_BASE_TICK_HZ),
                        TRIAL_BASE_RANDOMNESS);
-  uint64_t now = plog_tick_value(&g_tick64);
-  uint64_t d   = (now > g_base_last_onset) ? (now - g_base_last_onset) : 0;
-  uint32_t el  = (d > (uint64_t)LOC_ELAPSED_CAP_SAMP) ? LOC_ELAPSED_CAP_SAMP : (uint32_t)d;
-  return loc_rhythm_next_ipi_samp(&trial_rhythm, el, (uint32_t)SAMPLE_RATE_HZ,
+  return loc_rhythm_next_ipi_samp(&trial_rhythm, elapsed_samp, (uint32_t)SAMPLE_RATE_HZ,
                                   LOC_REFRACTORY_SAMP);
 }
 static inline bool trig_pending() { return g_trig_seq != g_trig_seen; }
@@ -347,12 +385,21 @@ static inline void begin_volley_burst() {
 // The BASELINE arm: a fish that is present and NOT hunting, for exactly as long as the volley
 // would have lasted. Its FIRST PULSE IS AT TRIAL ONSET — locgen_reset() leaves phase at 0, so
 // the very next tick is an onset. That is the correct parallel to a volley (whose first pulse is
-// also at t=0) and it is load-bearing besides: at the measured 3.15 Hz tick an unanchored arm of
-// one volley-duration is EMPTY in 40 % of trials, which would make the baseline and silence arms
-// physically identical four times in ten. Do not remove the anchor.
+// also at t=0) and it is load-bearing besides: measured over the real arm-duration mix, an
+// unanchored arm would be EMPTY in 27 % of trials, which would make the baseline and silence
+// arms physically identical better than one time in four. Do not remove the anchor.
 static inline void begin_base() {
   out_silence();                                 // clean seam into the arm
-  locgen_reset(&trial_loc, draw_base_ipi(),
+  // Take loop()'s burned-in fish if one is waiting. It always is: setup() warms the first and
+  // loop() re-warms within a millisecond of each arm consuming one, against trials seconds
+  // apart. If it somehow is not, carry on with the state in hand and draw with no ageing —
+  // that is the old behaviour minus the cold start, so strictly better than blocking a trial,
+  // which would put a hole in the blinded arm sequence.
+  if (g_base_spare_ready) {
+    trial_rhythm = g_base_spare;
+    g_base_spare_ready = 0;                      // release the slot back to loop()
+  }
+  locgen_reset(&trial_loc, draw_base_ipi(0),     // 0: the state is already standing at a pulse
                rc_loc_amp(g_playback_volley_amp),   // localization level, derived through the
                g_playback_pol);                     // one helper, from the amp latched at the throw
   src = SRC_BASE;
@@ -545,7 +592,6 @@ static void onSampleTick() {
       int16_t s = locgen_tick(&trial_loc, &onset, &boundary);
       if (s == 0) out_silence(); else out_write(s);
       if (onset) {
-        g_base_last_onset = plog_tick_value(&g_tick64);
         PlogRec r;
         log_fill(&r, PLOG_BASE);
         r.trial = g_trial_id;
@@ -561,7 +607,8 @@ static void onSampleTick() {
         digitalWriteFast(LED_PIN, LOW);
         resume_after_playback();
       } else if (boundary) {
-        locgen_reset(&trial_loc, draw_base_ipi(), trial_loc.amp, trial_loc.pol);
+        // Age by the interval that just completed — inside an arm the rhythm free-runs.
+        locgen_reset(&trial_loc, draw_base_ipi(trial_loc.ipi), trial_loc.amp, trial_loc.pol);
       }
       break;
     }
@@ -682,8 +729,16 @@ void setup() {
   // knobs. Same argument as above one level further out — if it shared `rhythm`, the control
   // condition would depend on how long the ambient train had been running, and the ambient
   // train's relaxation state would depend on how many baseline arms had fired.
-  loc_rhythm_init(&trial_rhythm, ((uint32_t)random(65536) << 16) ^ (uint32_t)random(65536),
+  //
+  // Every arm then gets a FRESH burned-in state, so this initial one only covers the window
+  // before loop() first runs. Warm the spare here too, while the sample clock is still stopped:
+  // that way the very first trial of a session is drawn from the same distribution as every
+  // later one, rather than from whatever a cold init happened to leave behind.
+  g_base_seed_rng = ((uint32_t)random(65536) << 16) ^ (uint32_t)random(65536);
+  loc_rhythm_init(&trial_rhythm, base_seed_next() | 1u,
                   loc_rhythm_rate_for_hz(TRIAL_BASE_TICK_HZ), TRIAL_BASE_RANDOMNESS);
+  base_warm_spare();
+  g_base_spare_ready = 1;
 
   // Every trial's LENGTH comes from this table, whichever arm it resolves to. Summed once here
   // rather than in begin_trial(): an item runs to 457 pulses and the ISR has a 20 us budget.
@@ -805,6 +860,19 @@ void loop() {
   // much one pass can take on.
   plog_service(&g_plog, now_ms);
   if (!plog_healthy(&g_plog)) plog_retry(&g_plog, now_ms);
+
+  // ----- re-warm the BASELINE arm's next fish -------------------------------------------
+  // Single-slot SPSC handoff, loop() the producer: it only ever writes g_base_spare while the
+  // flag is clear, and the ISR only ever reads it while the flag is set. The flag is the
+  // release, so it is written LAST here and cleared only after the copy there — the same
+  // publish/latch idiom as g_trig_seq/g_trig_seen.
+  //
+  // Costs ~320 interval draws (a few hundred microseconds) once per baseline arm, in loop()
+  // where it is free. It cannot go in the ISR: that is ~4500 libm calls against a 20 us tick.
+  if (!g_base_spare_ready) {
+    base_warm_spare();
+    g_base_spare_ready = 1;
+  }
   g_log_ok = plog_healthy(&g_plog);
 
   // ----- panel buttons (OR-ed with RC; every loop so a held button can't retrigger) -----

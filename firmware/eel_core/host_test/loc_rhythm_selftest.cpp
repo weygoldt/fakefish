@@ -25,6 +25,7 @@
 #include <algorithm>
 
 #include "../loc_rhythm.h"
+#include "../stim_levels.h"   // TRIAL_BASE_BURN_IN (generated; see shared/stim_constants.json)
 
 static int g_fail = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { printf("FAIL: %s\n", msg); g_fail++; } } while (0)
@@ -375,9 +376,53 @@ static void test_elapsed_time_ages_the_state() {
   CHECK(d.x[0] == e.x[0] && d.x[1] == e.x[1], "a negative elapsed time must behave as zero");
 }
 
+// PULSE-TIME STATE IS NOT TIME-STATIONARY STATE, and a short presentation pays the whole
+// difference. This is the regression that shipped on 2026-08-24 and that exp2's field log
+// caught: the RC device's BASELINE arm aged its rhythm by the wall-clock gap since the previous
+// arm — tens of seconds — and then anchored a pulse. Ageing that far re-draws the fast and
+// medium components from their CONTINUOUS-TIME stationary law, while a train observed at its
+// own pulses over-visits the fast side (pulses are denser when the fish is fast). So the arm
+// re-entered slow every time: the first interval's median went 0.32 s -> 0.51 s against arms
+// with a median length of 0.47 s, and one pulse became the modal outcome.
+//
+// The gate pins the DISTINCTION rather than a number pulled from the fix. Two halves:
+//   * a state burned in to TRIAL_BASE_BURN_IN, drawn AT a pulse, lands near the model's own
+//     median. Measured 326.8 ms against 317.1 ms, +3.1 %.
+//   * the same state aged 30 s draws materially LONGER. Measured 462.7 ms, +42 %.
+// Reintroduce the ageing and the arm gets the second number where it wants the first.
+//
+// The burn-in cannot be tightened to convergence and the test must not pretend otherwise: the
+// slowest component relaxes over 62 minutes, so 1000 intervals is ~5 minutes of model time and
+// the residual bias is real. Hence a 10 % band, comfortably clear of both the +3.1 % it sits at
+// and the +14.2 % that LOC_BURN_IN alone would give.
+static void test_burned_in_state_is_faster_than_a_time_aged_one() {
+  const int N = 4000;
+  std::vector<float> fresh, aged;
+  for (int s = 0; s < N; s++) {
+    LocRhythm r;
+    loc_rhythm_init(&r, 0x9E3779B9u * (uint32_t)(s + 1) | 1u, 1.0f, 1.0f);
+    float dt = 0.0f;   // the arm's extra warm-up, exactly as base_warm_spare() runs it
+    for (int i = LOC_BURN_IN; i < TRIAL_BASE_BURN_IN; i++) dt = loc_rhythm_next_s(&r, dt);
+    LocRhythm a = r;                                  // same fish, same burned-in state
+    fresh.push_back(loc_rhythm_next_s(&r, 0.0f));     // drawn AT a pulse
+    aged.push_back(loc_rhythm_next_s(&a, 30.0f));     // drawn after 30 s of nothing
+  }
+  std::sort(fresh.begin(), fresh.end());
+  std::sort(aged.begin(), aged.end());
+  const float mf = fresh[N / 2], ma = aged[N / 2];
+
+  const float target = LOC_MEDIAN_IPI_MS * 1e-3f;
+  CHECK(fabsf(mf - target) < 0.10f * target,
+        "a burned-in state's first interval must be near the model's median");
+  CHECK(ma > 1.2f * mf,
+        "a time-aged state must draw a LONGER first interval than a pulse-time state "
+        "(this is the 2026-08-24 baseline-arm regression)");
+}
+
 int main(int argc, char** argv) {
   const char* golden = (argc > 1) ? argv[1] : "tests/data/loc_rhythm_golden.csv";
   test_golden(golden);
+  test_burned_in_state_is_faster_than_a_time_aged_one();
   test_cold_start();
   test_init_burns_in_and_seeds();
   test_refractory_clamp_does_not_bend_the_rhythm();

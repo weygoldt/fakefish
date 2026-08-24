@@ -170,7 +170,34 @@
         "silence": 333
       },
       "baseline_tick_hz": 3.15,
-      "baseline_randomness": 1.0
+      "baseline_randomness": 1.0,
+      "_baseline_burn_in_comment": [
+        "How many intervals to run a fresh arm rhythm forward before using it. This is a",
+        "PLAYBACK value, not a sizing constant: it sets how fast the control arm actually",
+        "ticks, so it belongs here rather than in a header.",
+        "",
+        "WHY IT IS NEEDED AT ALL. The model's components have a stationary law in CONTINUOUS",
+        "time, but the arm observes the fish AT ITS OWN PULSES, and pulses are denser while",
+        "the fish is fast. A cold state therefore starts SLOW. The arm anchors a pulse at",
+        "t=0 and then lives for a fraction of a second, so unlike the ambient train it pays",
+        "that transient in full on EVERY presentation and never outgrows it.",
+        "",
+        "WHY 1000, measured on the shipped C (N=20000, randomness 1.0, tempo 1.0). Median",
+        "first interval against the model's own 317.1 ms:",
+        "    burn   40 -> 362.3 ms  (+14.2 %)   <- LOC_BURN_IN, the ambient train's value",
+        "    burn  320 -> 334.0 ms  (+5.3 %)",
+        "    burn 1000 -> 326.8 ms  (+3.1 %)",
+        "    burn 4000 -> 311.5 ms  (-1.8 %, i.e. into the noise)",
+        "Convergence is SLOW because the slowest component relaxes over 62 minutes and 1000",
+        "intervals is only ~5 minutes of model time. So this is a compromise, not a settled",
+        "limit: 1000 costs ~1 ms of loop() once per baseline arm, against trials seconds",
+        "apart, and buys a bias of a few percent. Do not expect a bigger number to converge.",
+        "",
+        "It is deliberately NOT LOC_BURN_IN (40). That value is fine for the ambient train,",
+        "which free-runs for minutes and settles on its own, and it lives in the GENERATED",
+        "loc_model_params.h which invariant 11 forbids hand-editing."
+      ],
+      "baseline_burn_in": 1000
     },
     "amp": {
       "_comment": [

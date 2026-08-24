@@ -95,6 +95,15 @@
 #define TRIAL_BASE_TICK_HZ     3.15f
 #define TRIAL_BASE_RANDOMNESS  1.0f
 
+// Intervals to run a FRESH arm rhythm forward before the arm uses it. The arm observes
+// the fish at its own PULSES while the model's stationary law is in continuous time, so
+// a cold state starts slow — and an arm lives a fraction of a second, so it pays that
+// transient in full every time instead of outgrowing it as the ambient train does.
+// Measured on the shipped C: burn 40 -> +14.2 % on the median first interval, 320 ->
+// +5.3 %, 1000 -> +3.1 %. Convergence is slow (the slowest component relaxes over 62
+// minutes), so this is a compromise. NOT LOC_BURN_IN, which is generated (invariant 11).
+#define TRIAL_BASE_BURN_IN     1000
+
 // ===== RC path — amplitude =================================================
 // The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.
 #define VOLLEY_AMP_RATIO   4.0f

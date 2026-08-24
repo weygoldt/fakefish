@@ -752,9 +752,27 @@ in the localization train was systematically longer than the hole a volley left,
 alone leaked the arm.
 
 **The BASELINE arm's first pulse is anchored at trial onset.** A volley's first pulse is at
-t = 0, so it is the right parallel — but it is also load-bearing. At the measured 3.15 Hz
-resting tick, an *unanchored* arm lasting one volley-duration is **empty in 40 % of trials**
-(median 1 pulse), which would make two of the three arms physically identical four times in ten.
+t = 0, so it is the right parallel — but it is also load-bearing. Measured on the shipped C over
+the real arm-duration mix, an *unanchored* arm would be **empty in 27 % of trials**, which would
+make two of the three arms physically identical better than one time in four. Anchored, the arm
+carries a mean of **3.67 pulses** and never zero.
+
+**Every arm starts from a fresh, burned-in rhythm — never one aged across the gap between
+arms.** This was got wrong on 2026-08-24 and caught by the first field session that used it
+(exp2: 11 of 13 arms carried only their anchor). The model's components have a stationary law in
+*continuous time*, but the arm observes the fish **at its own pulses**, and pulses are denser
+while the fish is fast — so ageing a state across tens of seconds of silence is a **cold start**
+that comes back slow. Measured (N = 200 000): the score at a pulse of a free-running train has
+median −0.512; after 60 s of nothing, −0.079. The arm's first interval went 0.32 s → 0.50 s
+against a median arm length of 0.47 s, so one pulse became the modal outcome.
+
+`TRIAL_BASE_BURN_IN` (1000) fixes it. `LOC_BURN_IN` (40) is not enough: the ambient train
+free-runs for minutes and settles on its own, whereas an arm lives under a second and pays the
+transient in full on *every* presentation — at 40 the median first interval sits 14 % above the
+model's own, at 1000 it sits 3 %. It cannot converge much further (the slowest component relaxes
+over 62 minutes), so this is an explicit compromise. The burn-in is far too expensive for the
+ISR (~4500 libm calls against a 20 µs tick), so `loop()` pre-warms a spare and `begin_base()`
+swaps it in — a single-slot SPSC handoff, the same publish/latch idiom as the trigger.
 
 **The panel is blind too.** Its explicit VOLLEY and SHAM buttons became **one TRIAL button**
 (pin 10) on 2026-08-24 and pin 11 is retired, so no input on either surface can name an arm.

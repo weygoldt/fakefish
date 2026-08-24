@@ -437,17 +437,37 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
       long a silent arm ran, because nothing was emitted at its end to measure.
     - **The BASELINE arm's FIRST PULSE IS ANCHORED AT TRIAL ONSET.** A volley's first pulse is at
       t = 0, so it is the right parallel — but it is also what makes the arm exist at all.
-      Measured against the fitted rhythm at the 3.15 Hz resting tick, an unanchored arm of one
-      volley-duration is **EMPTY in 40 % of trials** (median 1 pulse); two of the three arms
-      would be physically identical four times in ten. Anchored, the arm carries a mean of 2.6
-      pulses and never zero. Do not remove the anchor.
+      Measured on the shipped C over exp2's real arm-duration mix, an unanchored arm would be
+      **EMPTY in 27 % of trials**, and two of the three arms would then be physically identical
+      that often. Anchored, the arm carries a mean of **3.67 pulses** and never zero. Do not
+      remove the anchor.
+    - **EVERY ARM STARTS FROM A FRESH, BURNED-IN STATE — never one aged across the gap between
+      arms.** This is the 2026-08-24 regression that exp2 caught, and it is subtle enough to be
+      worth stating precisely. The model's components have a stationary law in **continuous
+      time**, but an arm observes the fish **at its own pulses**, and pulses are denser while the
+      fish is fast. So a state aged by tens of seconds of silence is a **cold start**: it re-draws
+      from the untilted law and comes back slow. Measured (N=200 000): the score at a pulse of a
+      free-running train has median −0.512; after 60 s of nothing, −0.079. The arm's first
+      interval went 0.32 s → 0.50 s against arms whose median length is 0.47 s, so **one pulse
+      became the modal outcome** — 11 of exp2's 13 arms carried only the anchor, against a
+      predicted mean of 3.67.
+      `TRIAL_BASE_BURN_IN` (1000, generated) is what removes it; `LOC_BURN_IN` (40) is **not**
+      enough, because unlike the ambient train — which free-runs for minutes and settles — an arm
+      lives under a second and pays the transient in full on *every* presentation. The burn-in
+      cannot be run in the ISR (~4500 libm calls against a 20 µs tick), so `loop()` pre-warms a
+      spare and `begin_base()` swaps it in: a single-slot SPSC handoff on `g_base_spare_ready`,
+      the same publish/latch idiom as `g_trig_seq`/`g_trig_seen`. `loc_rhythm_selftest` gates the
+      distinction — a burned-in state must draw near the model's median, an aged one must not.
     - **The arm runs a THIRD, independently seeded `LocRhythm` on FIXED knobs**
       (`TRIAL_BASE_TICK_HZ` / `TRIAL_BASE_RANDOMNESS`), never CH3/CH5. Two reasons, both fatal
       otherwise: the arm must work with live localization switched fully **off**, which is
       exactly when CH3 reads REST; and sharing the ambient rhythm would make the control
       condition depend on how long the ambient train had been running *and* make the ambient
       train's relaxation state depend on how many baseline arms had fired. Same argument as
-      invariant 11's "the rhythm has its OWN PRNG", one level further out.
+      invariant 11's "the rhythm has its OWN PRNG", one level further out. Drawing a fresh state
+      per arm removes a further coupling the first version had: one shared state meant a whole
+      SESSION could sit slow if that power-on's draw fell slow, which is the leading explanation
+      for the part of exp2's deficit the cold start alone does not cover.
     - **The BLINDING IS END TO END, including the LED.** No input on either surface can name an
       arm — the RC lever always requests `RC_TRIG_RANDOM`, and the panel's explicit VOLLEY/SHAM
       buttons became one blinded TRIAL button (`panel_control_selftest` fails if

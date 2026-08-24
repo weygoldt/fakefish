@@ -201,6 +201,17 @@ def validate(c: dict, rate_hz: int, eod_len: int | None = None) -> None:
             f"rc_path.trial.baseline_randomness = {trial['baseline_randomness']} is outside "
             f"0..1 (0 = metronome, 1 = the measured eel)"
         )
+    # The arm's burn-in. A value at or below the ambient train's LOC_BURN_IN (40) is the
+    # 2026-08-24 regression coming back by another route: the arm would start from a cold,
+    # systematically SLOW state on every presentation. Measured, burn 40 draws a median first
+    # interval 14 % above the model's own.
+    burn = trial["baseline_burn_in"]
+    if not isinstance(burn, int) or isinstance(burn, bool) or burn < 100:
+        raise ValueError(
+            f"rc_path.trial.baseline_burn_in = {burn!r} must be an integer >= 100. The arm "
+            f"anchors a pulse and then lives under a second, so it pays the cold-start "
+            f"transient in full on every presentation rather than outgrowing it."
+        )
 
     # (8a) The CH3 rate ladder is GEOMETRIC (rc_rate_to_hz raises max/min to a fraction),
     #      so a zero or negative floor is not merely odd, it is undefined. A ladder that does
@@ -336,6 +347,15 @@ def render_header(c: dict) -> str:
     a("// which is exactly when CH3 reads REST. 3.15 Hz is the measured animal.")
     a(f"#define TRIAL_BASE_TICK_HZ     {_f(trial['baseline_tick_hz'])}")
     a(f"#define TRIAL_BASE_RANDOMNESS  {_f(trial['baseline_randomness'])}")
+    a("")
+    a("// Intervals to run a FRESH arm rhythm forward before the arm uses it. The arm observes")
+    a("// the fish at its own PULSES while the model's stationary law is in continuous time, so")
+    a("// a cold state starts slow — and an arm lives a fraction of a second, so it pays that")
+    a("// transient in full every time instead of outgrowing it as the ambient train does.")
+    a("// Measured on the shipped C: burn 40 -> +14.2 % on the median first interval, 320 ->")
+    a("// +5.3 %, 1000 -> +3.1 %. Convergence is slow (the slowest component relaxes over 62")
+    a("// minutes), so this is a compromise. NOT LOC_BURN_IN, which is generated (invariant 11).")
+    a(f"#define TRIAL_BASE_BURN_IN     {trial['baseline_burn_in']}")
     a("")
     a("// ===== RC path — amplitude =================================================")
     a("// The control sets the VOLLEY (max); localization is DERIVED as volley / ratio.")
