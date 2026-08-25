@@ -148,7 +148,7 @@ def _tables(out: Path, sid: str = "PULS0003") -> dict[str, pl.DataFrame]:
 def test_alignment_recovers_the_injected_clock(session, tmp_path: Path) -> None:
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
 
     doc = tomllib.loads((out / "PULS0003_metadata.toml").read_text())
     a = doc["alignment"]
@@ -158,7 +158,13 @@ def test_alignment_recovers_the_injected_clock(session, tmp_path: Path) -> None:
     assert a["recording_channel"] == 0
     # Provenance for both halves of the pair, so a set of tables can never be
     # silently re-attached to a different recording.
-    assert len(a["recording_sha256"]) == 64
+    # One hash per recording file, in order -- a set of tables can never be
+    # silently re-attached to a different recording, or to a different SUBSET of
+    # the files that made it.
+    assert a["recording_files"] == ["rec.wav"]
+    assert len(a["recording_sha256"]) == 1
+    assert len(a["recording_sha256"][0]) == 64
+    assert a["recording_file_frames"] == [a["recording_frames"]]
     assert len(doc["source"]["sha256"]) == 64
     # The number that says whether a straight line was good enough.
     assert "residual_local_wander_s" in a
@@ -167,7 +173,7 @@ def test_alignment_recovers_the_injected_clock(session, tmp_path: Path) -> None:
 def test_every_table_gains_a_recording_clock(session, tmp_path: Path) -> None:
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
 
     frames = _tables(out)
     for name in ("pulses", "trials", "session_events", "controls"):
@@ -182,7 +188,7 @@ def test_every_table_gains_a_recording_clock(session, tmp_path: Path) -> None:
 def test_pulses_carry_their_match_outcome(session, tmp_path: Path) -> None:
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
 
     p = _tables(out)["pulses"]
     assert {"detected_time_s", "residual_s", "match_status"} <= set(p.columns)
@@ -204,7 +210,7 @@ def test_trial_spans_map_through_the_same_fit(session, tmp_path: Path) -> None:
     """The end must go through the fit, not be pasted on in device seconds."""
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
 
     t = _tables(out)["trials"]
     assert t.height == 3
@@ -223,7 +229,7 @@ def test_detections_mark_what_the_log_does_not_explain(session, tmp_path: Path) 
     """The unexplained detections are the animal, not the error term."""
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
 
     d = _tables(out)["detections"]
     assert set(d.columns) == {
@@ -241,7 +247,7 @@ def test_detections_mark_what_the_log_does_not_explain(session, tmp_path: Path) 
 def test_no_comment_lines_anywhere(session, tmp_path: Path) -> None:
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
     for path in out.glob("*.csv"):
         assert not path.read_text().startswith("#"), path.name
 
@@ -257,7 +263,7 @@ def test_an_unpaired_log_and_recording_do_not_validate(tmp_path: Path) -> None:
 
     out = tmp_path / "out"
     with pytest.raises(typer.Exit) as exc:
-        al.run(log_a, wav_b, out_dir=out, channel=0, verbose=0)
+        al.run(log_a, [wav_b], out_dir=out, channel=0, verbose=0)
     assert exc.value.exit_code == 1
     assert not list(out.glob("*.csv")), "a refused alignment must leave no tables behind"
 
@@ -270,7 +276,7 @@ def test_allow_unvalidated_writes_but_brands_the_metadata(tmp_path: Path) -> Non
     _log_b, wav_b = _synthetic_session(b_dir, scale=1.0, offset_s=41.0, seed=98)
 
     out = tmp_path / "out"
-    al.run(log_a, wav_b, out_dir=out, channel=0, verbose=0, allow_unvalidated=True)
+    al.run(log_a, [wav_b], out_dir=out, channel=0, verbose=0, allow_unvalidated=True)
     a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
     assert a["validated"] is False
     assert a["validation_warnings"], "a failed fit must say why"
@@ -279,13 +285,61 @@ def test_allow_unvalidated_writes_but_brands_the_metadata(tmp_path: Path) -> Non
 def test_refuses_to_clobber_then_force_replaces(session, tmp_path: Path) -> None:
     log_path, wav = session
     out = tmp_path / "out"
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
     with pytest.raises(typer.BadParameter):
-        al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
-    al.run(log_path, wav, out_dir=out, channel=0, verbose=0, force=True)
+        al.run(log_path, [wav], out_dir=out, channel=0, verbose=0)
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0, force=True)
 
 
 def test_rejects_a_channel_that_does_not_exist(session, tmp_path: Path) -> None:
     log_path, wav = session
     with pytest.raises(typer.BadParameter):
-        al.run(log_path, wav, out_dir=tmp_path / "out", channel=7, verbose=0)
+        al.run(log_path, [wav], out_dir=tmp_path / "out", channel=7, verbose=0)
+
+
+def test_a_split_recording_aligns_as_one_timeline(tmp_path: Path) -> None:
+    """A recorder that splits a session must not change the answer.
+
+    The same pulses, cut into three files, have to produce the same offset and
+    drift as one file -- and every file has to appear, including the short last
+    one, which is the piece audioio's own multi-file mode drops.
+    """
+    import wave
+
+    log_path, whole = _synthetic_session(tmp_path, scale=1.0 + 30e-6, offset_s=7.25, seed=5)
+
+    with wave.open(str(whole), "rb") as w:
+        rate, frames = w.getframerate(), w.getnframes()
+        raw = w.readframes(frames)
+    # Deliberately uneven: two full parts and a short tail.
+    # 40 % / 40 % / 20 %: the equal-length case is the one that happens to work,
+    # so the fixture must not accidentally use it.
+    part = int(frames * 0.4)
+    cuts = [0, part, 2 * part, frames]
+    parts = []
+    for i, (a, b) in enumerate(zip(cuts, cuts[1:], strict=False)):
+        path = tmp_path / f"split{i}.wav"
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(raw[a * 2 : b * 2])
+        parts.append(path)
+    assert (cuts[3] - cuts[2]) != (cuts[1] - cuts[0]), "the last part must be short"
+
+    one = tmp_path / "one"
+    many = tmp_path / "many"
+    al.run(log_path, [whole], out_dir=one, channel=0, verbose=0)
+    # The split files carry no timestamps, so continuity is unknowable and the
+    # command refuses until told these really are one recording.
+    with pytest.raises(typer.Exit):
+        al.run(log_path, parts, out_dir=many, channel=0, verbose=0)
+    al.run(log_path, parts, out_dir=many, channel=0, verbose=0, allow_gaps=True, force=True)
+
+    a1 = tomllib.loads((one / "PULS0003_metadata.toml").read_text())["alignment"]
+    a3 = tomllib.loads((many / "PULS0003_metadata.toml").read_text())["alignment"]
+    assert a3["recording_files"] == [p.name for p in parts]
+    assert sum(a3["recording_file_frames"]) == a1["recording_frames"]
+    assert a3["offset_s"] == pytest.approx(a1["offset_s"], abs=1e-3)
+    assert a3["drift_ppm"] == pytest.approx(a1["drift_ppm"], abs=1.0)
+    assert a3["matched_pulses"] == pytest.approx(a1["matched_pulses"], rel=0.02)

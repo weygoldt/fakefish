@@ -25,18 +25,20 @@ So the mapping goes in its own file, joined back to the log on ``seq``.
 WHAT THE SIDECAR IS FOR. The recording carries the stimulus *and* the animal's
 response, so the two useful questions are "where in the recording is each pulse
 I emitted" and "what else is in there". The first is this file. The second is
-``--detections-out``, which writes every detected pulse together with whether
-the log accounts for it: the ones it does not are the candidate responses.
+the detections table, which lists every pulse found in the audio together with
+whether the log accounts for it: the ones it does not are the candidate responses.
 
-A third file answers when each treatment started and stopped, and it is written
-BY DEFAULT (``--no-trials`` opts out). It needs to be separate because a SILENCE
-arm emits nothing, so it has no pulse rows anywhere -- a third of the trials are
-absent from the per-pulse sidecar, and they are the control condition.
+A RECORDER MAY SPLIT A LONG SESSION INTO SEVERAL FILES. Pass them all, in order;
+they are joined into one timeline whose frame 0 is the first frame of the first
+file, which is how a viewer concatenates them too. Continuity is checked from the
+files' own timestamps and a break is refused rather than silently spanned -- see
+``fakefish.recording``.
 """
 
 from __future__ import annotations
 
 import hashlib
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -44,7 +46,6 @@ import numpy as np
 import polars as pl
 import typer
 from numpy.typing import NDArray
-from scipy.io import wavfile
 
 from fakefish import ingest
 from fakefish import session_metadata as meta
@@ -58,66 +59,28 @@ from fakefish.clock_align import (
 )
 from fakefish.pulse_detect import (
     DetectionParams,
+    Detections,
     detect_pulses,
     refine_template,
     suggest_absolute_floor,
 )
 from fakefish.pulse_log import PulseLogFile, read
+from fakefish.recording import Recording
 from fakefish.viz.loggers import configure_logging, get_logger
 
 log = get_logger(__name__)
 
 app = typer.Typer(add_completion=False, help=__doc__)
 
-#: Sidecar schema version. Bumped for a breaking change to the columns or the
-#: header keys, exactly as the pulse log's own version is.
-SIDECAR_FORMAT_VERSION = 1
-
-#: The sidecar's magic first line. Deliberately NOT the pulse log's, so nothing
-#: can mistake a derived file for a device record.
-SIDECAR_MAGIC = "#fakefish-align"
-
-#: Tolerance for calling a logged pulse "matched" in the sidecar's ``status``.
+#: Tolerance for calling a logged pulse "matched" in the pulses table.
 #:
 #: This is NOT the estimator's own ladder, which ends at 300 us. That ladder
 #: exists to *fit* tightly; reused as a verdict it rejects genuine pulses. On
 #: exp2 it calls 96.8 % matched where 500 us calls 99.7 %, and the 3 % it drops
-#: are real pulses displaced by short-term clock wander (measured: 546 us of
-#: non-linear excursion that a 2-parameter fit cannot absorb). Recorded in the
-#: header so a reader never has to guess which number produced a status.
+#: are real pulses displaced by short-term clock wander (measured: 0.52 ms of
+#: non-linear excursion a 2-parameter fit cannot absorb). Recorded in the
+#: metadata so a reader never has to guess which number produced a status.
 DEFAULT_MATCH_TOLERANCE_S = 500e-6
-
-COLUMNS = (
-    "seq",
-    "tick",
-    "event",
-    "trial",
-    "t_log_s",
-    "t_rec_s",
-    "offset_s",
-    "t_det_s",
-    "resid_s",
-    "status",
-)
-
-DETECTION_COLUMNS = ("index", "t_rec_s", "t_log_s", "amplitude", "matched_seq", "status")
-
-TRIAL_COLUMNS = (
-    "trial",
-    "arm",
-    "item",
-    "t_log_start_s",
-    "t_rec_start_s",
-    "t_rec_end_s",
-    "duration_s",
-    "n_pulses",
-    "n_matched",
-)
-
-#: The log's one-character arm codes, spelled out. ``S`` is the SILENCE arm; the
-#: character is the two-arm design's SHAM code, kept because the quantity never
-#: changed (see ``pulse_log.KIND_SHAM``).
-ARM_NAMES = {"V": "VOLLEY", "B": "BASELINE", "S": "SILENCE"}
 
 
 def _sha256(path: Path) -> str:
@@ -126,35 +89,6 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
     return h.hexdigest()
-
-
-def read_channel(path: Path, channel: int) -> tuple[NDArray[np.float64], int, int]:
-    """One channel of a WAV as float64 in -1..1, plus its rate and frame count.
-
-    ``scipy.io.wavfile`` returns the stored integer type, so the scale depends on
-    the bit depth; normalise by the dtype's range rather than by the data's own
-    peak, which would silently rescale a quiet recording and move every absolute
-    threshold with it.
-
-    It also cannot memory-map 24-bit files, so this reads the whole recording:
-    ~2.6 GB per hour of stereo 24-bit at 48 kHz. Fine for the minutes-long
-    stereo sessions this is for; a grid stream that runs for days needs a
-    windowed reader instead.
-    """
-    rate, data = wavfile.read(str(path))
-    if data.ndim == 1:
-        data = data[:, None]
-    n_frames, n_channels = data.shape
-    if not 0 <= channel < n_channels:
-        raise typer.BadParameter(
-            f"--channel {channel} but {path.name} has {n_channels} channel(s) (0-indexed)"
-        )
-    x = data[:, channel]
-    if np.issubdtype(x.dtype, np.integer):
-        x = x.astype(np.float64) / float(np.iinfo(x.dtype).max)
-    else:
-        x = x.astype(np.float64)
-    return x, int(rate), int(n_frames)
 
 
 def emitted_template(sample_rate_hz: float) -> NDArray[np.float64]:
@@ -196,6 +130,107 @@ def item_durations_s() -> dict[int, float]:
         i: (int(np.sum(it["ipi_samp"])) + eod_len) / float(PLAYBACK_RATE_HZ)
         for i, it in enumerate(parsed["items"])
     }
+
+
+# ===== detection over a whole recording ====================================
+#: Blocks are big enough that the per-block matched filter dominates the
+#: bookkeeping, and small enough that one channel of one block stays well under
+#: a gigabyte as float64.
+DETECT_BLOCK_S = 120.0
+
+#: Overlap so a pulse straddling a boundary is seen whole by the filter. Two
+#: orders above an EOD's 2.6 ms width, and far above the detector's own 4 ms
+#: template window.
+DETECT_OVERLAP_S = 0.5
+
+
+def _calibration_sample(
+    rec: Recording, channel: int, template: NDArray[np.float64], params: DetectionParams
+) -> tuple[float, NDArray[np.float64]]:
+    """A noise floor and a data-derived template, from a SAMPLE of the recording.
+
+    Both were previously measured over the whole file. On an hour-long session
+    that means two full passes, and the second exists only to learn the pulse
+    shape -- which a few hundred pulses settle just as well as a few hundred
+    thousand. So sample, calibrate, then make ONE full pass with the answer.
+
+    Blocks are taken spread through the recording rather than from the start: a
+    session commonly opens with the device out of the water (exp2's first 46 s
+    are silent), and a floor measured there would be far too low.
+    """
+    want = 200  # refine_template's own max_snippets; more buys nothing
+    n_blocks = max(int(np.ceil(rec.duration_s / DETECT_BLOCK_S)), 1)
+    probe_at = sorted({0, n_blocks // 3, 2 * n_blocks // 3, n_blocks - 1})
+
+    floors, snippets_from, got = [], [], 0
+    for b in probe_at:
+        start = int(b * DETECT_BLOCK_S * rec.rate)
+        x = rec.read(start, start + int(DETECT_BLOCK_S * rec.rate), channel)
+        if x.size == 0:
+            continue
+        floors.append(suggest_absolute_floor(x, fraction=0.05))
+        if got < want:
+            trial = detect_pulses(x, rec.rate, template, params)
+            if trial.n:
+                snippets_from.append((x, trial))
+                got += trial.n
+    if not floors:
+        raise ValueError("the recording is empty")
+
+    # The MEDIAN floor across probes, not the minimum: one quiet block would
+    # otherwise set a threshold the rest of the session trips on constantly.
+    floor = float(np.median(floors))
+    refined = template
+    for x, trial in snippets_from:
+        refined = refine_template(x, trial, rec.rate)
+        break
+    return floor, refined
+
+
+def detect_recording(
+    rec: Recording,
+    channel: int,
+    template: NDArray[np.float64],
+    params: DetectionParams,
+) -> Detections:
+    """Detect pulses across the whole recording, streaming block by block.
+
+    Each block keeps only detections in its own non-overlapping window, so a
+    pulse in the overlap is claimed by exactly one block -- never dropped,
+    never counted twice.
+    """
+    times, scores, amps, pols = [], [], [], []
+    rejected = 0
+    noise = []
+    for x, t0 in rec.blocks(channel, DETECT_BLOCK_S, DETECT_OVERLAP_S):
+        if x.size == 0:
+            continue
+        d = detect_pulses(x, rec.rate, template, params, t0_s=t0)
+        noise.append(d.noise_scale)
+        rejected += d.n_rejected_by_floor
+        # The block owns [t0, t0 + DETECT_BLOCK_S); the overlap tail belongs to
+        # the next one. The final block owns everything to the end.
+        hi = t0 + DETECT_BLOCK_S
+        keep = d.times_s < hi if (t0 + DETECT_BLOCK_S) < rec.duration_s else np.ones(
+            d.times_s.size, dtype=bool
+        )
+        times.append(d.times_s[keep])
+        scores.append(d.scores[keep])
+        amps.append(d.amplitudes[keep])
+        pols.append(d.polarities[keep])
+
+    def cat(parts, dtype):
+        return np.concatenate(parts).astype(dtype) if parts else np.empty(0, dtype=dtype)
+
+    return Detections(
+        times_s=cat(times, np.float64),
+        scores=cat(scores, np.float64),
+        amplitudes=cat(amps, np.float64),
+        polarities=cat(pols, np.int8),
+        noise_scale=float(np.median(noise)) if noise else 0.0,
+        threshold=params.snr_threshold,
+        n_rejected_by_floor=int(rejected),
+    )
 
 
 def _match(
@@ -284,7 +319,13 @@ def align(
 @app.command()
 def run(
     log_path: Annotated[Path, typer.Argument(help="A PULSnnnn.CSV device pulse log.")],
-    recording: Annotated[Path, typer.Argument(help="The WAV recorded during that session.")],
+    recordings: Annotated[
+        list[Path],
+        typer.Argument(
+            help="The WAV(s) recorded during that session, IN ORDER. A recorder that "
+            "splits a long session writes several; pass them all."
+        ),
+    ],
     out_dir: Annotated[
         Path, typer.Option("--out-dir", "-o", help="Directory to write the tables into.")
     ],
@@ -300,6 +341,13 @@ def run(
     ] = DEFAULT_MATCH_TOLERANCE_S * 1e3,
     allow_unvalidated: Annotated[
         bool, typer.Option("--allow-unvalidated", help="Write even if the fit fails validate().")
+    ] = False,
+    allow_gaps: Annotated[
+        bool,
+        typer.Option(
+            "--allow-gaps",
+            help="Join the files even if their timestamps say recording was interrupted.",
+        ),
     ] = False,
     force: Annotated[
         bool, typer.Option("--force", help="Replace existing output files.")
@@ -318,6 +366,7 @@ def run(
     and every position drawn from it inherits the error.
     """
     configure_logging(verbose)
+    stack = ExitStack()
     log_file = read(log_path)
 
     missing = meta.unmapped_keys(log_file)
@@ -338,21 +387,35 @@ def run(
     if not n_pulses:
         raise typer.BadParameter(f"{log_path.name} contains no emitted pulses to align")
 
-    x, rate, n_frames = read_channel(recording, channel)
-    duration_s = n_frames / float(rate)
-    log.info(
-        "%s: %d pulses over %.1f s | %s: ch%d, %d Hz, %.1f s",
-        log_path.name, n_pulses, float(np.ptp(log_file.pulse_times_s())),
-        recording.name, channel, rate, duration_s,
-    )
+    rec = Recording.open(recordings)
+    stack.enter_context(rec)
+    rate, duration_s = rec.rate, rec.duration_s
+    if not 0 <= channel < rec.channels:
+        raise typer.BadParameter(
+            f"--channel {channel} but the recording has {rec.channels} channel(s) (0-indexed)"
+        )
+    log.info("%s: %d pulses over %.1f s", log_path.name, n_pulses,
+             float(np.ptp(log_file.pulse_times_s())))
+    log.info("recording: %s", rec.describe())
 
-    floor = suggest_absolute_floor(x, fraction=0.05)
+    # A gap between files means the joined timeline is wrong from that point on,
+    # and every annotation after it lands in the wrong place. Refuse rather than
+    # emit an alignment that looks fine and is not.
+    problems = rec.continuity_problems()
+    for line in problems:
+        log.warning("  %s", line)
+    if problems and not allow_gaps:
+        log.error(
+            "these files do not look like one continuous recording. "
+            "Pass --allow-gaps to align them anyway as if they were."
+        )
+        raise typer.Exit(code=1)
+
+    params = DetectionParams(snr_threshold=8.0, absolute_floor=0.0)
+    floor, template = _calibration_sample(rec, channel, emitted_template(rate), params)
     params = DetectionParams(snr_threshold=8.0, absolute_floor=floor)
-    first = detect_pulses(x, rate, emitted_template(rate), params)
-    # Close the loop on the template: the recorded pulse is a differentiated EOD,
-    # so the emitted shape is a seed and nothing more.
-    found = detect_pulses(x, rate, refine_template(x, first, rate), params) if first.n else first
-    log.info("detected %d pulses (%d before refining the template)", found.n, first.n)
+    found = detect_recording(rec, channel, template, params)
+    log.info("detected %d pulses across the whole recording", found.n)
 
     tol = tolerance_ms * 1e-3
     result, cols = align(log_file, found.times_s, recording_duration_s=duration_s, tolerance_s=tol)
@@ -387,14 +450,14 @@ def run(
         source_sha256=_sha256(log_path),
         tool="fakefish-align-log",
         extra={"alignment": _alignment_meta(
-            recording, channel, rate, n_frames, result, passed, reasons,
+            rec, channel, result, passed, reasons,
             found, n_matched, tol, params, cols,
         )},
     )
     doc["counts"].update({f"rows_{k}": v for k, v in counts.items()})
     meta.write(paths["metadata"], doc)
 
-    log.info("%s + %s -> %s", log_path.name, recording.name, out_dir)
+    log.info("%s + %d recording file(s) -> %s", log_path.name, len(rec.parts), out_dir)
     for name in ("pulses", "trials", "session_events", "controls", "detections"):
         log.info("  %-16s %6d rows  %s", name, counts[name], paths[name].name)
     log.info("  %-16s %6s       %s", "metadata", "", paths["metadata"].name)
@@ -414,7 +477,7 @@ def _match_frame(log_file: PulseLogFile, cols: dict) -> pl.DataFrame:
 
 
 def _alignment_meta(
-    recording, channel, rate, n_frames, result, passed, reasons,
+    rec, channel, result, passed, reasons,
     found, n_matched, tol, params, cols,
 ) -> dict:
     """Everything the old '#' header carried about the fit, as TOML keys."""
@@ -440,10 +503,17 @@ def _alignment_meta(
         return None if not np.isfinite(v) else float(v)
 
     return {
-        "recording_file": recording.name,
-        "recording_sha256": _sha256(recording),
-        "recording_rate_hz": int(rate),
-        "recording_frames": int(n_frames),
+        # The file LIST, in order, with each one's length -- so a viewer can place a
+        # boundary and a reader can tell that a session came back split. Recording
+        # time is seconds from the first frame of the first file.
+        "recording_files": [p.path.name for p in rec.parts],
+        "recording_file_frames": [p.frames for p in rec.parts],
+        "recording_sha256": [_sha256(p.path) for p in rec.parts],
+        "recording_join_gaps_s": [
+            -999.0 if g is None else round(g, 3) for g in rec.join_gaps_s()
+        ],
+        "recording_rate_hz": int(rec.rate),
+        "recording_frames": int(rec.frames),
         "recording_channel": int(channel),
         "method": AlignmentMethod.AUTO_MATCHED_FILTER.value,
         "model": "recording_time = scale * device_time + offset_s",

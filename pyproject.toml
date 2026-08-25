@@ -6,6 +6,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.8",
+    # Multi-file, buffered WAV reading. A TASCAM splits a long session into
+    # several files (exp3: four, ~15.5 min each) and audioio presents them as one
+    # continuous timeline; it also streams rather than reading whole files, which
+    # scipy.io.wavfile cannot do for 24-bit. Needs only numpy + scipy.
+    "audioio>=2.8",
+    # audioio's real backend. Without it audioio falls back to the stdlib `wave`
+    # module, which cannot decode the 24-bit samples a TASCAM writes
+    # ("data type 'i3' not understood").
+    "soundfile>=0.12",
     "numpy>=1.26",
     # Sidecar CSVs scale with the session: an hours-long playback runs to hundreds of
     # thousands of pulses, and the reader/writer must stay swift at that size.

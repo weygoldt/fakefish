@@ -336,12 +336,13 @@ def test_detect_then_align_recovers_the_injected_clock(tmp_path: Path) -> None:
     )
     # fakefish's own readers, so this exercises the shipped path rather than a
     # test-only one: pulse_log for the log, align_log.read_channel for the WAV.
-    from fakefish.align_log import read_channel
     from fakefish.pulse_log import read as read_log
+    from fakefish.recording import Recording
 
     table = read_log(log_path)
     log_times = table.pulse_times_s()
-    x, sr, _frames = read_channel(wav_path, 0)
+    with Recording.open([wav_path]) as rec:
+        x, sr = rec.read(0, rec.frames, 0), rec.rate
 
     template = biphasic_template(sr)
     floor = suggest_absolute_floor(x, fraction=0.05)
