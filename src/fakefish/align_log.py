@@ -36,7 +36,6 @@ absent from the per-pulse sidecar, and they are the control condition.
 
 from __future__ import annotations
 
-import datetime as dt
 import hashlib
 from pathlib import Path
 from typing import Annotated, Optional
@@ -47,6 +46,9 @@ import typer
 from numpy.typing import NDArray
 from scipy.io import wavfile
 
+from fakefish import ingest
+from fakefish import session_metadata as meta
+from fakefish import session_tables as tables
 from fakefish._resources import DEFAULT_FIRMWARE
 from fakefish.clock_align import (
     AlignmentMethod,
@@ -244,85 +246,6 @@ def _match(
     return t_det, claimed
 
 
-def _header_lines(
-    *,
-    log_path: Path,
-    rec_path: Path,
-    channel: int,
-    rate: int,
-    n_frames: int,
-    result: AlignmentResult,
-    passed: bool,
-    reasons: tuple[str, ...],
-    n_det: int,
-    n_matched: int,
-    tolerance_s: float,
-    params: DetectionParams,
-    resid: NDArray[np.float64],
-    t_rec: NDArray[np.float64],
-    created: str,
-) -> list[str]:
-    a = result.alignment
-    finite = resid[np.isfinite(resid)]
-
-    def _num(v: float) -> str:
-        return "" if not np.isfinite(v) else f"{v:.9g}"
-
-    # Local wander: the median residual per 20 s window, peak-to-peak. A
-    # 2-parameter fit absorbs CONSTANT drift, not short-term excursions -- on exp2
-    # those run 546 us against a within-window spread of tens of microseconds. This
-    # is the number that says whether the linear model was good enough, so it is
-    # not optional and it is not derivable from the median alone.
-    ptp_local = float("nan")
-    ok = np.isfinite(resid)
-    if int(ok.sum()) > 4:
-        # Times and residuals from the SAME per-pulse arrays. Not the estimator's own
-        # matched set, which is a different (tighter) selection and a different length.
-        t = t_rec[ok]
-        r = resid[ok]
-        bins = np.floor((t - t.min()) / 20.0).astype(int)
-        meds = [float(np.median(r[bins == b])) for b in np.unique(bins) if (bins == b).sum() >= 3]
-        if len(meds) > 1:
-            ptp_local = max(meds) - min(meds)
-
-    return [
-        SIDECAR_MAGIC,
-        f"#format_version={SIDECAR_FORMAT_VERSION}",
-        f"#created_utc={created}",
-        f"#log={log_path.name}",
-        f"#log_sha256={_sha256(log_path)}",
-        f"#recording={rec_path.name}",
-        f"#recording_sha256={_sha256(rec_path)}",
-        f"#recording_rate_hz={rate}",
-        f"#recording_frames={n_frames}",
-        f"#recording_channel={channel}",
-        "#model=linear2",
-        f"#scale={a.scale:.12g}",
-        f"#drift_ppm={a.drift_ppm:.6g}",
-        f"#offset_s={a.offset_s:.9g}",
-        f"#method={AlignmentMethod.AUTO_MATCHED_FILTER.value}",
-        f"#coarse_lag_s={result.coarse_lag_s:.9g}",
-        f"#coarse_peak_ratio={result.coarse_peak_ratio:.6g}",
-        f"#n_log_pulses={result.n_candidates}",
-        f"#n_detections={n_det}",
-        f"#n_matched={n_matched}",
-        f"#match_fraction={n_matched / result.n_candidates if result.n_candidates else 0.0:.6g}",
-        f"#match_tolerance_s={tolerance_s:.6g}",
-        f"#fit_match_fraction={result.match_fraction:.6g}",
-        f"#residual_median_s={_num(float(np.median(finite)) if finite.size else float('nan'))}",
-        f"#residual_mad_s={_num(float(np.median(np.abs(finite - np.median(finite)))) if finite.size else float('nan'))}",
-        f"#residual_p95_abs_s={_num(float(np.percentile(np.abs(finite), 95)) if finite.size else float('nan'))}",
-        f"#residual_slope_ppm={_num(a.residual_slope_ppm)}",
-        f"#residual_ptp_local_s={_num(ptp_local)}",
-        f"#detect_snr_threshold={params.snr_threshold:.6g}",
-        f"#detect_absolute_floor={params.absolute_floor:.6g}",
-        f"#detect_refractory_s={params.refractory_s:.6g}",
-        f"#validated={1 if passed else 0}",
-        f"#validation_warnings={'|'.join(reasons) if reasons else ''}",
-        f"#fit_warnings={'|'.join(result.warnings) if result.warnings else ''}",
-    ]
-
-
 def align(
     log_file: PulseLogFile,
     detections_s: NDArray[np.float64],
@@ -356,62 +279,61 @@ def align(
     }
 
 
+
+
 @app.command()
 def run(
-    log_path: Annotated[Path, typer.Argument(help="A PULSnnnn.CSV pulse log.")],
+    log_path: Annotated[Path, typer.Argument(help="A PULSnnnn.CSV device pulse log.")],
     recording: Annotated[Path, typer.Argument(help="The WAV recorded during that session.")],
-    out: Annotated[Path, typer.Option("--out", "-o", help="Sidecar CSV to write. Required.")],
+    out_dir: Annotated[
+        Path, typer.Option("--out-dir", "-o", help="Directory to write the tables into.")
+    ],
     channel: Annotated[
         int, typer.Option("--channel", "-c", help="Recording channel carrying the playback.")
     ] = 0,
+    session_id: Annotated[
+        Optional[str],
+        typer.Option("--session-id", help="Name prefix. Defaults to the log's stem."),
+    ] = None,
     tolerance_ms: Annotated[
         float, typer.Option("--tolerance-ms", help="Match tolerance for the status column.")
     ] = DEFAULT_MATCH_TOLERANCE_S * 1e3,
-    trials_out: Annotated[
-        Optional[Path],
-        typer.Option(
-            "--trials-out",
-            help="Where to write the per-trial spans. Defaults to '<out stem>.trials.csv'.",
-        ),
-    ] = None,
-    no_trials: Annotated[
-        bool,
-        typer.Option("--no-trials", help="Skip the per-trial span file."),
-    ] = False,
-    detections_out: Annotated[
-        Optional[Path],
-        typer.Option("--detections-out", help="Also write every detection, matched or not."),
-    ] = None,
     allow_unvalidated: Annotated[
         bool, typer.Option("--allow-unvalidated", help="Write even if the fit fails validate().")
     ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Replace existing output files.")
+    ] = False,
     verbose: Annotated[int, typer.Option("--verbose", "-v", count=True)] = 2,
 ) -> None:
-    """Fit log -> recording time and write the sidecar.
+    """Fit log -> recording time and write the session's tables.
+
+    Writes the same tables as ``fakefish-ingest`` -- pulses, trials, session
+    events, controls -- with a ``recording_time_s`` column added to each, plus a
+    ``detections`` table of every pulse found in the audio. A viewer then reads
+    one set of files instead of joining device time against recording time.
 
     Exits non-zero if the fit fails ``validate()``, unless ``--allow-unvalidated``.
-    That is deliberate: an unvalidated alignment that reaches a viewer looks
-    exactly like a good one, and every downstream conclusion inherits it.
+    An unvalidated alignment that reaches a viewer looks exactly like a good one,
+    and every position drawn from it inherits the error.
     """
     configure_logging(verbose)
+    log_file = read(log_path)
 
-    # WRITTEN BY DEFAULT, because a viewer that draws only pulses is missing a
-    # third of the trials: a SILENCE arm emits nothing, so it has no pulse rows
-    # anywhere, and it is the control condition. Opting out is explicit.
-    if trials_out is None and not no_trials:
-        trials_out = out.with_name(out.stem + ".trials.csv")
-
-    # Check every destination BEFORE the expensive work. Detection over an
-    # hour-long recording takes minutes; discovering a name collision afterwards
-    # would throw all of it away, and would do so having already written one of
-    # the files -- a half-written set is worse than none.
-    clashes = [p for p in (out, trials_out, detections_out) if p is not None and p.exists()]
-    if clashes:
+    missing = meta.unmapped_keys(log_file)
+    if missing:
         raise typer.BadParameter(
-            "refusing to overwrite: " + ", ".join(str(p) for p in clashes)
+            f"{log_path.name} carries header keys this version does not know, and "
+            f"converting would drop them: {sorted(missing)}. Add them to "
+            f"session_metadata.SECTIONS."
         )
 
-    log_file = read(log_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sid = session_id or log_path.stem
+    paths = ingest.destinations(out_dir, sid)
+    paths["detections"] = out_dir / f"{sid}_detections.csv"
+    ingest.check_free(paths, force)
+
     n_pulses = len(log_file.pulses())
     if not n_pulses:
         raise typer.BadParameter(f"{log_path.name} contains no emitted pulses to align")
@@ -427,8 +349,8 @@ def run(
     floor = suggest_absolute_floor(x, fraction=0.05)
     params = DetectionParams(snr_threshold=8.0, absolute_floor=floor)
     first = detect_pulses(x, rate, emitted_template(rate), params)
-    # Close the loop on the template: the recorded pulse is a differentiated
-    # EOD, so the emitted shape is a seed and nothing more.
+    # Close the loop on the template: the recorded pulse is a differentiated EOD,
+    # so the emitted shape is a seed and nothing more.
     found = detect_pulses(x, rate, refine_template(x, first, rate), params) if first.n else first
     log.info("detected %d pulses (%d before refining the template)", found.n, first.n)
 
@@ -449,197 +371,143 @@ def run(
             log.error("refusing to write. Pass --allow-unvalidated to write it anyway.")
             raise typer.Exit(code=1)
 
-    created = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    header = _header_lines(
-        log_path=log_path, rec_path=recording, channel=channel, rate=rate, n_frames=n_frames,
-        result=result, passed=passed, reasons=reasons, n_det=int(found.n), n_matched=n_matched,
-        tolerance_s=tol, params=params, resid=cols["resid_s"],
-        t_rec=cols["t_rec_s"], created=created,
-    )
-
-    recs = log_file.pulses()
-    seq = np.fromiter((r.seq for r in recs), dtype=np.int64, count=len(recs))
-    tick = np.fromiter((r.tick for r in recs), dtype=np.int64, count=len(recs))
-    frame = pl.DataFrame(
-        {
-            "seq": seq,
-            "tick": tick,
-            "event": [r.event for r in recs],
-            # None, not a number: an absent trial must render as an empty column.
-            "trial": pl.Series([r.trial for r in recs], dtype=pl.Int64),
-            "t_log_s": _round(cols["t_log_s"], 6),
-            "t_rec_s": _round(cols["t_rec_s"], 6),
-            "offset_s": _round(cols["t_rec_s"] - cols["t_log_s"], 6),
-            # NaN would be written as "NaN"; polars writes a null as an empty field,
-            # which is the pulse log's own absent-is-empty rule and for the same
-            # reason -- a written number gets used as one.
-            "t_det_s": _nullable(cols["t_det_s"], 6),
-            "resid_s": _nullable(cols["resid_s"], 9),
-            "status": cols["status"].tolist(),
-        }
-    )
-    _write_csv(out, header, frame)
-    log.info("wrote %s (%d rows)", out, frame.height)
-
-    if trials_out is not None:
-        _write_trials(trials_out, log_file, result, cols)
-
-    if detections_out is not None:
-        _write_detections(detections_out, found, cols, result, seq)
-
-
-def _round(a: NDArray[np.float64], places: int) -> NDArray[np.float64]:
-    """Round for output. Done here rather than with a per-row format string so the
-    whole column is one vectorised operation."""
-    return np.round(a, places)
-
-
-def _nullable(a: NDArray[np.float64], places: int) -> pl.Series:
-    """A float column whose non-finite entries become nulls, i.e. empty CSV fields."""
-    rounded = np.round(a, places)
-    return pl.Series(rounded).fill_nan(None)
-
-
-def _write_csv(path: Path, header: list[str], frame: pl.DataFrame) -> None:
-    """The '#key=value' block, the commented column row, then polars' own CSV.
-
-    The commented column line mirrors the pulse log's layout so
-    ``pl.read_csv(path, comment_prefix='#')`` works directly on either file.
-    """
-    with path.open("w", encoding="utf-8") as fh:
-        fh.write("\n".join(header) + "\n")
-        fh.write("#" + ",".join(frame.columns) + "\n")
-        frame.write_csv(fh)
-
-
-def _write_trials(path: Path, log_file: PulseLogFile, result, cols) -> None:
-    """One row per TRIAL: when each treatment starts and stops in the recording.
-
-    THIS IS THE ONLY PLACE THE SILENCE ARM EXISTS. It emits nothing, so it has no
-    pulse rows anywhere -- in the per-pulse sidecar a third of the trials are
-    simply absent, and they are the control condition. A viewer that draws only
-    pulses shows the treatment and omits what it is meant to be compared against.
-
-    The span is not "first pulse to last pulse". A trial's LENGTH is set by the
-    library item it drew, which the log records on the TRIAL row for all three
-    arms precisely so a silent arm has a knowable duration -- nothing was emitted
-    at its end to measure. A baseline arm carrying one pulse still occupies its
-    full window; measured from its pulses it would collapse to an instant.
-    """
-    # Backstop for direct callers; run() checks every destination up front.
-    if path.exists():
-        raise typer.BadParameter(f"{path} exists; refusing to overwrite")
-
-    rate = float(log_file.sample_rate_hz)
-    durations = item_durations_s()
     a = result.alignment
-    trials = [t for t in log_file.trials() if t.tick is not None]
+    tb = tables.TimeBase(
+        sample_rate_hz=float(log_file.sample_rate_hz), scale=a.scale, offset_s=a.offset_s
+    )
+    counts = ingest.write_tables(
+        log_file, tb, paths, item_durations_s=item_durations_s(),
+        pulse_match=_match_frame(log_file, cols),
+    )
+    counts["detections"] = _write_detections(paths["detections"], found, cols, result, log_file)
 
-    # Pulses per trial, from the rows already placed on the recording's clock.
-    by_trial: dict[int, list[int]] = {}
-    for i, r in enumerate(log_file.pulses()):
-        if r.trial is not None:
-            by_trial.setdefault(r.trial, []).append(i)
-    matched = cols["status"] == "matched"
+    doc = meta.build(
+        log_file,
+        source_path=log_path,
+        source_sha256=_sha256(log_path),
+        tool="fakefish-align-log",
+        extra={"alignment": _alignment_meta(
+            recording, channel, rate, n_frames, result, passed, reasons,
+            found, n_matched, tol, params, cols,
+        )},
+    )
+    doc["counts"].update({f"rows_{k}": v for k, v in counts.items()})
+    meta.write(paths["metadata"], doc)
 
-    ids, arms, items = [], [], []
-    t_log0, t_rec0, t_rec1, durs, n_pulses, n_matched = [], [], [], [], [], []
-    unknown_item = 0
-    for t in trials:
-        start_log = t.tick / rate
-        dur = durations.get(t.item) if t.item is not None else None
-        if dur is None:
-            unknown_item += 1
-        idx = by_trial.get(t.trial, [])
-        ids.append(t.trial)
-        arms.append(ARM_NAMES.get(t.res or "", "UNKNOWN"))
-        items.append(t.item)
-        t_log0.append(start_log)
-        t_rec0.append(float(a.log_to_recording(np.float64(start_log))))
-        # Affine, so the end maps through the same fit rather than being pasted on
-        # in device seconds -- at 14 ppm that would be wrong by microseconds, but
-        # it would be wrong for the wrong reason.
-        t_rec1.append(
-            float(a.log_to_recording(np.float64(start_log + dur))) if dur is not None else np.nan
-        )
-        durs.append(dur if dur is not None else np.nan)
-        n_pulses.append(len(idx))
-        n_matched.append(int(np.count_nonzero(matched[idx])) if idx else 0)
+    log.info("%s + %s -> %s", log_path.name, recording.name, out_dir)
+    for name in ("pulses", "trials", "session_events", "controls", "detections"):
+        log.info("  %-16s %6d rows  %s", name, counts[name], paths[name].name)
+    log.info("  %-16s %6s       %s", "metadata", "", paths["metadata"].name)
 
-    frame = pl.DataFrame(
+
+def _match_frame(log_file: PulseLogFile, cols: dict) -> pl.DataFrame:
+    """Per-pulse match outcome, keyed by the source row so the join cannot slip."""
+    seq = [r.seq for r in log_file.pulses()]
+    return pl.DataFrame(
         {
-            "trial": pl.Series(ids, dtype=pl.Int64),
-            "arm": arms,
-            "item": pl.Series(items, dtype=pl.Int64),
-            "t_log_start_s": _round(np.asarray(t_log0), 6),
-            "t_rec_start_s": _round(np.asarray(t_rec0), 6),
-            "t_rec_end_s": _nullable(np.asarray(t_rec1), 6),
-            "duration_s": _nullable(np.asarray(durs), 6),
-            "n_pulses": pl.Series(n_pulses, dtype=pl.Int64),
-            "n_matched": pl.Series(n_matched, dtype=pl.Int64),
+            "source_row": pl.Series(seq, dtype=pl.Int64),
+            "detected_time_s": pl.Series(np.round(cols["t_det_s"], 6)).fill_nan(None),
+            "residual_s": pl.Series(np.round(cols["resid_s"], 9)).fill_nan(None),
+            "match_status": cols["status"].tolist(),
         }
     )
-    _write_csv(
-        path,
-        [SIDECAR_MAGIC + "-trials", f"#format_version={SIDECAR_FORMAT_VERSION}"],
-        frame,
-    )
-    counts = frame.group_by("arm").len().sort("arm")
-    log.info(
-        "wrote %s (%d trials: %s)",
-        path,
-        frame.height,
-        ", ".join(f"{r['len']} {r['arm'].lower()}" for r in counts.iter_rows(named=True)),
-    )
-    if unknown_item:
-        # v2/v3 logs leave `item` empty on the TRIAL row, so a silent arm there has
-        # no recoverable length. Say so rather than inventing one.
-        log.warning(
-            "%d trial(s) carry no item, so their end time is unknown (a pre-v4 log?)",
-            unknown_item,
-        )
 
 
-def _write_detections(path: Path, found, cols, result, seq: NDArray[np.int64]) -> None:
-    """Every detection, and whether the log accounts for it.
+def _alignment_meta(
+    recording, channel, rate, n_frames, result, passed, reasons,
+    found, n_matched, tol, params, cols,
+) -> dict:
+    """Everything the old '#' header carried about the fit, as TOML keys."""
+    a = result.alignment
+    resid = cols["resid_s"]
+    ok = np.isfinite(resid)
+    r = resid[ok]
 
-    The ones it does not are the point: the recording carries the animal's
-    response as well as the stimulus, so a detection with no logged pulse behind
-    it is a candidate response rather than an error. It is labelled
-    ``unexplained`` and not ``spurious`` on purpose.
+    # Local wander: the median residual per 20 s window, peak to peak. A
+    # 2-parameter fit absorbs CONSTANT drift, not short-term excursions -- on a
+    # real session those run ~0.5 ms against a within-window spread of tens of
+    # microseconds. This is the number that says whether the linear model was
+    # good enough, so it is not optional and not derivable from the median.
+    ptp_local = float("nan")
+    if int(ok.sum()) > 4:
+        t = cols["t_rec_s"][ok]
+        bins = np.floor((t - t.min()) / 20.0).astype(int)
+        meds = [float(np.median(r[bins == b])) for b in np.unique(bins) if (bins == b).sum() >= 3]
+        if len(meds) > 1:
+            ptp_local = max(meds) - min(meds)
+
+    def maybe(v: float) -> Optional[float]:
+        return None if not np.isfinite(v) else float(v)
+
+    return {
+        "recording_file": recording.name,
+        "recording_sha256": _sha256(recording),
+        "recording_rate_hz": int(rate),
+        "recording_frames": int(n_frames),
+        "recording_channel": int(channel),
+        "method": AlignmentMethod.AUTO_MATCHED_FILTER.value,
+        "model": "recording_time = scale * device_time + offset_s",
+        "scale": float(a.scale),
+        "drift_ppm": round(float(a.drift_ppm), 6),
+        "offset_s": float(a.offset_s),
+        "coarse_lag_s": round(float(result.coarse_lag_s), 9),
+        "coarse_peak_ratio": round(float(result.coarse_peak_ratio), 6),
+        "detections": int(found.n),
+        "matched_pulses": int(n_matched),
+        "match_fraction": round(n_matched / result.n_candidates, 6) if result.n_candidates else 0.0,
+        "match_tolerance_s": float(tol),
+        # The estimator's own ladder ends tighter than the verdict tolerance, so
+        # the two fractions differ. Both are reported rather than one silently
+        # standing in for the other.
+        "fit_match_fraction": round(float(result.match_fraction), 6),
+        "residual_median_s": maybe(float(np.median(r)) if r.size else float("nan")),
+        "residual_mad_s": maybe(
+            float(np.median(np.abs(r - np.median(r)))) if r.size else float("nan")
+        ),
+        "residual_p95_abs_s": maybe(
+            float(np.percentile(np.abs(r), 95)) if r.size else float("nan")
+        ),
+        "residual_slope_ppm": maybe(float(a.residual_slope_ppm)),
+        "residual_local_wander_s": maybe(ptp_local),
+        "detect_snr_threshold": float(params.snr_threshold),
+        "detect_absolute_floor": round(float(params.absolute_floor), 9),
+        "detect_refractory_s": float(params.refractory_s),
+        "validated": bool(passed),
+        "validation_warnings": list(reasons),
+        "fit_warnings": list(result.warnings),
+    }
+
+
+def _write_detections(path: Path, found, cols, result, log_file: PulseLogFile) -> int:
+    """Every pulse found in the audio, and whether the log accounts for it.
+
+    The ones it does not are the point rather than the error term: the recording
+    carries the animal's response as well as the playback, so a detection with no
+    logged pulse behind it is a candidate response. Hence ``unexplained`` and not
+    ``spurious``.
     """
-    if path.exists():
-        raise typer.BadParameter(f"{path} exists; refusing to overwrite")
     claimed = cols["claimed"]
-    inv = result.alignment.recording_to_log(found.times_s)
-    matched_seq = np.where(claimed >= 0, seq[np.clip(claimed, 0, seq.size - 1)], -1)
+    seq = np.array([r.seq for r in log_file.pulses()], dtype=np.int64)
+    matched = np.where(claimed >= 0, seq[np.clip(claimed, 0, seq.size - 1)], -1)
     frame = pl.DataFrame(
         {
-            "index": np.arange(found.times_s.size, dtype=np.int64),
-            "t_rec_s": _round(found.times_s, 6),
-            "t_log_s": _round(inv, 6),
+            "recording_time_s": np.round(found.times_s, 6),
+            "device_time_s": np.round(result.alignment.recording_to_log(found.times_s), 6),
             "amplitude": (
-                _round(np.asarray(found.amplitudes, dtype=np.float64), 6)
+                np.round(np.asarray(found.amplitudes, dtype=np.float64), 6)
                 if found.amplitudes is not None
                 else np.full(found.times_s.size, np.nan)
             ),
-            "matched_seq": pl.Series(matched_seq, dtype=pl.Int64),
-            "status": np.where(claimed >= 0, "explained", "unexplained").tolist(),
+            "explained_by_log": pl.Series(claimed >= 0, dtype=pl.Boolean),
+            "source_row": pl.Series(matched, dtype=pl.Int64),
         }
     ).with_columns(
-        # An unmatched detection has no seq. Null, not -1: the sidecar inherits the
-        # pulse log's rule that an absent field is an empty column, never a number
-        # someone can index with.
-        pl.when(pl.col("matched_seq") < 0).then(None).otherwise(pl.col("matched_seq"))
-        .alias("matched_seq")
+        # An unexplained detection matches no logged pulse. Null, never -1.
+        pl.when(pl.col("source_row") < 0).then(None).otherwise(pl.col("source_row"))
+        .alias("source_row")
     )
-    _write_csv(
-        path,
-        [SIDECAR_MAGIC + "-detections", f"#format_version={SIDECAR_FORMAT_VERSION}"],
-        frame,
-    )
-    n_un = int(np.count_nonzero(claimed < 0))
-    log.info("wrote %s (%d detections, %d unexplained by the log)", path, found.n, n_un)
+    frame.write_csv(path)
+    return frame.height
 
 
 if __name__ == "__main__":  # pragma: no cover

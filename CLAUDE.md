@@ -502,28 +502,46 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     (`stats` = what the SESSION did, `timeline` = the overview figure). The derived structure
     lives in `src/fakefish/session_stats.py`, which stays matplotlib-free so it is importable
     and testable on its own; `src/fakefish/plot_session.py` owns the figure and the CLI.
+  - **making a session readable** (no dataset, no library): `fakefish-ingest` converts a device
+    log into four CSVs plus a TOML sidecar — `<id>_{pulses,trials,session_events,controls}.csv`
+    and `<id>_metadata.toml`. The device log is never modified; everything here is derived.
+    Four rules shape the split, and each fixes something that made the raw log unreadable:
+    - **One table per KIND of row.** The device writes pulses, trial markers and housekeeping
+      into one table, which is why a `val` column meant a file index on `BOOT`, a unix clock on
+      `ANCHOR` and a lost-record count on `DROP`. Split, every column means one thing and an
+      empty cell always means "not applicable".
+    - **Settings become a control track.** `master_m`/`rand_m`/`tick_ipi` and the four raw radio
+      widths are stamped on every device row because a power-cut file must stay interpretable up
+      to the tear. `controls.csv` carries one row per *change* instead — lossless under an as-of
+      join (`tests/test_session_tables.py` proves it reconstructs), and directly plottable.
+    - **Real units, exact integers kept beside them.** `amp_m = 225` becomes `amplitude = 0.225`;
+      `sample_tick` stays for anyone who needs the integer ground truth.
+    - **Nothing is dropped, and that is gated.** `session_metadata.unmapped_keys()` reports any
+      header key the converter does not know, and both commands REFUSE to run rather than lose
+      one. A firmware that adds a key fails a test instead of silently orphaning it.
   - **placing a log inside a recording** (no dataset, no library): `fakefish-align-log`.
-    Detects pulses in the WAV, fits `t_rec = scale·t_log + offset` and writes a **sidecar
-    CSV** giving every logged pulse its time in the recording; `--detections-out` also writes
-    every detection with whether the log explains it, which is how the *animal's* pulses get
-    separated from the playback's, and a per-trial span file with each trial's arm, start and
-    end is written **by default** beside `--out` (`--no-trials` opts out). That third file is
-    not a convenience: a **SILENCE arm emits nothing**,
-    so it has no pulse rows anywhere and a third of the trials are simply absent from the
-    per-pulse sidecar — the control condition, invisible. Its span comes from the drawn library
-    item (the v4 log records `item` on the `TRIAL` row for all three arms precisely so a silent
-    arm has a knowable length), never from first-pulse-to-last-pulse: a baseline arm carrying one
-    pulse still occupies its whole window and would otherwise collapse to an instant.
-    Three rules it exists to keep:
-    - **The sidecar is never a column in the pulse log.** The log is the device's record and
-      sits in read-only field data; its schema is version-pinned and the reader raises on an
-      unexpected column row, so a derived column would need a version no firmware could write;
-      and the offset belongs to a (log, recording) **pair**, not to a pulse.
+    Detects pulses in the WAV, fits `t_rec = scale·t_log + offset` and writes **the same tables**
+    with a `recording_time_s` column added to each, plus `<id>_detections.csv` — every pulse
+    found in the audio and whether the log explains it. The unexplained ones are how the
+    *animal's* pulses get separated from the playback's; the recording carries both.
+    Four rules it exists to keep:
+    - **Derived files never touch the pulse log.** The log is the device's record and sits in
+      read-only field data; its schema is version-pinned and the reader raises on an unexpected
+      column row, so a derived column would need a version no firmware could write; and the
+      offset belongs to a (log, recording) **pair**, not to a pulse.
+    - **The trials table is the only place the SILENCE arm exists.** It emits nothing, so it has
+      no pulse rows anywhere — on exp2 that is 12 of 36 trials, the control condition. Its span
+      comes from the drawn library item (the v4 log records `item` on the `TRIAL` row for all
+      three arms precisely so a silent arm has a knowable length), never from
+      first-pulse-to-last-pulse: a baseline arm carrying one pulse still occupies its whole
+      window and would otherwise collapse to an instant.
     - **An unvalidated fit is never written silently.** `validate()` gates the command, which
-      exits non-zero unless `--allow-unvalidated`, and a forced file is branded `validated=0`
-      with its reasons. An unvalidated alignment reaching a viewer looks exactly like a good one.
+      exits non-zero unless `--allow-unvalidated`, and a forced run is branded `validated = false`
+      with its reasons in the TOML. An unvalidated alignment reaching a viewer looks exactly
+      like a good one.
     - **Absent stays empty**, exactly as in the log: an unmatched pulse still gets a predicted
-      `t_rec_s` (the fit knows where it should have been) but empty `t_det_s`/`resid_s`.
+      `recording_time_s` (the fit knows where it should have been) but empty `detected_time_s`
+      and `residual_s`.
     `src/fakefish/clock_align.py` and `src/fakefish/pulse_detect.py` were **adopted from
     playback-explorer** on 2026-08-24 when that project's browser UI was retired in favour of
     claudian, along with their 57 tests. Deliberately NOT vendored under the invariant 10/11

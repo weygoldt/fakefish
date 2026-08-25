@@ -393,7 +393,7 @@ def make_pulse_log(
 
     events.sort(key=lambda e: e[0])
 
-    lines = [*header, row(0, 0, "BOOT")]
+    lines = [*header, row(0, 0, "BOOT", val=1)]
     for i, (tick, event, kw) in enumerate(events, start=1):
         lines.append(row(i, tick, event, **kw))
 

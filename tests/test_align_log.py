@@ -6,6 +6,7 @@ fakefish owns: the vectorised matcher, the sidecar's schema and its refusals.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -14,7 +15,8 @@ import pytest
 import typer
 
 from fakefish import align_log as al
-from synth_fixtures import make_aligned_pair, make_pulse_log, make_recording
+from fakefish import ingest
+from synth_fixtures import make_pulse_log, make_recording
 
 
 # ===== the matcher =========================================================
@@ -89,323 +91,201 @@ def test_emitted_template_resamples_onto_the_recording_rate() -> None:
     )
 
 
-# ===== the sidecar, end to end =============================================
-@pytest.fixture
-def pair(tmp_path: Path):
-    return make_aligned_pair(
-        tmp_path,
-        scale=1.0 + 30e-6,
-        offset_s=9.75,
-        n_pulses=400,
-        log_duration_s=200.0,
-        recording_duration_s=240.0,
-        noise_rms=0.003,
-        amplitude=0.15,
-    )
 
 
-def _run(log_path, wav_path, out, **kw):
-    al.run(log_path, wav_path, out=out, channel=0, verbose=0, **kw)
-
-
-def test_sidecar_recovers_the_injected_clock(pair, tmp_path: Path) -> None:
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "a.align.csv"
-    _run(log_path, wav_path, out)
-
-    text = out.read_text()
-    assert text.startswith(al.SIDECAR_MAGIC + "\n"), (
-        "the sidecar must not be mistakable for a pulse log"
-    )
-    header = {
-        k: v
-        for k, _, v in (ln[1:].partition("=") for ln in text.splitlines() if ln.startswith("#"))
-    }
-    assert header["format_version"] == str(al.SIDECAR_FORMAT_VERSION)
-    assert header["validated"] == "1"
-    assert float(header["offset_s"]) == pytest.approx(9.75, abs=2e-3)
-    assert float(header["drift_ppm"]) == pytest.approx(30.0, abs=5.0)
-    assert header["model"] == "linear2"
-    # Provenance: both inputs are hashed, so a sidecar can never be silently
-    # re-paired with a different recording.
-    assert len(header["log_sha256"]) == 64
-    assert len(header["recording_sha256"]) == 64
-    assert header["recording_channel"] == "0"
-    # The wander number is what says whether the linear model was adequate.
-    assert "residual_ptp_local_s" in header
-
-
-def test_sidecar_columns_and_absent_fields(pair, tmp_path: Path) -> None:
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "a.align.csv"
-    _run(log_path, wav_path, out)
-
-    frame = pl.read_csv(out, comment_prefix="#", infer_schema_length=None)
-    assert frame.columns == list(al.COLUMNS)
-    assert frame.height > 300
-
-    # t_rec_s is written for EVERY row: the fit predicts a time whether or not a
-    # detector found one there.
-    assert frame["t_rec_s"].null_count() == 0
-    # ...while an unmatched row leaves the measured columns EMPTY, never 0 and
-    # never -1. Same rule as the pulse log's own absent fields.
-    unmatched = frame.filter(pl.col("status") != "matched")
-    if unmatched.height:
-        assert unmatched["t_det_s"].null_count() == unmatched.height
-        assert unmatched["resid_s"].null_count() == unmatched.height
-    assert set(frame["status"].unique()) <= {"matched", "unmatched", "outside"}
-
-    matched = frame.filter(pl.col("status") == "matched")
-    assert matched.height / frame.height > 0.9
-    assert matched["resid_s"].abs().median() < 1e-3
-
-
-def test_offset_column_is_consistent_with_the_two_time_columns(pair, tmp_path: Path) -> None:
-    """`offset_s` is a convenience, so it must not be able to disagree."""
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "a.align.csv"
-    _run(log_path, wav_path, out)
-    f = pl.read_csv(out, comment_prefix="#", infer_schema_length=None)
-    delta = (f["t_rec_s"] - f["t_log_s"] - f["offset_s"]).abs().max()
-    assert delta < 2e-6, "rounding only"
-
-
-def test_detections_file_marks_what_the_log_does_not_explain(pair, tmp_path: Path) -> None:
-    """The unexplained detections are the point, not the error term.
-
-    The recording carries the animal's response as well as the playback, so a
-    detection with no logged pulse behind it is a candidate response.
-    """
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "a.align.csv"
-    det_out = tmp_path / "a.detections.csv"
-    _run(log_path, wav_path, out, detections_out=det_out)
-
-    f = pl.read_csv(det_out, comment_prefix="#", infer_schema_length=None)
-    assert f.columns == list(al.DETECTION_COLUMNS)
-    assert set(f["status"].unique()) <= {"explained", "unexplained"}
-    # An unexplained detection has no seq: null, never -1.
-    un = f.filter(pl.col("status") == "unexplained")
-    if un.height:
-        assert un["matched_seq"].null_count() == un.height
-    exp = f.filter(pl.col("status") == "explained")
-    assert exp["matched_seq"].null_count() == 0
-    # On a synthetic pair with no second fish, almost everything is explained.
-    assert exp.height / f.height > 0.9
-
-
-def test_refuses_to_overwrite(pair, tmp_path: Path) -> None:
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "a.align.csv"
-    out.write_text("do not clobber me\n")
-    with pytest.raises(typer.BadParameter):
-        _run(log_path, wav_path, out)
-    assert out.read_text() == "do not clobber me\n"
-
-
-def test_rejects_a_channel_that_does_not_exist(pair, tmp_path: Path) -> None:
-    log_path, wav_path, _truth = pair
-    with pytest.raises(typer.BadParameter):
-        al.run(log_path, wav_path, out=tmp_path / "a.csv", channel=7, verbose=0)
-
-
-def test_an_unpaired_log_and_recording_do_not_validate(tmp_path: Path) -> None:
-    """The negative case, and it must FAIL rather than produce a confident number.
-
-    Two synthetic sessions with unrelated pulse trains. `validate()` has to refuse
-    them, the command has to exit non-zero, and nothing may be written -- an
-    unvalidated alignment reaching a viewer looks exactly like a good one.
-    """
-    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
-    a_dir.mkdir()
-    b_dir.mkdir()
-    log_a, _wav_a, _ = make_aligned_pair(
-        a_dir, scale=1.0, offset_s=5.0, n_pulses=300, log_duration_s=150.0,
-        recording_duration_s=180.0, noise_rms=0.003, amplitude=0.15, seed=1,
-    )
-    _log_b, wav_b, _ = make_aligned_pair(
-        b_dir, scale=1.0, offset_s=61.0, n_pulses=300, log_duration_s=150.0,
-        recording_duration_s=180.0, noise_rms=0.003, amplitude=0.15, seed=99,
-    )
-    out = tmp_path / "cross.align.csv"
-    with pytest.raises(typer.Exit) as exc:
-        al.run(log_a, wav_b, out=out, channel=0, verbose=0)
-    assert exc.value.exit_code == 1
-    assert not out.exists(), "a refused alignment must leave no file behind"
-
-
-def test_allow_unvalidated_writes_but_says_so(tmp_path: Path) -> None:
-    """The escape hatch exists, and it must brand the file rather than hide."""
-    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
-    a_dir.mkdir()
-    b_dir.mkdir()
-    log_a, _wav_a, _ = make_aligned_pair(
-        a_dir, scale=1.0, offset_s=5.0, n_pulses=300, log_duration_s=150.0,
-        recording_duration_s=180.0, noise_rms=0.003, amplitude=0.15, seed=2,
-    )
-    _log_b, wav_b, _ = make_aligned_pair(
-        b_dir, scale=1.0, offset_s=61.0, n_pulses=300, log_duration_s=150.0,
-        recording_duration_s=180.0, noise_rms=0.003, amplitude=0.15, seed=98,
-    )
-    out = tmp_path / "cross.align.csv"
-    al.run(log_a, wav_b, out=out, channel=0, verbose=0, allow_unvalidated=True)
-    header = out.read_text()
-    assert "#validated=0" in header
-    assert "#validation_warnings=" in header
-    reasons = next(
-        ln for ln in header.splitlines() if ln.startswith("#validation_warnings=")
-    )
-    assert reasons != "#validation_warnings=", "a failed fit must say why"
-
-
-# ===== trial spans =========================================================
 def test_item_durations_cover_the_library_and_are_plausible() -> None:
     """A trial's length comes from its drawn item, so these must be real."""
     d = al.item_durations_s()
     assert len(d) >= 100
     vals = np.array(list(d.values()))
     assert (vals > 0).all()
-    # The RC device's volley range (items 7..106) runs ~0.2-2.2 s.
     volleys = np.array([d[i] for i in range(7, 107)])
     assert 0.1 < volleys.min() < 0.3
     assert 1.5 < volleys.max() < 3.0
 
 
-def _pair_with_trials(tmp_path: Path):
-    """A synthetic pair whose log carries all three arms."""
+# ===== the aligned session, end to end =====================================
+def _synthetic_session(tmp_path: Path, *, scale: float, offset_s: float, seed: int = 0):
+    """A log and a recording of it, with a known clock relationship."""
     rate_dev, rate_rec = 50_000, 48_000
-    scale, offset = 1.0 + 20e-6, 4.5
-    ticks = np.arange(60, dtype=np.int64) * 15_000 + 500_000
-    trial_ticks = np.array([700_000, 1_000_000, 1_300_000, 1_600_000], dtype=np.int64)
+    # IRREGULAR, and irregular differently per seed. A metronome has no
+    # fingerprint -- sliding it by any whole interval fits as well as the true
+    # offset -- so a regular train would neither validate as a pair nor be
+    # refusable as a non-pair, and both halves of this file would be testing
+    # nothing.
+    rng = np.random.default_rng(seed)
+    gaps = rng.integers(4_000, 26_000, size=300)
+    ticks = (300_000 + np.cumsum(gaps)).astype(np.int64)
     log_path = make_pulse_log(
-        tmp_path / "log.CSV", ticks=ticks, sample_rate_hz=rate_dev,
-        trial_ticks=trial_ticks, trial_outcomes=["V", "B", "S", "S"],
+        tmp_path / "PULS0003.CSV",
+        ticks=ticks,
+        sample_rate_hz=rate_dev,
+        trial_ticks=np.array([500_000, 900_000, 1_400_000], dtype=np.int64),
+        trial_outcomes=["V", "B", "S"],
     )
-    t_rec = scale * (ticks / rate_dev) + offset
+    t_rec = scale * (ticks / rate_dev) + offset_s
     wav = tmp_path / "rec.wav"
     make_recording(
-        wav, sample_rate_hz=rate_rec, duration_s=60.0, pulse_times_s=t_rec,
-        n_channels=1, channel=0, amplitude=0.15, noise_rms=0.003,
+        wav, sample_rate_hz=rate_rec, duration_s=130.0, pulse_times_s=t_rec,
+        n_channels=1, channel=0, amplitude=0.15, noise_rms=0.003, seed=seed,
     )
     return log_path, wav
 
 
-def test_trials_sidecar_contains_every_arm_including_silence(tmp_path: Path) -> None:
-    """The SILENCE arm emits nothing, so this file is the ONLY place it exists.
-
-    A viewer built on the per-pulse sidecar alone would draw the treatment and
-    silently omit the control it is meant to be compared against.
-    """
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "a.align.csv"
-    trials_out = tmp_path / "a.trials.csv"
-    al.run(log_path, wav, out=out, channel=0, verbose=0,
-           trials_out=trials_out, allow_unvalidated=True)
-
-    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
-    assert f.columns == list(al.TRIAL_COLUMNS)
-    assert f.height == 4, "every TRIAL row appears, whatever it resolved to"
-    assert f["arm"].to_list() == ["VOLLEY", "BASELINE", "SILENCE", "SILENCE"]
-
-    # A silent arm has no pulses but still occupies a real window.
-    silence = f.filter(pl.col("arm") == "SILENCE")
-    assert (silence["n_pulses"] == 0).all()
-    assert (silence["duration_s"] > 0).all()
-    assert (silence["t_rec_end_s"] > silence["t_rec_start_s"]).all()
+@pytest.fixture
+def session(tmp_path: Path):
+    return _synthetic_session(tmp_path, scale=1.0 + 30e-6, offset_s=7.25)
 
 
-def test_trial_span_comes_from_the_item_not_from_its_pulses(tmp_path: Path) -> None:
-    """A baseline arm carrying one pulse still occupies its whole window.
-
-    Measured from its pulses it would collapse to an instant, which is exactly
-    the mistake this file exists to prevent.
-    """
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "a.align.csv"
-    trials_out = tmp_path / "a.trials.csv"
-    al.run(log_path, wav, out=out, channel=0, verbose=0,
-           trials_out=trials_out, allow_unvalidated=True)
-
-    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
-    base = f.filter(pl.col("arm") == "BASELINE")
-    assert base.height == 1
-    row = base.row(0, named=True)
-    assert row["n_pulses"] == 1, "the fixture's baseline arm has only its anchor"
-    # ...yet its span is the drawn item's duration, not zero.
-    durations = al.item_durations_s()
-    assert row["duration_s"] == pytest.approx(durations[row["item"]], rel=1e-6)
-    assert row["t_rec_end_s"] - row["t_rec_start_s"] > 0.1
-
-
-def test_trial_spans_are_ordered_and_do_not_overlap(tmp_path: Path) -> None:
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "a.align.csv"
-    trials_out = tmp_path / "a.trials.csv"
-    al.run(log_path, wav, out=out, channel=0, verbose=0,
-           trials_out=trials_out, allow_unvalidated=True)
-
-    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
-    start = f["t_rec_start_s"].to_numpy()
-    end = f["t_rec_end_s"].to_numpy()
-    assert (np.diff(start) > 0).all(), "trials must come out in time order"
-    assert (end[:-1] < start[1:]).all(), "one trial must finish before the next starts"
-
-
-def test_trials_refuses_to_overwrite(tmp_path: Path) -> None:
-    log_path, wav = _pair_with_trials(tmp_path)
-    trials_out = tmp_path / "a.trials.csv"
-    trials_out.write_text("keep me\n")
-    with pytest.raises(typer.BadParameter):
-        al.run(log_path, wav, out=tmp_path / "a.align.csv", channel=0, verbose=0,
-               trials_out=trials_out, allow_unvalidated=True)
-    assert trials_out.read_text() == "keep me\n"
-
-
-def test_trials_file_is_written_by_default(tmp_path: Path) -> None:
-    """Default-on, because a viewer without it is missing the control condition."""
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "alignment.csv"
-    al.run(log_path, wav, out=out, channel=0, verbose=0, allow_unvalidated=True)
-
-    derived = tmp_path / "alignment.trials.csv"
-    assert derived.is_file(), "the trial spans must appear without being asked for"
-    f = pl.read_csv(derived, comment_prefix="#", infer_schema_length=None)
-    assert f.height == 4
-    assert "SILENCE" in f["arm"].to_list()
-
-
-def test_no_trials_opts_out(tmp_path: Path) -> None:
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "alignment.csv"
-    al.run(log_path, wav, out=out, channel=0, verbose=0,
-           no_trials=True, allow_unvalidated=True)
-    assert not (tmp_path / "alignment.trials.csv").exists()
-    assert out.is_file()
-
-
-def test_a_log_with_no_trials_still_writes_a_span_file(pair, tmp_path: Path) -> None:
-    """An empty trial table is a valid answer and must not crash the run."""
-    log_path, wav_path, _truth = pair
-    out = tmp_path / "alignment.csv"
-    al.run(log_path, wav_path, out=out, channel=0, verbose=0)
-    f = pl.read_csv(
-        tmp_path / "alignment.trials.csv", comment_prefix="#", infer_schema_length=None
+def _tables(out: Path, sid: str = "PULS0003") -> dict[str, pl.DataFrame]:
+    frames = ingest.read_tables(out, sid)
+    frames["detections"] = pl.read_csv(
+        out / f"{sid}_detections.csv", infer_schema_length=None
     )
-    assert f.height == 0
-    assert f.columns == list(al.TRIAL_COLUMNS)
+    return frames
 
 
-def test_every_destination_is_checked_before_the_expensive_work(tmp_path: Path) -> None:
-    """A collision on the SECOND file must not leave the first one written.
+def test_alignment_recovers_the_injected_clock(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
 
-    Detection over an hour-long recording takes minutes; discovering the clash
-    afterwards would throw that away and leave a half-written set behind.
-    """
-    log_path, wav = _pair_with_trials(tmp_path)
-    out = tmp_path / "alignment.csv"
-    (tmp_path / "alignment.trials.csv").write_text("in the way\n")
+    doc = tomllib.loads((out / "PULS0003_metadata.toml").read_text())
+    a = doc["alignment"]
+    assert a["offset_s"] == pytest.approx(7.25, abs=2e-3)
+    assert a["drift_ppm"] == pytest.approx(30.0, abs=5.0)
+    assert a["validated"] is True
+    assert a["recording_channel"] == 0
+    # Provenance for both halves of the pair, so a set of tables can never be
+    # silently re-attached to a different recording.
+    assert len(a["recording_sha256"]) == 64
+    assert len(doc["source"]["sha256"]) == 64
+    # The number that says whether a straight line was good enough.
+    assert "residual_local_wander_s" in a
 
-    with pytest.raises(typer.BadParameter) as exc:
-        al.run(log_path, wav, out=out, channel=0, verbose=0, allow_unvalidated=True)
-    assert "alignment.trials.csv" in str(exc.value)
-    assert not out.exists(), "nothing may be written once a destination is taken"
+
+def test_every_table_gains_a_recording_clock(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+
+    frames = _tables(out)
+    for name in ("pulses", "trials", "session_events", "controls"):
+        assert "recording_time_s" in frames[name].columns, name
+        assert "time_s" in frames[name].columns, name
+    # Device time and recording time must actually differ by the fitted offset.
+    p = frames["pulses"]
+    delta = (p["recording_time_s"] - p["time_s"]).median()
+    assert delta == pytest.approx(7.25, abs=0.05)
+
+
+def test_pulses_carry_their_match_outcome(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+
+    p = _tables(out)["pulses"]
+    assert {"detected_time_s", "residual_s", "match_status"} <= set(p.columns)
+    assert set(p["match_status"].unique()) <= {"matched", "unmatched", "outside"}
+
+    matched = p.filter(pl.col("match_status") == "matched")
+    assert matched.height / p.height > 0.9
+    assert matched["residual_s"].abs().median() < 1e-3
+    # An unmatched pulse keeps its PREDICTED recording time -- the fit knows where
+    # it should have been -- but leaves the measured columns empty.
+    other = p.filter(pl.col("match_status") != "matched")
+    if other.height:
+        assert other["recording_time_s"].null_count() == 0
+        assert other["detected_time_s"].null_count() == other.height
+        assert other["residual_s"].null_count() == other.height
+
+
+def test_trial_spans_map_through_the_same_fit(session, tmp_path: Path) -> None:
+    """The end must go through the fit, not be pasted on in device seconds."""
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+
+    t = _tables(out)["trials"]
+    assert t.height == 3
+    assert t["treatment"].to_list() == ["volley", "baseline", "silence"]
+    scale = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]["scale"]
+    for row in t.iter_rows(named=True):
+        span = row["recording_ended_s"] - row["recording_time_s"]
+        assert span == pytest.approx(row["duration_s"] * scale, abs=1e-6)
+    # ...and the silence arm still occupies a real window with no pulses in it.
+    silence = t.filter(pl.col("treatment") == "silence")
+    assert (silence["pulses_emitted"] == 0).all()
+    assert (silence["recording_ended_s"] > silence["recording_time_s"]).all()
+
+
+def test_detections_mark_what_the_log_does_not_explain(session, tmp_path: Path) -> None:
+    """The unexplained detections are the animal, not the error term."""
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+
+    d = _tables(out)["detections"]
+    assert set(d.columns) == {
+        "recording_time_s", "device_time_s", "amplitude", "explained_by_log", "source_row"
+    }
+    unexplained = d.filter(~pl.col("explained_by_log"))
+    if unexplained.height:
+        assert unexplained["source_row"].null_count() == unexplained.height
+    explained = d.filter(pl.col("explained_by_log"))
+    assert explained["source_row"].null_count() == 0
+    # A synthetic pair has no second fish, so nearly everything is explained.
+    assert explained.height / d.height > 0.9
+
+
+def test_no_comment_lines_anywhere(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    for path in out.glob("*.csv"):
+        assert not path.read_text().startswith("#"), path.name
+
+
+# ===== refusals ============================================================
+def test_an_unpaired_log_and_recording_do_not_validate(tmp_path: Path) -> None:
+    """The negative case must FAIL rather than produce a confident number."""
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    log_a, _wav_a = _synthetic_session(a_dir, scale=1.0, offset_s=3.0, seed=1)
+    _log_b, wav_b = _synthetic_session(b_dir, scale=1.0, offset_s=41.0, seed=99)
+
+    out = tmp_path / "out"
+    with pytest.raises(typer.Exit) as exc:
+        al.run(log_a, wav_b, out_dir=out, channel=0, verbose=0)
+    assert exc.value.exit_code == 1
+    assert not list(out.glob("*.csv")), "a refused alignment must leave no tables behind"
+
+
+def test_allow_unvalidated_writes_but_brands_the_metadata(tmp_path: Path) -> None:
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    log_a, _wav_a = _synthetic_session(a_dir, scale=1.0, offset_s=3.0, seed=2)
+    _log_b, wav_b = _synthetic_session(b_dir, scale=1.0, offset_s=41.0, seed=98)
+
+    out = tmp_path / "out"
+    al.run(log_a, wav_b, out_dir=out, channel=0, verbose=0, allow_unvalidated=True)
+    a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
+    assert a["validated"] is False
+    assert a["validation_warnings"], "a failed fit must say why"
+
+
+def test_refuses_to_clobber_then_force_replaces(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    with pytest.raises(typer.BadParameter):
+        al.run(log_path, wav, out_dir=out, channel=0, verbose=0)
+    al.run(log_path, wav, out_dir=out, channel=0, verbose=0, force=True)
+
+
+def test_rejects_a_channel_that_does_not_exist(session, tmp_path: Path) -> None:
+    log_path, wav = session
+    with pytest.raises(typer.BadParameter):
+        al.run(log_path, wav, out_dir=tmp_path / "out", channel=7, verbose=0)
