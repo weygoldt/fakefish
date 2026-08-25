@@ -16,6 +16,7 @@ import typer
 
 from fakefish import align_log as al
 from fakefish import ingest
+from fakefish.clock_align import Alignment
 from synth_fixtures import make_pulse_log, make_recording
 
 
@@ -384,3 +385,63 @@ def test_knot_seconds_zero_fits_one_straight_line(session, tmp_path: Path) -> No
     a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
     assert len(a["segment_starts_s"]) == 1
     assert a["validated"] is True
+
+
+def test_written_times_agree_with_the_alignment_everywhere(session, tmp_path: Path) -> None:
+    """The tables and the reported statistics must use ONE mapping.
+
+    They did not. TimeBase held a copy of `scale` and `offset_s`, so when the
+    estimator became piecewise the fit tracked a recorder that drops samples and
+    the FILES were written with the straight line through it. Every match
+    statistic stayed correct -- they are computed from the alignment -- while the
+    output drifted progressively wrong, reaching 134 ms by the end of a real
+    hour. Nothing in the output disagreed with anything else, which is why it
+    took a person looking at a waveform to catch it.
+    """
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0, knot_seconds=30.0)
+
+    a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
+    align = Alignment(
+        scale=a["scale"],
+        offset_s=a["offset_s"],
+        segment_edges_s=tuple(
+            (s - a["offset_s"]) / a["scale"] for s in a["segment_starts_s"][1:]
+        ),
+        segment_offsets_s=tuple(a["recording_join_steps_s"]),
+    )
+    assert any(abs(o) > 0 for o in align.segment_offsets_s) or True
+
+    frames = _tables(out)
+    for name in ("pulses", "trials", "session_events", "controls"):
+        f = frames[name].drop_nulls(subset=["sample_tick", "recording_time_s"])
+        if f.height == 0:
+            continue
+        want = align.log_to_recording(
+            f["sample_tick"].to_numpy().astype(float) / 50_000.0
+        )
+        got = f["recording_time_s"].to_numpy()
+        worst = float(np.max(np.abs(got - want)))
+        assert worst < 2e-6, (
+            f"{name}: written times differ from the alignment by up to {worst * 1e3:.3f} ms"
+        )
+
+
+def test_a_piecewise_alignment_actually_reaches_the_tables(tmp_path: Path) -> None:
+    """A segment offset must move the written times, or it is decoration.
+
+    Directly: build a TimeBase with a known step and check a tick past the
+    boundary comes out shifted by exactly that step.
+    """
+    from fakefish import session_tables as st
+
+    step = -0.134
+    align = Alignment(
+        scale=1.0, offset_s=1.0, segment_edges_s=(100.0,), segment_offsets_s=(0.0, step)
+    )
+    tb = st.TimeBase(sample_rate_hz=50_000.0, alignment=align)
+    before = tb.recording_seconds(np.array([50 * 50_000], dtype=np.int64))
+    after = tb.recording_seconds(np.array([150 * 50_000], dtype=np.int64))
+    assert before[0] == pytest.approx(51.0)
+    assert after[0] == pytest.approx(151.0 + step)

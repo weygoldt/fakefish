@@ -37,6 +37,7 @@ from typing import Optional
 import numpy as np
 import polars as pl
 
+from fakefish.clock_align import Alignment
 from fakefish.pulse_log import PulseLogFile
 
 #: ``event`` values in the device log that represent one emitted pulse, mapped to
@@ -97,20 +98,30 @@ class TimeBase:
     """
 
     sample_rate_hz: float
-    scale: Optional[float] = None
-    offset_s: Optional[float] = None
+    alignment: Optional[Alignment] = None
+    """The whole mapping, not a copy of two of its numbers.
+
+    This used to hold ``scale`` and ``offset_s`` alone, which silently threw away
+    the per-segment offsets once the estimator became piecewise: the FIT tracked a
+    recorder that drops samples, and the TABLES were written with the straight
+    line through it. On a real hour that put the last segment 134 ms out while
+    every reported match statistic stayed correct, because the statistics were
+    computed from the alignment and the files were not.
+
+    Holding the object means there is one implementation of the mapping and the
+    two cannot disagree again."""
 
     @property
     def has_recording(self) -> bool:
-        return self.scale is not None and self.offset_s is not None
+        return self.alignment is not None
 
     def seconds(self, ticks: np.ndarray) -> np.ndarray:
         return np.asarray(ticks, dtype=np.float64) / self.sample_rate_hz
 
     def recording_seconds(self, ticks: np.ndarray) -> np.ndarray:
-        if not self.has_recording:
+        if self.alignment is None:
             raise ValueError("no recording alignment in this time base")
-        return self.scale * self.seconds(ticks) + self.offset_s
+        return self.alignment.log_to_recording(self.seconds(ticks))
 
 
 def _f(a, places: int = 6) -> np.ndarray:

@@ -481,9 +481,7 @@ def run(
             raise typer.Exit(code=1)
 
     a = result.alignment
-    tb = tables.TimeBase(
-        sample_rate_hz=float(log_file.sample_rate_hz), scale=a.scale, offset_s=a.offset_s
-    )
+    tb = tables.TimeBase(sample_rate_hz=float(log_file.sample_rate_hz), alignment=a)
     counts = ingest.write_tables(
         log_file, tb, paths, item_durations_s=item_durations_s(),
         pulse_match=_match_frame(log_file, cols),
