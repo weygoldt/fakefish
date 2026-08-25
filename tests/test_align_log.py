@@ -359,3 +359,53 @@ def test_trials_refuses_to_overwrite(tmp_path: Path) -> None:
         al.run(log_path, wav, out=tmp_path / "a.align.csv", channel=0, verbose=0,
                trials_out=trials_out, allow_unvalidated=True)
     assert trials_out.read_text() == "keep me\n"
+
+
+def test_trials_file_is_written_by_default(tmp_path: Path) -> None:
+    """Default-on, because a viewer without it is missing the control condition."""
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "alignment.csv"
+    al.run(log_path, wav, out=out, channel=0, verbose=0, allow_unvalidated=True)
+
+    derived = tmp_path / "alignment.trials.csv"
+    assert derived.is_file(), "the trial spans must appear without being asked for"
+    f = pl.read_csv(derived, comment_prefix="#", infer_schema_length=None)
+    assert f.height == 4
+    assert "SILENCE" in f["arm"].to_list()
+
+
+def test_no_trials_opts_out(tmp_path: Path) -> None:
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "alignment.csv"
+    al.run(log_path, wav, out=out, channel=0, verbose=0,
+           no_trials=True, allow_unvalidated=True)
+    assert not (tmp_path / "alignment.trials.csv").exists()
+    assert out.is_file()
+
+
+def test_a_log_with_no_trials_still_writes_a_span_file(pair, tmp_path: Path) -> None:
+    """An empty trial table is a valid answer and must not crash the run."""
+    log_path, wav_path, _truth = pair
+    out = tmp_path / "alignment.csv"
+    al.run(log_path, wav_path, out=out, channel=0, verbose=0)
+    f = pl.read_csv(
+        tmp_path / "alignment.trials.csv", comment_prefix="#", infer_schema_length=None
+    )
+    assert f.height == 0
+    assert f.columns == list(al.TRIAL_COLUMNS)
+
+
+def test_every_destination_is_checked_before_the_expensive_work(tmp_path: Path) -> None:
+    """A collision on the SECOND file must not leave the first one written.
+
+    Detection over an hour-long recording takes minutes; discovering the clash
+    afterwards would throw that away and leave a half-written set behind.
+    """
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "alignment.csv"
+    (tmp_path / "alignment.trials.csv").write_text("in the way\n")
+
+    with pytest.raises(typer.BadParameter) as exc:
+        al.run(log_path, wav, out=out, channel=0, verbose=0, allow_unvalidated=True)
+    assert "alignment.trials.csv" in str(exc.value)
+    assert not out.exists(), "nothing may be written once a destination is taken"

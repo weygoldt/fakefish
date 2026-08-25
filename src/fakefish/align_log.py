@@ -28,10 +28,10 @@ I emitted" and "what else is in there". The first is this file. The second is
 ``--detections-out``, which writes every detected pulse together with whether
 the log accounts for it: the ones it does not are the candidate responses.
 
-``--trials-out`` answers a third: when did each treatment start and stop. That
-needs its own file because a SILENCE arm emits nothing, so it has no pulse rows
-anywhere -- a third of the trials are absent from the per-pulse sidecar, and they
-are the control condition.
+A third file answers when each treatment started and stopped, and it is written
+BY DEFAULT (``--no-trials`` opts out). It needs to be separate because a SILENCE
+arm emits nothing, so it has no pulse rows anywhere -- a third of the trials are
+absent from the per-pulse sidecar, and they are the control condition.
 """
 
 from __future__ import annotations
@@ -371,10 +371,13 @@ def run(
         Optional[Path],
         typer.Option(
             "--trials-out",
-            help="Also write one row per TRIAL: when each arm starts and stops. "
-            "The only place the SILENCE arm appears at all.",
+            help="Where to write the per-trial spans. Defaults to '<out stem>.trials.csv'.",
         ),
     ] = None,
+    no_trials: Annotated[
+        bool,
+        typer.Option("--no-trials", help="Skip the per-trial span file."),
+    ] = False,
     detections_out: Annotated[
         Optional[Path],
         typer.Option("--detections-out", help="Also write every detection, matched or not."),
@@ -391,8 +394,22 @@ def run(
     exactly like a good one, and every downstream conclusion inherits it.
     """
     configure_logging(verbose)
-    if out.exists():
-        raise typer.BadParameter(f"{out} exists; refusing to overwrite")
+
+    # WRITTEN BY DEFAULT, because a viewer that draws only pulses is missing a
+    # third of the trials: a SILENCE arm emits nothing, so it has no pulse rows
+    # anywhere, and it is the control condition. Opting out is explicit.
+    if trials_out is None and not no_trials:
+        trials_out = out.with_name(out.stem + ".trials.csv")
+
+    # Check every destination BEFORE the expensive work. Detection over an
+    # hour-long recording takes minutes; discovering a name collision afterwards
+    # would throw all of it away, and would do so having already written one of
+    # the files -- a half-written set is worse than none.
+    clashes = [p for p in (out, trials_out, detections_out) if p is not None and p.exists()]
+    if clashes:
+        raise typer.BadParameter(
+            "refusing to overwrite: " + ", ".join(str(p) for p in clashes)
+        )
 
     log_file = read(log_path)
     n_pulses = len(log_file.pulses())
@@ -509,6 +526,7 @@ def _write_trials(path: Path, log_file: PulseLogFile, result, cols) -> None:
     at its end to measure. A baseline arm carrying one pulse still occupies its
     full window; measured from its pulses it would collapse to an instant.
     """
+    # Backstop for direct callers; run() checks every destination up front.
     if path.exists():
         raise typer.BadParameter(f"{path} exists; refusing to overwrite")
 
