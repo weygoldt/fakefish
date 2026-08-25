@@ -200,14 +200,41 @@ __all__ = [
 #: tight enough that only genuine pairs remain.
 DEFAULT_TOLERANCES_S: tuple[float, ...] = (0.050, 0.020, 0.008, 0.003, 0.001, 0.0003)
 
-#: A per-segment coarse lag is only trusted as a seed above this peak/sidelobe.
-#: Higher than a bare 'is there a peak' floor, because a bad seed is worse than
-#: no seed: it moves a segment AWAY from where the refinement could have found it.
-SEGMENT_SEED_MIN_RATIO = 15.0
+#: A per-segment seed is only trusted if it puts at least this fraction of the
+#: segment's pulses onto a detection.
+#:
+#: NOT the peak-to-background ratio the session-wide lag is judged by, because
+#: that ratio is meaningless over the narrow lag window a segment is searched in
+#: (see :data:`MAX_SEGMENT_SEED_DEV_S`), and meaningless in BOTH directions. A
+#: segment holding a volley correlates with itself at every multiple of a 2.5-3.3
+#: ms IPI, so its own comb fills the background and the ratio collapses to ~3
+#: however right the peak is; a segment holding only sparse localization has a
+#: background of nearly zero, so the ratio runs to infinity however wrong it is.
+#: Strict where it should be permissive and permissive where it should be strict.
+#:
+#: The correlation peak is a coincidence COUNT -- pulses landing in the same
+#: ``bin_s`` bin as a detection -- so dividing by the segment's pulse count asks
+#: the question directly: what fraction of this segment does the proposed seed
+#: explain? A wrong lag on a volley scores LOWER than the right one, which is
+#: what makes the argmax work at all, so the count keeps its meaning exactly
+#: where the ratio loses it.
+#:
+#: The floor is low because the statistic counts ONE bin. A segment whose clock
+#: is sliding is no less aligned for it, but its coincidences smear across the
+#: bins the slide covers: 150 ppm across a two-minute segment is 18 ms, nine
+#: bins, and the peak then holds about a sixth of them. Measured, correct seeds
+#: score 0.375 upwards on the 60 s knots this tool uses and 0.16 on a 120 s
+#: synthetic; chance is an order of magnitude below either -- for the sparsest
+#: real segment, 64 pulses against 143 detections over a minute, a bin holds 0.3
+#: coincidences by chance against the 24 its true lag found. So this rejects a
+#: correlation with nothing in it, and nothing finer than that.
+SEGMENT_SEED_MIN_EXPLAINED = 0.1
 
 #: And only if it lands within this of the session-wide lag. The true lag moves
 #: by milliseconds across a session; a segment disagreeing by a second
-#: correlated against the wrong pulses.
+#: correlated against the wrong pulses. Enforced by BOUNDING THE SEARCH, not by
+#: testing the answer afterwards -- see the seeding loop in
+#: :func:`estimate_alignment`.
 MAX_SEGMENT_SEED_DEV_S = 1.0
 
 #: A segment with fewer pairs than this keeps its neighbour's offset instead of
@@ -289,6 +316,7 @@ def coarse_lag(
     log_times_s: NDArray[np.float64],
     rec_times_s: NDArray[np.float64],
     bin_s: float = 0.002,
+    max_lag_s: float | None = None,
 ) -> tuple[float, float]:
     """Estimate the offset by cross-correlating binned pulse trains.
 
@@ -302,15 +330,61 @@ def coarse_lag(
         Bin width. 2 ms is one pulse width -- fine enough to localise the peak,
         coarse enough that a few hundred microseconds of drift across the
         session does not smear it away.
+    max_lag_s
+        Search only within ``+-max_lag_s`` of zero, and measure the background
+        there too. ``None`` searches every lag the two trains can express.
+
+        This is not an optimisation. A caller that will REJECT a lag beyond some
+        bound must not search beyond it either: a segment holding a volley
+        correlates strongly with every other volley in the session, so an
+        unbounded search routinely peaks minutes away -- and that far peak does
+        not merely get rejected afterwards, it hides the correct nearby one.
+        Bounding the search is how the caller's own tolerance gets applied to the
+        thing it is a tolerance for.
+
+        Note the returned ratio does NOT survive the bound: over a narrow window
+        the background is the trains' own structure rather than chance. Judge a
+        bounded search by the peak count instead -- :func:`peak_coincidences`.
 
     Returns
     -------
     tuple
         ``(lag_s, peak_ratio)`` where ``lag_s`` is ``t_rec - t_log`` and
-        ``peak_ratio`` is the peak over the median of the correlation.
+        ``peak_ratio`` is the peak over the RMS background of the correlation.
     """
-    if log_times_s.size == 0 or rec_times_s.size == 0:
+    lag, peak, background = _correlate(log_times_s, rec_times_s, bin_s, max_lag_s)
+    if peak is None:
         return 0.0, 0.0
+    ratio = peak / background if background > 0 else float("inf")
+    return lag, ratio
+
+
+def peak_coincidences(
+    log_times_s: NDArray[np.float64],
+    rec_times_s: NDArray[np.float64],
+    bin_s: float = 0.002,
+    max_lag_s: float | None = None,
+) -> tuple[float, float]:
+    """Best lag, and how many log pulses land on a detection there.
+
+    Same correlation as :func:`coarse_lag`, read as what it literally is: a count
+    of log pulses sharing a bin with a detection. That count is the honest way to
+    judge a lag found under a ``max_lag_s`` bound, where the peak-to-background
+    ratio is not (see :data:`SEGMENT_SEED_MIN_EXPLAINED`).
+    """
+    lag, peak, _ = _correlate(log_times_s, rec_times_s, bin_s, max_lag_s)
+    return lag, 0.0 if peak is None else peak
+
+
+def _correlate(
+    log_times_s: NDArray[np.float64],
+    rec_times_s: NDArray[np.float64],
+    bin_s: float,
+    max_lag_s: float | None,
+) -> tuple[float, float | None, float]:
+    """``(lag_s, peak, background)``; ``peak`` is None when there is nothing to do."""
+    if log_times_s.size == 0 or rec_times_s.size == 0:
+        return 0.0, None, 0.0
 
     # Shift both trains to a common non-negative origin before binning. Without
     # this, a negative time clips into bin 0 and corrupts the correlation --
@@ -332,6 +406,12 @@ def coarse_lag(
     cc = np.concatenate([cc[-(n - 1) :], cc[:n]])
     lags = np.arange(-(n - 1), n) * bin_s
 
+    if max_lag_s is not None:
+        keep = np.abs(lags) <= max_lag_s
+        if not keep.any():
+            return 0.0, None, 0.0
+        cc, lags = cc[keep], lags[keep]
+
     k = int(np.argmax(cc))
     peak = float(cc[k])
 
@@ -345,8 +425,7 @@ def coarse_lag(
     mask = np.ones(cc.size, dtype=bool)
     mask[max(k - exclusion, 0) : k + exclusion + 1] = False
     background = float(np.sqrt(np.mean(cc[mask] ** 2))) if mask.any() else 0.0
-    ratio = peak / background if background > 0 else float("inf")
-    return float(lags[k]), ratio
+    return float(lags[k]), peak, background
 
 
 def _predict(
@@ -454,26 +533,51 @@ def estimate_alignment(
     # each segment inside pairing range; the refinement ladder does the
     # sub-millisecond work from actual pairs.
     #
-    # A segment's seed is only accepted if its correlation stands clear of the
-    # background AND it lands near the global lag. A window that disagrees by a
-    # second correlated against the wrong pulses, and interpolating through such a
-    # window drags the mapping everywhere -- measured, that turned a session which
-    # aligned at 99.6 % into one that aligned at 64 %.
+    # A segment disagreeing with the session lag by a second correlated against
+    # the wrong pulses, and interpolating through such a window drags the mapping
+    # everywhere -- measured, that turned a session which aligned at 99.6 % into
+    # one that aligned at 64 %. So a seed must land within MAX_SEGMENT_SEED_DEV_S,
+    # and SEARCHING IS BOUNDED TO WHERE THE ANSWER WOULD BE ACCEPTED. The
+    # segment's log times are shifted by the session lag so its own lag is
+    # expected near zero, and the correlation is bounded to +-that same distance.
+    #
+    # Applying the bound afterwards instead was the bug. A segment holding a
+    # volley correlates strongly with EVERY other volley in the session, so an
+    # unbounded peak routinely landed minutes away; it was then correctly
+    # rejected, but it had already hidden the correct nearby peak, which was
+    # there the whole time. Measured on exp3: 11 of 63 segments seeded minutes
+    # away (one at +3180 s) and lost their seed. Unseeded, such a segment starts
+    # at the session lag, and if the truth is further than the first tolerance
+    # rung it never pairs genuinely -- it pairs its volley against ITSELF at the
+    # wrong pulse index, which looks like a confident fit and is a hundred
+    # milliseconds wrong. Bounded, all 11 seed within 2 ms of the truth.
+    #
+    # The detections are also narrowed to the stretch the session line predicts
+    # for this segment. That is only speed -- a minute of correlation instead of
+    # an hour, 63 times -- since the lag bound already decides the answer.
     if n_seg > 1:
         for k in range(n_seg):
             m = seg == k
             if int(m.sum()) < MIN_PAIRS_FOR_SEGMENT:
                 continue
-            seg_lag, seg_ratio = coarse_lag(log_t[m], rec_t, bin_s)
-            if seg_ratio < SEGMENT_SEED_MIN_RATIO:
+            expected = log_t[m] + lag
+            window = rec_t[
+                (rec_t >= expected[0] - MAX_SEGMENT_SEED_DEV_S)
+                & (rec_t <= expected[-1] + MAX_SEGMENT_SEED_DEV_S)
+            ]
+            if window.size < MIN_PAIRS_FOR_SEGMENT:
                 continue
-            if abs(seg_lag - lag) > MAX_SEGMENT_SEED_DEV_S:
+            seg_dev, explained = peak_coincidences(
+                expected, window, bin_s, max_lag_s=MAX_SEGMENT_SEED_DEV_S
+            )
+            if explained < SEGMENT_SEED_MIN_EXPLAINED * int(m.sum()):
                 warnings.append(
-                    f"segment {k} correlates {seg_lag - lag:+.3f} s from the session "
-                    f"lag, which is too far to be a clock difference; seed ignored"
+                    f"segment {k}'s best lag within {MAX_SEGMENT_SEED_DEV_S:.0f} s of "
+                    f"the session lag explains only {explained:.0f} of its "
+                    f"{int(m.sum())} pulses; seed ignored"
                 )
                 continue
-            seg_offsets[k] = seg_lag - lag
+            seg_offsets[k] = seg_dev
 
     for tol in tolerances_s:
         ok, nearest = _pair(log_t, rec_t, scale, offset, tol, seg, seg_offsets)

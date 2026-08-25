@@ -20,6 +20,7 @@ from fakefish.clock_align import (
     coarse_lag,
     estimate_alignment,
     nudge,
+    peak_coincidences,
     refine_segment_rates,
     two_point_alignment,
     validate,
@@ -498,6 +499,86 @@ def test_a_wild_segment_seed_is_refused_not_followed() -> None:
     # No segment may be pulled a whole second off the session lag.
     assert max(abs(o) for o in res.alignment.segment_offsets_s) < 1.0
     assert res.match_fraction > 0.8
+
+
+def test_a_bounded_search_takes_the_near_peak_over_a_taller_far_one() -> None:
+    """The seed's bound has to be inside the search, not applied to its answer.
+
+    A dense stretch elsewhere in the recording out-correlates the true position,
+    so an unbounded search returns it -- and a caller that then rejects it for
+    being too far away is left with nothing, having never seen the correct peak
+    that was there all along.
+    """
+    rng = np.random.default_rng(31)
+    log_t = np.sort(rng.uniform(0.0, 30.0, 200))
+    true_lag = 4.05
+    det = np.concatenate(
+        [
+            log_t + true_lag,
+            # A burst 400 s away, dense enough that any lag landing in it scores
+            # more coincidences than the true pairing does.
+            np.cumsum(rng.uniform(0.0009, 0.0011, 40000)) + 400.0,
+        ]
+    )
+    det = np.sort(det)
+
+    far, _ = coarse_lag(log_t, det)
+    near, _ = coarse_lag(log_t, det, max_lag_s=10.0)
+    assert abs(far - true_lag) > 100.0, "the decoy should win an unbounded search"
+    assert near == pytest.approx(true_lag, abs=0.005)
+
+    lag, explained = peak_coincidences(log_t, det, max_lag_s=10.0)
+    assert lag == pytest.approx(true_lag, abs=0.005)
+    assert explained > 0.5 * log_t.size, "the true lag explains most of the train"
+
+
+def test_a_seed_is_not_lost_to_a_volley_that_looks_like_every_other_volley() -> None:
+    """The regression: a segment past a lag step, in a session full of volleys.
+
+    Modelled on exp3, where 11 of 63 segments correlated minutes away and lost
+    their seed. A segment that loses its seed starts at the session lag; if the
+    truth is further than the first tolerance rung it never pairs genuinely, and
+    a segment holding a volley then pairs that volley against ITSELF at the wrong
+    pulse index -- a confident-looking fit a hundred milliseconds out of place.
+
+    The step is 100 ms, twice the loosest tolerance rung, so only a seed can
+    carry a segment across it.
+    """
+    rng = np.random.default_rng(7)
+    scale, offset, step_at, step = 1.0 + 11e-6, 6.15, 690.0, -0.100
+
+    loc = np.sort(rng.uniform(0.0, 1200.0, 2400))
+    # One volley shape, played over and over -- so each correlates with all the
+    # others just as strongly as with itself.
+    ipi = rng.uniform(0.0028, 0.0033, 95)
+    ipi[0] = 0.0
+    volleys = [
+        np.cumsum(ipi) + at for at in (95.0, 275.0, 455.0, 635.0, 715.0, 875.0, 1055.0)
+    ]
+    t_log = np.sort(np.concatenate([loc, *volleys]))
+
+    truth = scale * t_log + offset + np.where(t_log > step_at, step, 0.0)
+    det = truth + rng.normal(0.0, 30e-6, t_log.size)
+    # The recording holds the animal too, in bursts far denser than the playback.
+    # Those are what an unbounded correlation runs off to.
+    animal = np.concatenate(
+        [np.cumsum(rng.uniform(0.0009, 0.0011, 900)) + at for at in (300.0, 500.0, 900.0)]
+    )
+    det = np.sort(np.concatenate([det, animal]))
+
+    knots = tuple(np.arange(60.0, 1200.0, 60.0))
+    res = refine_segment_rates(
+        estimate_alignment(t_log, det, segment_edges_s=knots), t_log, det
+    )
+    err = res.alignment.log_to_recording(t_log) - truth
+    # The segment the step falls INSIDE is split by it and cannot be right in
+    # both halves; every other pulse must land where it belongs.
+    straddles = (t_log > step_at - 60.0) & (t_log <= step_at + 30.0)
+    assert np.max(np.abs(err[~straddles])) < 1e-3, (
+        f"worst placement {np.max(np.abs(err[~straddles])) * 1e3:.3f} ms; before the "
+        f"seed search was bounded this was ~90 ms for everything past the step"
+    )
+    assert res.match_fraction > 0.95
 
 
 # ===== per-segment rates ===================================================
