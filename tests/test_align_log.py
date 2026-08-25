@@ -403,6 +403,8 @@ def test_written_times_agree_with_the_alignment_everywhere(session, tmp_path: Pa
     al.run(log_path, [wav], out_dir=out, channel=0, verbose=0, knot_seconds=30.0)
 
     a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
+    # Rebuilt from the METADATA ALONE. If a consumer cannot reproduce the times
+    # from what the file says, the file is not self-describing.
     align = Alignment(
         scale=a["scale"],
         offset_s=a["offset_s"],
@@ -410,8 +412,9 @@ def test_written_times_agree_with_the_alignment_everywhere(session, tmp_path: Pa
             (s - a["offset_s"]) / a["scale"] for s in a["segment_starts_s"][1:]
         ),
         segment_offsets_s=tuple(a["recording_join_steps_s"]),
+        segment_rates=tuple(a["segment_rates"]),
+        segment_intercepts=tuple(a["segment_intercepts"]),
     )
-    assert any(abs(o) > 0 for o in align.segment_offsets_s) or True
 
     frames = _tables(out)
     for name in ("pulses", "trials", "session_events", "controls"):

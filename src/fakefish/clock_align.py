@@ -36,7 +36,7 @@ second and nothing more.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numpy.typing import NDArray
@@ -106,6 +106,22 @@ class Alignment:
     """Extra offset per segment, relative to ``offset_s``. Length is
     ``len(segment_edges_s) + 1``; the first entry is 0 by construction."""
 
+    segment_rates: tuple[float, ...] = ()
+    """Per-segment rate, when a segment had enough SPREAD to earn one. Empty
+    means every segment uses the shared ``scale``.
+
+    A recorder that drops samples changes rate, not just offset: exp3 loses
+    ~130 ms over its last 900 s, which is ~144 ppm and 431 ppm at its worst
+    against a true clock rate of +11 ppm. An offset per segment cannot represent
+    that, and a stretch of localization pulses -- spread across a whole segment
+    rather than packed into half a second like a volley -- shows the resulting
+    slide directly. Granting rates took those pulses from 71 % matched to 90 %.
+
+    Paired with :attr:`segment_intercepts`. Both are set together or not at all."""
+
+    segment_intercepts: tuple[float, ...] = ()
+    """Per-segment intercept, used with :attr:`segment_rates`."""
+
     method: AlignmentMethod = AlignmentMethod.NONE
     n_matched: int = 0
     n_candidates: int = 0
@@ -132,10 +148,15 @@ class Alignment:
 
     def log_to_recording(self, t_log_s: NDArray[np.float64]) -> NDArray[np.float64]:
         """Map device-log seconds onto recording seconds."""
-        base = self.scale * t_log_s + self.offset_s
         if not self.is_piecewise:
-            return base
-        return base + np.asarray(self.segment_offsets_s)[self._segment_of(t_log_s)]
+            return self.scale * t_log_s + self.offset_s
+        seg = self._segment_of(t_log_s)
+        if self.segment_rates:
+            rates = np.asarray(self.segment_rates)
+            inter = np.asarray(self.segment_intercepts)
+            return rates[seg] * t_log_s + inter[seg]
+        base = self.scale * t_log_s + self.offset_s
+        return base + np.asarray(self.segment_offsets_s)[seg]
 
     def recording_to_log(self, t_rec_s: NDArray[np.float64]) -> NDArray[np.float64]:
         """Map recording seconds back onto device-log seconds.
@@ -147,10 +168,16 @@ class Alignment:
         if not self.is_piecewise:
             return (t_rec_s - self.offset_s) / self.scale
         edges = np.asarray(self.segment_edges_s, dtype=np.float64)
-        offs = np.asarray(self.segment_offsets_s, dtype=np.float64)
         # A boundary maps to two recording times when samples were lost there.
         # Use the LATER segment's, so a time inside the gap resolves forward
         # rather than to a moment that was never recorded.
+        if self.segment_rates:
+            rates = np.asarray(self.segment_rates)
+            inter = np.asarray(self.segment_intercepts)
+            rec_edges = rates[1:] * edges + inter[1:]
+            seg = np.searchsorted(rec_edges, t_rec_s, side="right")
+            return (np.asarray(t_rec_s) - inter[seg]) / rates[seg]
+        offs = np.asarray(self.segment_offsets_s, dtype=np.float64)
         rec_edges = self.scale * edges + self.offset_s + offs[1:]
         seg = np.searchsorted(rec_edges, t_rec_s, side="right")
         return (np.asarray(t_rec_s) - self.offset_s - offs[seg]) / self.scale
@@ -162,6 +189,7 @@ __all__ = [
     "PEAK_EXCLUSION_S",
     "AlignmentResult",
     "estimate_alignment",
+    "refine_segment_rates",
     "nudge",
     "two_point_alignment",
     "validate",
@@ -605,6 +633,87 @@ def nudge(alignment: Alignment, delta_s: float) -> Alignment:
         median_abs_residual_s=alignment.median_abs_residual_s,
         residual_slope_ppm=alignment.residual_slope_ppm,
         validated=alignment.validated,
+    )
+
+
+
+#: A segment earns its own rate only if its matched pulses SPAN at least this
+#: much time. Gating on count instead was backwards: a volley burst is hundreds
+#: of pulses inside half a second -- no leverage on a slope, and none needed,
+#: because nothing can slide in half a second. A stretch of localization is a few
+#: dozen pulses across a minute: little count, all the leverage, and exactly
+#: where a slide shows up.
+MIN_SPAN_FOR_SEGMENT_RATE_S = 15.0
+
+#: And at least this many pairs, so a slope is not drawn through a handful.
+MIN_PAIRS_FOR_SEGMENT_RATE = 20
+
+#: How far a segment's own rate may sit from the session rate. Generous, because
+#: the thing it must accommodate is a recorder losing samples at hundreds of ppm,
+#: not two crystals disagreeing at tens.
+MAX_SEGMENT_RATE_DEV_PPM = 1000.0
+
+
+def refine_segment_rates(
+    result: "AlignmentResult",
+    log_times_s: NDArray[np.float64],
+    detected_times_s: NDArray[np.float64],
+    *,
+    tolerance_s: float = 0.02,
+) -> "AlignmentResult":
+    """Give each segment its own rate where its pulses are spread enough to fit one.
+
+    Layered ON TOP of a completed fit rather than folded into the tolerance
+    ladder. That is deliberate: the ladder works, and three attempts to restructure
+    it all scored worse than leaving it alone. This pass only ever replaces a
+    segment's mapping when the replacement is better supported, so a segment that
+    cannot earn a rate keeps exactly what it had.
+    """
+    a = result.alignment
+    if not a.is_piecewise:
+        return result
+    log_t = np.sort(np.asarray(log_times_s, dtype=np.float64))
+    rec_t = np.sort(np.asarray(detected_times_s, dtype=np.float64))
+    edges = np.asarray(a.segment_edges_s, dtype=np.float64)
+    seg = np.searchsorted(edges, log_t, side="right")
+    n = edges.size + 1
+
+    rates = np.full(n, a.scale, dtype=np.float64)
+    inter = np.array(
+        [a.offset_s + o for o in a.segment_offsets_s], dtype=np.float64
+    )
+
+    pred = a.log_to_recording(log_t)
+    idx = np.searchsorted(rec_t, pred)
+    lo = np.clip(idx - 1, 0, rec_t.size - 1)
+    hi = np.clip(idx, 0, rec_t.size - 1)
+    near = np.where(np.abs(rec_t[lo] - pred) <= np.abs(rec_t[hi] - pred), rec_t[lo], rec_t[hi])
+    ok = np.abs(near - pred) < tolerance_s
+
+    granted = 0
+    for k in range(n):
+        m = (seg == k) & ok
+        if int(m.sum()) < MIN_PAIRS_FOR_SEGMENT_RATE:
+            continue
+        tl, nb = log_t[m], near[m]
+        if np.ptp(tl) < MIN_SPAN_FOR_SEGMENT_RATE_S:
+            continue
+        design = np.vstack([tl, np.ones(tl.size)]).T
+        sol, *_ = np.linalg.lstsq(design, nb, rcond=None)
+        if abs((sol[0] - 1.0) * 1e6 - a.drift_ppm) > MAX_SEGMENT_RATE_DEV_PPM:
+            continue
+        rates[k], inter[k] = float(sol[0]), float(sol[1])
+        granted += 1
+
+    if not granted:
+        return result
+    return replace(
+        result,
+        alignment=replace(
+            a,
+            segment_rates=tuple(float(v) for v in rates),
+            segment_intercepts=tuple(float(v) for v in inter),
+        ),
     )
 
 

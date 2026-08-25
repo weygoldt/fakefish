@@ -20,6 +20,7 @@ from fakefish.clock_align import (
     coarse_lag,
     estimate_alignment,
     nudge,
+    refine_segment_rates,
     two_point_alignment,
     validate,
 )
@@ -497,3 +498,79 @@ def test_a_wild_segment_seed_is_refused_not_followed() -> None:
     # No segment may be pulled a whole second off the session lag.
     assert max(abs(o) for o in res.alignment.segment_offsets_s) < 1.0
     assert res.match_fraction > 0.8
+
+
+# ===== per-segment rates ===================================================
+def test_a_segment_earns_a_rate_on_SPAN_not_on_pulse_count() -> None:
+    """The guard that matters, and the one an earlier version got backwards.
+
+    A volley burst is hundreds of pulses inside half a second: plenty of count,
+    no leverage on a slope, and none needed because nothing slides in half a
+    second. A stretch of localization is a few dozen pulses across a minute:
+    little count, all the leverage, and exactly where a recorder losing samples
+    shows up. Gating on count admitted the first and rejected the second.
+    """
+    rng = np.random.default_rng(21)
+    # Segment 0: a dense burst, 400 pulses in 0.4 s. Segment 1: 40 pulses over 90 s.
+    burst = np.sort(rng.uniform(10.0, 10.4, 400))
+    spread = np.sort(rng.uniform(200.0, 290.0, 40))
+    t_log = np.concatenate([burst, spread])
+    det = np.sort(t_log + 3.0 + rng.normal(0.0, 20e-6, t_log.size))
+
+    res = estimate_alignment(t_log, det, segment_edges_s=(100.0,))
+    refined = refine_segment_rates(res, t_log, det)
+    rates = refined.alignment.segment_rates
+    if rates:
+        # The burst keeps the shared rate; the spread stretch may have its own.
+        assert rates[0] == pytest.approx(res.alignment.scale, abs=1e-9), (
+            "a segment with no time span must not be given a slope"
+        )
+
+
+def test_per_segment_rates_track_a_recorder_losing_samples() -> None:
+    """An offset per segment cannot represent a rate change; a rate can.
+
+    Modelled on exp3, whose recorder loses ~130 ms over 900 s -- ~144 ppm, and
+    431 ppm at worst, against a true clock rate of +11 ppm.
+    """
+    rng = np.random.default_rng(22)
+    t_log = np.sort(rng.uniform(0.0, 1200.0, 4000))
+    # +11 ppm for the first half, then the recorder starts losing samples fast.
+    extra = np.where(t_log > 600.0, -150e-6 * (t_log - 600.0), 0.0)
+    det = np.sort((1.0 + 11e-6) * t_log + 5.0 + extra + rng.normal(0.0, 20e-6, t_log.size))
+
+    knots = tuple(np.arange(120.0, 1200.0, 120.0))
+    plain = estimate_alignment(t_log, det, segment_edges_s=knots)
+    rated = refine_segment_rates(plain, t_log, det)
+
+    def matched(result):
+        pred = result.alignment.log_to_recording(t_log)
+        idx = np.searchsorted(det, pred)
+        a = np.clip(idx - 1, 0, det.size - 1)
+        b = np.clip(idx, 0, det.size - 1)
+        return (np.minimum(np.abs(det[a] - pred), np.abs(det[b] - pred)) <= 5e-4).mean()
+
+    assert rated.alignment.segment_rates, "some segment should have earned a rate"
+    assert matched(rated) >= matched(plain)
+    assert matched(rated) > 0.9
+
+
+def test_per_segment_rates_round_trip() -> None:
+    a = Alignment(
+        scale=1.0,
+        offset_s=0.0,
+        segment_edges_s=(100.0,),
+        segment_offsets_s=(0.0, 0.0),
+        segment_rates=(1.0 + 11e-6, 1.0 - 150e-6),
+        segment_intercepts=(5.0, 5.09),
+    )
+    t = np.array([0.0, 50.0, 99.0, 101.0, 300.0])
+    assert a.recording_to_log(a.log_to_recording(t)) == pytest.approx(t, abs=1e-6)
+
+
+def test_refinement_leaves_an_unsegmented_fit_alone() -> None:
+    rng = np.random.default_rng(23)
+    t_log = np.sort(rng.uniform(0.0, 300.0, 800))
+    det = np.sort(t_log + 2.0 + rng.normal(0.0, 20e-6, t_log.size))
+    res = estimate_alignment(t_log, det)
+    assert refine_segment_rates(res, t_log, det) is res

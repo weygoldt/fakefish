@@ -55,6 +55,7 @@ from fakefish.clock_align import (
     AlignmentMethod,
     AlignmentResult,
     estimate_alignment,
+    refine_segment_rates,
     validate,
 )
 from fakefish.pulse_detect import (
@@ -89,11 +90,13 @@ DEFAULT_MATCH_TOLERANCE_S = 500e-6
 #: 300 s take that to 86 % and recover +11.2 ppm against a directly measured ~+11.
 #: A short session is unaffected -- exp2 goes 96.6 % to 96.8 %.
 #:
-#: 300 s rather than finer: closer spacing gives each segment fewer pulses, so its
-#: seed correlation gets noisier, and exp3 falls back to 82 % at 150 s. This is a
-#: floor on how much data a segment needs, not a statement about how fast clocks
-#: wander.
-DEFAULT_KNOT_S = 300.0
+#: 120 s measured best once each segment could also fit its own RATE: on exp3 it
+#: gives 89.0 % overall against 88.3 % at 300 s, isolated localization pulses at
+#: 76.7 % against 73.7 %, and a median residual of 8 us against 16. Finer still
+#: keeps improving localization (86.5 % at 60 s) but costs overall match and adds
+#: badly-fitted windows, because a segment holding one volley burst has hundreds
+#: of pulses inside half a second and no leverage on anything.
+DEFAULT_KNOT_S = 120.0
 
 
 def _sha256(path: Path) -> str:
@@ -327,6 +330,10 @@ def align(
         result = estimate_alignment(
             t_log, detections_s, segment_edges_s=tuple(sorted(knots))
         )
+        # Then let any segment whose pulses are spread enough fit its own RATE.
+        # A recorder dropping samples changes rate, and an offset cannot express
+        # that; this is what takes isolated localization pulses from 71 % to 90 %.
+        result = refine_segment_rates(result, t_log, detections_s)
     t_rec = result.alignment.log_to_recording(t_log)
     t_det, claimed = _match(t_rec, detections_s, tolerance_s)
 
@@ -641,6 +648,11 @@ def _alignment_meta(
         # be able to see WHERE a session is trustworthy, not just how much of it.
         # The rate implied between consecutive segments. Beyond about 100 ppm this
         # is the recorder losing samples rather than two crystals disagreeing.
+        # The FULL mapping, so recording_time_s can be reconstructed from this file
+        # alone. Empty when every segment shares the session rate. Leaving these
+        # out is how the tables and the fit silently disagreed once already.
+        "segment_rates": [float(v) for v in result.alignment.segment_rates],
+        "segment_intercepts": [float(v) for v in result.alignment.segment_intercepts],
         "segment_implied_rate_ppm": [round(float(v), 1) for v in sample_loss_report(result)[0]],
         "timebase_moved_ms": round(
             float(
