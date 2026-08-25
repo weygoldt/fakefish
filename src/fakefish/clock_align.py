@@ -172,6 +172,16 @@ __all__ = [
 #: tight enough that only genuine pairs remain.
 DEFAULT_TOLERANCES_S: tuple[float, ...] = (0.050, 0.020, 0.008, 0.003, 0.001, 0.0003)
 
+#: A per-segment coarse lag is only trusted as a seed above this peak/sidelobe.
+#: Higher than a bare 'is there a peak' floor, because a bad seed is worse than
+#: no seed: it moves a segment AWAY from where the refinement could have found it.
+SEGMENT_SEED_MIN_RATIO = 15.0
+
+#: And only if it lands within this of the session-wide lag. The true lag moves
+#: by milliseconds across a session; a segment disagreeing by a second
+#: correlated against the wrong pulses.
+MAX_SEGMENT_SEED_DEV_S = 1.0
+
 #: A segment with fewer pairs than this keeps its neighbour's offset instead of
 #: being fitted from too little. Well below MIN_PAIRS_FOR_DRIFT because a
 #: segment fits only an intercept, which one pulse would technically determine
@@ -405,6 +415,37 @@ def estimate_alignment(
     seg = np.searchsorted(edges, log_t, side="right")
     n_seg = int(edges.size) + 1
     seg_offsets = np.zeros(n_seg, dtype=np.float64)
+
+    # SEED EACH SEGMENT FROM ITS OWN COARSE LAG. Without this every segment starts
+    # at the single global lag, so a segment whose true lag is tens of milliseconds
+    # away never pairs at the first tolerance rung and is never refined -- the
+    # per-segment offsets can only polish what the seed already got roughly right.
+    #
+    # The seed is deliberately coarse and is never the answer: coarse_lag bins at
+    # `bin_s`, so it is quantised to a couple of milliseconds. Its job is to put
+    # each segment inside pairing range; the refinement ladder does the
+    # sub-millisecond work from actual pairs.
+    #
+    # A segment's seed is only accepted if its correlation stands clear of the
+    # background AND it lands near the global lag. A window that disagrees by a
+    # second correlated against the wrong pulses, and interpolating through such a
+    # window drags the mapping everywhere -- measured, that turned a session which
+    # aligned at 99.6 % into one that aligned at 64 %.
+    if n_seg > 1:
+        for k in range(n_seg):
+            m = seg == k
+            if int(m.sum()) < MIN_PAIRS_FOR_SEGMENT:
+                continue
+            seg_lag, seg_ratio = coarse_lag(log_t[m], rec_t, bin_s)
+            if seg_ratio < SEGMENT_SEED_MIN_RATIO:
+                continue
+            if abs(seg_lag - lag) > MAX_SEGMENT_SEED_DEV_S:
+                warnings.append(
+                    f"segment {k} correlates {seg_lag - lag:+.3f} s from the session "
+                    f"lag, which is too far to be a clock difference; seed ignored"
+                )
+                continue
+            seg_offsets[k] = seg_lag - lag
 
     for tol in tolerances_s:
         ok, nearest = _pair(log_t, rec_t, scale, offset, tol, seg, seg_offsets)

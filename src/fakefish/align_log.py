@@ -82,6 +82,19 @@ app = typer.Typer(add_completion=False, help=__doc__)
 #: metadata so a reader never has to guess which number produced a status.
 DEFAULT_MATCH_TOLERANCE_S = 500e-6
 
+#: How often to place a segment boundary along the session, seconds.
+#:
+#: The lag does not follow a straight line for an hour. On exp3 it wanders 116 ms
+#: end to end, so a single rate and offset match 17 % of pulses; boundaries every
+#: 300 s take that to 86 % and recover +11.2 ppm against a directly measured ~+11.
+#: A short session is unaffected -- exp2 goes 96.6 % to 96.8 %.
+#:
+#: 300 s rather than finer: closer spacing gives each segment fewer pulses, so its
+#: seed correlation gets noisier, and exp3 falls back to 82 % at 150 s. This is a
+#: floor on how much data a segment needs, not a statement about how fast clocks
+#: wander.
+DEFAULT_KNOT_S = 300.0
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -288,6 +301,7 @@ def align(
     recording_duration_s: float,
     tolerance_s: float = DEFAULT_MATCH_TOLERANCE_S,
     file_edges_rec_s: tuple[float, ...] = (),
+    knot_s: float = DEFAULT_KNOT_S,
 ) -> tuple[AlignmentResult, dict[str, NDArray[np.float64]]]:
     """Fit the clock mapping and place every logged pulse on the recording.
 
@@ -303,12 +317,16 @@ def align(
     # mapping, convert, then fit again. Detection dominates the runtime; this
     # second fit is free by comparison.
     result = estimate_alignment(t_log, detections_s)
-    if file_edges_rec_s:
-        rough = result.alignment
-        edges_log = tuple(
-            float((e - rough.offset_s) / rough.scale) for e in file_edges_rec_s
+    rough = result.alignment
+    knots: list[float] = [
+        float((e - rough.offset_s) / rough.scale) for e in file_edges_rec_s
+    ]
+    if knot_s > 0 and t_log.size:
+        knots += list(np.arange(t_log.min() + knot_s, t_log.max(), knot_s))
+    if knots:
+        result = estimate_alignment(
+            t_log, detections_s, segment_edges_s=tuple(sorted(knots))
         )
-        result = estimate_alignment(t_log, detections_s, segment_edges_s=edges_log)
     t_rec = result.alignment.log_to_recording(t_log)
     t_det, claimed = _match(t_rec, detections_s, tolerance_s)
 
@@ -355,6 +373,14 @@ def run(
     allow_unvalidated: Annotated[
         bool, typer.Option("--allow-unvalidated", help="Write even if the fit fails validate().")
     ] = False,
+    knot_seconds: Annotated[
+        float,
+        typer.Option(
+            "--knot-seconds",
+            help="Spacing of segment boundaries along the session. 0 fits one "
+            "straight line, which is right only for a short recording.",
+        ),
+    ] = DEFAULT_KNOT_S,
     allow_gaps: Annotated[
         bool,
         typer.Option(
@@ -437,6 +463,7 @@ def run(
     result, cols = align(
         log_file, found.times_s, recording_duration_s=duration_s, tolerance_s=tol,
         file_edges_rec_s=tuple(p.start_frame / rec.rate for p in rec.parts[1:]),
+        knot_s=knot_seconds,
     )
     passed, reasons = validate(result)
     n_matched = int(np.count_nonzero(cols["status"] == "matched"))

@@ -442,3 +442,58 @@ def test_a_segment_with_too_few_pairs_borrows_its_neighbour() -> None:
     assert res.alignment.segment_offsets_s[1] == pytest.approx(
         res.alignment.segment_offsets_s[0], abs=1e-9
     )
+
+
+def test_a_lag_that_wanders_needs_seeded_segments() -> None:
+    """A session-long wander defeats one straight line, and seeding is what saves it.
+
+    Real recordings do not drift linearly for an hour: exp3's lag wanders 116 ms
+    end to end. Segments alone are not enough -- every segment starts from the one
+    global lag, so a segment whose true lag is tens of milliseconds away never
+    pairs at the first tolerance rung and is never refined. Each segment has to be
+    SEEDED from its own correlation first.
+    """
+    rng = np.random.default_rng(11)
+    t_log = np.sort(rng.uniform(0.0, 3000.0, 6000))
+    scale, offset = 1.0 + 11e-6, 6.15
+    # Drift plus occasional sample drops, which is what a recorder actually does.
+    # NOT a fast sinusoid: exp3's non-drift wander is only 1-2 ppm, so a constant
+    # offset per segment is a good local model. What breaks a single line is the
+    # STEPS, and they do not fall on the knots.
+    wander = np.zeros_like(t_log)
+    for at, size in ((640.0, -0.030), (1490.0, -0.025), (2380.0, -0.035)):
+        wander += np.where(t_log > at, size, 0.0)
+    det = np.sort(scale * t_log + offset + wander + rng.normal(0.0, 30e-6, t_log.size))
+
+    flat = estimate_alignment(t_log, det)
+    knots = tuple(np.arange(300.0, 3000.0, 300.0))
+    seeded = estimate_alignment(t_log, det, segment_edges_s=knots)
+
+    assert flat.match_fraction < 0.5, "one straight line cannot hold a stepping lag"
+    # The segments holding a step are split by it and cannot fully recover; the
+    # rest do, which is the difference between an unusable fit and a usable one.
+    assert seeded.match_fraction > 0.6
+    # And the rate comes back, which the unsegmented fit gets badly wrong because
+    # least squares tilts the slope to absorb what it cannot represent.
+    assert seeded.alignment.drift_ppm == pytest.approx(11.0, abs=3.0)
+    assert abs(flat.alignment.drift_ppm - 11.0) > abs(seeded.alignment.drift_ppm - 11.0)
+
+
+def test_a_wild_segment_seed_is_refused_not_followed() -> None:
+    """A segment that correlates a second away found the wrong pulses.
+
+    Following such a seed drags the mapping somewhere the refinement cannot come
+    back from. Measured: interpolating through windows like this turned a session
+    that aligned at 99.6 % into one that aligned at 64 %.
+    """
+    rng = np.random.default_rng(12)
+    t_log = np.sort(rng.uniform(0.0, 1200.0, 3000))
+    det = np.sort(t_log + 4.0 + rng.normal(0.0, 30e-6, t_log.size))
+    # Decoys a full 5 s away, dense enough to win a correlation in one segment.
+    decoy = np.sort(rng.uniform(600.0, 900.0, 4000) + 9.0)
+    res = estimate_alignment(
+        t_log, np.sort(np.concatenate([det, decoy])), segment_edges_s=(300.0, 600.0, 900.0)
+    )
+    # No segment may be pulled a whole second off the session lag.
+    assert max(abs(o) for o in res.alignment.segment_offsets_s) < 1.0
+    assert res.match_fraction > 0.8
