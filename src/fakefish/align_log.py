@@ -474,6 +474,10 @@ def run(
         result.alignment.drift_ppm, result.alignment.offset_s,
         n_matched, n_pulses, tol * 1e6, 100.0 * n_matched / n_pulses,
     )
+    seg_rates, loss = sample_loss_report(result)
+    if loss:
+        log.warning("%s", loss)
+
     if not passed:
         log.warning("alignment did NOT validate: %s", "; ".join(reasons))
         if not allow_unvalidated:
@@ -505,6 +509,51 @@ def run(
     for name in ("pulses", "trials", "session_events", "controls", "detections"):
         log.info("  %-16s %6d rows  %s", name, counts[name], paths[name].name)
     log.info("  %-16s %6s       %s", "metadata", "", paths["metadata"].name)
+
+
+
+#: A clock pair in this hardware differs by tens of ppm. An apparent rate beyond
+#: this between two segments is not a crystal: it is the recorder losing samples.
+#: Measured on exp3, whose last 900 s slide ~130 ms -- about 144 ppm, and 267 ppm
+#: in the tail -- while its fitted clock rate is +11 ppm.
+IMPLAUSIBLE_SEGMENT_RATE_PPM = 100.0
+
+
+def sample_loss_report(result) -> tuple[list[float], str | None]:
+    """Rate implied between consecutive segments, and a warning if it is not a clock.
+
+    The per-segment offsets already correct for this, so the alignment can be
+    good while the recording is quietly defective. Saying so is the difference
+    between "this session aligned" and "this session aligned DESPITE the recorder
+    dropping samples", which is the sentence that gets a card replaced.
+    """
+    a = result.alignment
+    edges = list(a.segment_edges_s)
+    offs = list(a.segment_offsets_s)
+    if len(offs) < 2:
+        return [], None
+    # The span between two segments is the distance between their boundaries. The
+    # first pair has only one boundary, so it borrows the typical spacing --
+    # anything else invents a span, and a short invented span turns a perfectly
+    # good clock into an apparent thousands of ppm.
+    diffs = list(np.diff(edges)) if len(edges) > 1 else []
+    typical = float(np.median(diffs)) if diffs else 1.0
+    spans = [typical] + diffs
+    rates = [
+        (offs[k] - offs[k - 1]) / abs(spans[k - 1] or typical) * 1e6
+        for k in range(1, len(offs))
+    ]
+    worst = max(rates, key=abs) if rates else 0.0
+    total_ms = (offs[-1] - offs[0]) * 1e3
+    if abs(worst) < IMPLAUSIBLE_SEGMENT_RATE_PPM:
+        return rates, None
+    return rates, (
+        f"the recording's timebase moves {total_ms:+.0f} ms across the session, "
+        f"peaking at {worst:+.0f} ppm between segments. A clock pair in this "
+        f"hardware differs by tens of ppm, so this is the RECORDER losing samples, "
+        f"not a clock. The alignment corrects for it where there are pulses to "
+        f"measure against, and cannot where there are none."
+    )
 
 
 def _match_frame(log_file: PulseLogFile, cols: dict) -> pl.DataFrame:
@@ -590,6 +639,19 @@ def _alignment_meta(
         # stretch: on exp3, 12 of 15 segments match at 99-100 % and one at 14 %,
         # which averages to a number that looks merely mediocre. A reader has to
         # be able to see WHERE a session is trustworthy, not just how much of it.
+        # The rate implied between consecutive segments. Beyond about 100 ppm this
+        # is the recorder losing samples rather than two crystals disagreeing.
+        "segment_implied_rate_ppm": [round(float(v), 1) for v in sample_loss_report(result)[0]],
+        "timebase_moved_ms": round(
+            float(
+                (result.alignment.segment_offsets_s[-1] - result.alignment.segment_offsets_s[0])
+                * 1e3
+            )
+            if len(result.alignment.segment_offsets_s) > 1
+            else 0.0,
+            3,
+        ),
+        "recorder_dropping_samples": bool(sample_loss_report(result)[1]),
         "segment_starts_s": [round(float(v), 3) for v in _segment_starts(result, cols)],
         "segment_pulses": [int(v) for v in _segment_counts(result, cols)],
         "segment_match_fraction": [

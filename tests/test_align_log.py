@@ -445,3 +445,43 @@ def test_a_piecewise_alignment_actually_reaches_the_tables(tmp_path: Path) -> No
     after = tb.recording_seconds(np.array([150 * 50_000], dtype=np.int64))
     assert before[0] == pytest.approx(51.0)
     assert after[0] == pytest.approx(151.0 + step)
+
+
+def test_a_recorder_losing_samples_is_reported_not_just_corrected(tmp_path: Path) -> None:
+    """A good alignment over a bad recording must still say the recording is bad.
+
+    The per-segment offsets correct for a recorder that drops samples, so the
+    alignment comes out fine while the recording is quietly defective. exp3 loses
+    134 ms across an hour -- peaking at hundreds of ppm against a real clock rate
+    of +11 ppm -- and silently absorbing that would hide a hardware fault behind a
+    healthy-looking number.
+    """
+    from fakefish.clock_align import AlignmentResult
+
+    def result_with(offsets, edges):
+        return AlignmentResult(
+            alignment=Alignment(
+                scale=1.0, offset_s=0.0,
+                segment_edges_s=edges, segment_offsets_s=offsets,
+            ),
+            residuals_s=np.zeros(0), matched_log_times_s=np.zeros(0),
+            matched_rec_times_s=np.zeros(0), coarse_lag_s=0.0,
+            coarse_peak_ratio=0.0, n_candidates=0, warnings=(),
+        )
+
+    edges = (300.0, 600.0, 900.0)
+    # A real clock: tens of ppm means microseconds per 300 s segment.
+    steady = result_with((0.0, 3e-3, 6e-3, 9e-3), edges)
+    rates, warn = al.sample_loss_report(steady)
+    assert warn is None, f"a plausible clock must not be flagged: {rates}"
+
+    # A recorder dropping samples: tens of milliseconds per segment.
+    dropping = result_with((0.0, -0.03, -0.07, -0.134), edges)
+    rates, warn = al.sample_loss_report(dropping)
+    assert warn is not None
+    assert "-134 ms" in warn
+    assert "RECORDER" in warn
+
+    # One segment cannot imply a rate at all, and must not pretend to.
+    flat = result_with((0.0,), ())
+    assert al.sample_loss_report(flat) == ([], None)
