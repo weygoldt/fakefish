@@ -17,6 +17,7 @@ from hypothesis import strategies as st
 from fakefish.clock_align import (
     MAX_PLAUSIBLE_DRIFT_PPM,
     Alignment,
+    AlignmentResult,
     coarse_lag,
     estimate_alignment,
     nudge,
@@ -634,6 +635,55 @@ def test_per_segment_rates_track_a_recorder_losing_samples() -> None:
     assert rated.alignment.segment_rates, "some segment should have earned a rate"
     assert matched(rated) >= matched(plain)
     assert matched(rated) > 0.9
+
+
+def test_a_segment_rate_re_picks_its_pairs_instead_of_inheriting_a_stale_line() -> None:
+    """Pairs chosen under the old line are a biased sample of the new one.
+
+    A segment whose clock is sliding is matched, at 20 ms, against a line that
+    does not slide. Nearest-neighbour then hands it the wrong pulse wherever the
+    two have parted company -- so the slope is fitted from exactly the pulses
+    that agreed with the OLD answer. Re-selecting once against the fresh line
+    breaks that circle.
+
+    Beyond ~10 ms of staleness nothing here helps: the first fit is then too
+    wrong for the second to start from, which is what the seeding stage exists
+    to prevent.
+    """
+    rng = np.random.default_rng(51)
+    t_log = np.concatenate(
+        [np.sort(rng.uniform(0.0, 60.0, 200)), np.sort(rng.uniform(60.0, 180.0, 240))]
+    )
+    # The second segment slides at -150 ppm, i.e. 18 ms across its own length.
+    truth = np.where(
+        t_log < 60.0, t_log + 5.0, (1.0 - 150e-6) * t_log + 5.0 + 150e-6 * 60.0
+    )
+    det = np.sort(truth + rng.normal(0.0, 20e-6, t_log.size))
+
+    result = AlignmentResult(
+        alignment=Alignment(
+            scale=1.0,
+            offset_s=5.0,
+            segment_edges_s=(60.0,),
+            # What the ladder leaves behind for a sliding segment: an offset that
+            # splits the difference rather than following it.
+            segment_offsets_s=(0.0, 0.005),
+        ),
+        residuals_s=np.zeros(0),
+        matched_log_times_s=np.zeros(0),
+        matched_rec_times_s=np.zeros(0),
+        coarse_lag_s=5.0,
+        coarse_peak_ratio=100.0,
+        n_candidates=t_log.size,
+    )
+    refined = refine_segment_rates(result, t_log, det)
+    rates = refined.alignment.segment_rates
+    assert rates, "the sliding segment has the span to earn a rate"
+    assert (rates[1] - 1.0) * 1e6 == pytest.approx(-150.0, abs=10.0), (
+        "the sliding segment's rate; without the re-pairing this came back -116 ppm"
+    )
+    err = np.abs(refined.alignment.log_to_recording(t_log) - truth)
+    assert err.max() < 1e-3, f"worst placement {err.max() * 1e3:.3f} ms (was 3.2 ms)"
 
 
 def test_per_segment_rates_round_trip() -> None:

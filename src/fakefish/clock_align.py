@@ -757,6 +757,13 @@ MIN_PAIRS_FOR_SEGMENT_RATE = 20
 #: not two crystals disagreeing at tens.
 MAX_SEGMENT_RATE_DEV_PPM = 1000.0
 
+#: Tolerance for the ONE re-pairing a segment's rate gets against its own fresh
+#: line. Below the shortest interval inside a volley -- 2.00 ms, the floor
+#: ``synthetic_volleys.SYNTH_MIN_IPI_SAMP`` imposes -- so a pulse can never be
+#: re-paired onto its own neighbour, and far above the ~0.1 ms a genuine pair
+#: sits at.
+SEGMENT_RATE_REPAIR_TOLERANCE_S = 0.001
+
 
 def refine_segment_rates(
     result: "AlignmentResult",
@@ -772,6 +779,16 @@ def refine_segment_rates(
     it all scored worse than leaving it alone. This pass only ever replaces a
     segment's mapping when the replacement is better supported, so a segment that
     cannot earn a rate keeps exactly what it had.
+
+    The pairs are chosen ONCE MORE after the rate is fitted. Selecting pairs under
+    the old line, fitting a new one, and stopping there leaves the new line
+    anchored to the error of the old: a segment 20 ms out over its length keeps
+    every pair the old line happened to catch and misses every pulse it did not,
+    which is a biased sample of exactly the thing being measured. One re-selection
+    at :data:`SEGMENT_RATE_REPAIR_TOLERANCE_S` fixes that, and the fit is kept
+    only if the tighter set still clears the same span and count gates. Measured
+    on exp3, worst placement against the audio 2.07 ms -> 0.58 ms and everything
+    inside 1 ms; exp2 unchanged.
     """
     a = result.alignment
     if not a.is_piecewise:
@@ -787,11 +804,20 @@ def refine_segment_rates(
         [a.offset_s + o for o in a.segment_offsets_s], dtype=np.float64
     )
 
+    def nearest(pred: NDArray[np.float64]) -> NDArray[np.float64]:
+        idx = np.searchsorted(rec_t, pred)
+        lo = np.clip(idx - 1, 0, rec_t.size - 1)
+        hi = np.clip(idx, 0, rec_t.size - 1)
+        return np.where(
+            np.abs(rec_t[lo] - pred) <= np.abs(rec_t[hi] - pred), rec_t[lo], rec_t[hi]
+        )
+
+    def fit_line(tl, nb):
+        sol, *_ = np.linalg.lstsq(np.vstack([tl, np.ones(tl.size)]).T, nb, rcond=None)
+        return float(sol[0]), float(sol[1])
+
     pred = a.log_to_recording(log_t)
-    idx = np.searchsorted(rec_t, pred)
-    lo = np.clip(idx - 1, 0, rec_t.size - 1)
-    hi = np.clip(idx, 0, rec_t.size - 1)
-    near = np.where(np.abs(rec_t[lo] - pred) <= np.abs(rec_t[hi] - pred), rec_t[lo], rec_t[hi])
+    near = nearest(pred)
     ok = np.abs(near - pred) < tolerance_s
 
     granted = 0
@@ -802,11 +828,25 @@ def refine_segment_rates(
         tl, nb = log_t[m], near[m]
         if np.ptp(tl) < MIN_SPAN_FOR_SEGMENT_RATE_S:
             continue
-        design = np.vstack([tl, np.ones(tl.size)]).T
-        sol, *_ = np.linalg.lstsq(design, nb, rcond=None)
-        if abs((sol[0] - 1.0) * 1e6 - a.drift_ppm) > MAX_SEGMENT_RATE_DEV_PPM:
+        rate, intercept = fit_line(tl, nb)
+
+        # Re-select against the line just fitted, over the WHOLE segment: it can
+        # take back a pulse the old line missed as readily as it drops one the
+        # old line caught wrongly. Kept only if the tighter set still earns a
+        # rate on its own; otherwise the first fit stands.
+        here = seg == k
+        p2 = rate * log_t[here] + intercept
+        n2 = nearest(p2)
+        keep = np.abs(n2 - p2) < SEGMENT_RATE_REPAIR_TOLERANCE_S
+        if (
+            int(keep.sum()) >= MIN_PAIRS_FOR_SEGMENT_RATE
+            and np.ptp(log_t[here][keep]) >= MIN_SPAN_FOR_SEGMENT_RATE_S
+        ):
+            rate, intercept = fit_line(log_t[here][keep], n2[keep])
+
+        if abs((rate - 1.0) * 1e6 - a.drift_ppm) > MAX_SEGMENT_RATE_DEV_PPM:
             continue
-        rates[k], inter[k] = float(sol[0]), float(sol[1])
+        rates[k], inter[k] = rate, intercept
         granted += 1
 
     if not granted:
