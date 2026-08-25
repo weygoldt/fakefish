@@ -90,19 +90,23 @@ DEFAULT_MATCH_TOLERANCE_S = 500e-6
 #: 300 s take that to 86 % and recover +11.2 ppm against a directly measured ~+11.
 #: A short session is unaffected -- exp2 goes 96.6 % to 96.8 %.
 #:
-#: 60 s, chosen on ACCURACY rather than on match count, because accuracy is what a
-#: viewer shows. Measured against the raw audio on isolated pulses -- ones with
-#: nothing within 25 ms, so no neighbour can be mistaken for them -- exp3's last
-#: 300 s sit at a median 0.009 ms with a 0.12 ms spread at 60 s, against 0.414 ms
-#: and a 1.9 ms spread at 120 s. Every other window is inside 0.25 ms, and exp2's
-#: median residual improves too.
+#: 60 s, chosen on ACCURACY, because accuracy is what a viewer shows. Measured
+#: against the raw audio on isolated pulses -- ones with nothing within 25 ms, so
+#: no neighbour can be mistaken for them -- and re-measured after the seed search
+#: was bounded and segment rates were made to re-pick their pairs:
 #:
-#: The trade is real and goes the other way on the headline: 87.2 % of pulses
-#: match at 60 s against 89.0 % at 120 s, because a segment holding one volley
-#: burst has hundreds of pulses inside half a second and no leverage on anything,
-#: and finer knots make more such segments. Those ~95 pulses were already in the
-#: session's difficult windows; the tail being sub-millisecond everywhere is worth
-#: more than counting them.
+#:     exp3   30 s   99.00 % matched   worst 7.92 ms   95.5 % inside 1 ms
+#:            60 s   99.68 %           worst 0.58 ms  100.0 %
+#:           120 s   92.14 %           worst 5.38 ms   85.0 %
+#:           300 s   90.65 %           worst 11.66 ms  84.4 %
+#:
+#: It no longer costs anything on the headline. Before those two fixes, 120 s
+#: matched MORE pulses than 60 s (89.0 % against 87.2 %) and the choice was a
+#: real trade: finer knots made more segments holding nothing but one volley
+#: burst, which has hundreds of pulses inside half a second and no leverage on
+#: anything. What actually cost those pulses was that such a segment could not
+#: SEED itself; now that it can, 60 s wins on both counts and every other spacing
+#: leaves millisecond errors in the tail.
 DEFAULT_KNOT_S = 60.0
 
 
