@@ -287,6 +287,7 @@ def align(
     *,
     recording_duration_s: float,
     tolerance_s: float = DEFAULT_MATCH_TOLERANCE_S,
+    file_edges_rec_s: tuple[float, ...] = (),
 ) -> tuple[AlignmentResult, dict[str, NDArray[np.float64]]]:
     """Fit the clock mapping and place every logged pulse on the recording.
 
@@ -295,7 +296,19 @@ def align(
     """
     ticks = log_file.pulse_ticks()
     t_log = ticks / float(log_file.sample_rate_hz)
+
+    # A recorder can drop samples where it splits a file, so each file gets its
+    # own offset. The boundaries are known in RECORDING time and the estimator
+    # wants them on the DEVICE clock, so fit once without them to get a rough
+    # mapping, convert, then fit again. Detection dominates the runtime; this
+    # second fit is free by comparison.
     result = estimate_alignment(t_log, detections_s)
+    if file_edges_rec_s:
+        rough = result.alignment
+        edges_log = tuple(
+            float((e - rough.offset_s) / rough.scale) for e in file_edges_rec_s
+        )
+        result = estimate_alignment(t_log, detections_s, segment_edges_s=edges_log)
     t_rec = result.alignment.log_to_recording(t_log)
     t_det, claimed = _match(t_rec, detections_s, tolerance_s)
 
@@ -418,7 +431,10 @@ def run(
     log.info("detected %d pulses across the whole recording", found.n)
 
     tol = tolerance_ms * 1e-3
-    result, cols = align(log_file, found.times_s, recording_duration_s=duration_s, tolerance_s=tol)
+    result, cols = align(
+        log_file, found.times_s, recording_duration_s=duration_s, tolerance_s=tol,
+        file_edges_rec_s=tuple(p.start_frame / rec.rate for p in rec.parts[1:]),
+    )
     passed, reasons = validate(result)
     n_matched = int(np.count_nonzero(cols["status"] == "matched"))
 
@@ -509,6 +525,9 @@ def _alignment_meta(
         "recording_files": [p.path.name for p in rec.parts],
         "recording_file_frames": [p.frames for p in rec.parts],
         "recording_sha256": [_sha256(p.path) for p in rec.parts],
+        "recording_join_steps_s": [
+            round(float(o), 6) for o in result.alignment.segment_offsets_s
+        ],
         "recording_join_gaps_s": [
             -999.0 if g is None else round(g, 3) for g in rec.join_gaps_s()
         ],

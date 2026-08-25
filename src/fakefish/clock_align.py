@@ -93,6 +93,19 @@ class Alignment:
 
     scale: float = 1.0
     offset_s: float = 0.0
+    segment_edges_s: tuple[float, ...] = ()
+    """Device-clock boundaries between segments, ascending. Empty means one
+    segment, i.e. the plain two-parameter model.
+
+    A recorder that splits a session can lose samples at a join: exp3 dropped
+    ~32 ms at one of three, which is 64x the match tolerance. The rate is shared
+    across segments -- it is one crystal pair and it does not change at a file
+    boundary -- but each segment carries its own offset."""
+
+    segment_offsets_s: tuple[float, ...] = ()
+    """Extra offset per segment, relative to ``offset_s``. Length is
+    ``len(segment_edges_s) + 1``; the first entry is 0 by construction."""
+
     method: AlignmentMethod = AlignmentMethod.NONE
     n_matched: int = 0
     n_candidates: int = 0
@@ -110,13 +123,37 @@ class Alignment:
         """Fraction of candidate log pulses that were matched, 0 if none."""
         return self.n_matched / self.n_candidates if self.n_candidates else 0.0
 
+    @property
+    def is_piecewise(self) -> bool:
+        return bool(self.segment_edges_s)
+
+    def _segment_of(self, t_log_s):
+        return np.searchsorted(np.asarray(self.segment_edges_s), t_log_s, side="right")
+
     def log_to_recording(self, t_log_s: NDArray[np.float64]) -> NDArray[np.float64]:
         """Map device-log seconds onto recording seconds."""
-        return self.scale * t_log_s + self.offset_s
+        base = self.scale * t_log_s + self.offset_s
+        if not self.is_piecewise:
+            return base
+        return base + np.asarray(self.segment_offsets_s)[self._segment_of(t_log_s)]
 
     def recording_to_log(self, t_rec_s: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Map recording seconds back onto device-log seconds."""
-        return (t_rec_s - self.offset_s) / self.scale
+        """Map recording seconds back onto device-log seconds.
+
+        Inverted per segment. The segment boundaries live on the DEVICE clock, so
+        they are mapped forward once to find where each segment sits in the
+        recording, then each time is inverted with its own segment's offset.
+        """
+        if not self.is_piecewise:
+            return (t_rec_s - self.offset_s) / self.scale
+        edges = np.asarray(self.segment_edges_s, dtype=np.float64)
+        offs = np.asarray(self.segment_offsets_s, dtype=np.float64)
+        # A boundary maps to two recording times when samples were lost there.
+        # Use the LATER segment's, so a time inside the gap resolves forward
+        # rather than to a moment that was never recorded.
+        rec_edges = self.scale * edges + self.offset_s + offs[1:]
+        seg = np.searchsorted(rec_edges, t_rec_s, side="right")
+        return (np.asarray(t_rec_s) - self.offset_s - offs[seg]) / self.scale
 
 
 __all__ = [
@@ -134,6 +171,12 @@ __all__ = [
 #: enough to survive a coarse lag that is a few tens of milliseconds out, ends
 #: tight enough that only genuine pairs remain.
 DEFAULT_TOLERANCES_S: tuple[float, ...] = (0.050, 0.020, 0.008, 0.003, 0.001, 0.0003)
+
+#: A segment with fewer pairs than this keeps its neighbour's offset instead of
+#: being fitted from too little. Well below MIN_PAIRS_FOR_DRIFT because a
+#: segment fits only an intercept, which one pulse would technically determine
+#: -- this is about not letting a handful of mismatches define a join.
+MIN_PAIRS_FOR_SEGMENT = 10
 
 #: Beyond this, a fitted drift is a symptom rather than a measurement. Crystals
 #: in this class of hardware are tens of ppm; hundreds means the coarse lag
@@ -268,15 +311,30 @@ def coarse_lag(
     return float(lags[k]), ratio
 
 
+def _predict(
+    log_times: NDArray[np.float64],
+    scale: float,
+    offset: float,
+    seg: NDArray[np.intp],
+    seg_offsets: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    return scale * log_times + offset + seg_offsets[seg]
+
+
 def _pair(
     log_times: NDArray[np.float64],
     rec_times: NDArray[np.float64],
     scale: float,
     offset: float,
     tolerance_s: float,
+    seg: NDArray[np.intp] | None = None,
+    seg_offsets: NDArray[np.float64] | None = None,
 ) -> tuple[NDArray[np.bool_], NDArray[np.float64]]:
     """Pair each log pulse with the nearest detection under the current mapping."""
-    predicted = scale * log_times + offset
+    if seg is None:
+        predicted = scale * log_times + offset
+    else:
+        predicted = _predict(log_times, scale, offset, seg, seg_offsets)
     idx = np.clip(np.searchsorted(rec_times, predicted), 1, rec_times.size - 1)
     left = rec_times[idx - 1]
     right = rec_times[idx]
@@ -292,6 +350,7 @@ def estimate_alignment(
     bin_s: float = 0.002,
     tolerances_s: tuple[float, ...] = DEFAULT_TOLERANCES_S,
     fit_drift: bool = True,
+    segment_edges_s: tuple[float, ...] = (),
 ) -> AlignmentResult:
     """Estimate ``t_rec = scale * t_log + offset`` from two pulse trains.
 
@@ -309,6 +368,17 @@ def estimate_alignment(
         Fit ``scale`` as well as ``offset``. Turning it off is right for a short
         recording, where a slope fitted over a few seconds is noise dressed as a
         measurement.
+    segment_edges_s
+        Device-clock times at which the recording may jump -- in practice the
+        boundaries between the files of a split recording. Each segment gets its
+        own offset while the rate stays shared, because one crystal pair does not
+        change rate at a file boundary but a recorder can drop samples there.
+
+        This matters more than it sounds. The fit below is least squares, so a
+        step it cannot represent does not show up as a step: it TILTS THE SLOPE to
+        split the difference. On exp3, one join that lost ~32 ms turned a true
+        +11 ppm into a fitted +2.6 ppm, and the resulting mapping was wrong
+        everywhere rather than wrong after the join.
 
     Returns
     -------
@@ -331,8 +401,13 @@ def estimate_alignment(
     scale, offset = 1.0, lag
     warnings: list[str] = []
 
+    edges = np.asarray(sorted(segment_edges_s), dtype=np.float64)
+    seg = np.searchsorted(edges, log_t, side="right")
+    n_seg = int(edges.size) + 1
+    seg_offsets = np.zeros(n_seg, dtype=np.float64)
+
     for tol in tolerances_s:
-        ok, nearest = _pair(log_t, rec_t, scale, offset, tol)
+        ok, nearest = _pair(log_t, rec_t, scale, offset, tol, seg, seg_offsets)
         n_ok = int(ok.sum())
         if n_ok < 2:
             warnings.append(
@@ -340,16 +415,42 @@ def estimate_alignment(
                 f"{n_ok} pair(s)"
             )
             break
+
+        # A segment needs its own pairs to earn its own offset; one that is empty
+        # or nearly so keeps what it has rather than being fitted from noise.
+        counts = np.bincount(seg[ok], minlength=n_seg)
+        usable = counts >= MIN_PAIRS_FOR_SEGMENT
         if fit_drift and n_ok >= MIN_PAIRS_FOR_DRIFT and np.ptp(log_t[ok]) > 0:
-            design = np.vstack([log_t[ok], np.ones(n_ok)]).T
-            sol, *_ = np.linalg.lstsq(design, nearest[ok], rcond=None)
-            scale, offset = float(sol[0]), float(sol[1])
+            cols = [log_t[ok]]
+            active = [k for k in range(n_seg) if usable[k]]
+            if not active:
+                active = [int(np.argmax(counts))]
+            for k in active:
+                cols.append((seg[ok] == k).astype(np.float64))
+            fit_mask = np.isin(seg[ok], active)
+            design = np.vstack(cols).T[fit_mask]
+            sol, *_ = np.linalg.lstsq(design, nearest[ok][fit_mask], rcond=None)
+            scale = float(sol[0])
+            # The first active segment defines the base offset; the rest are
+            # deltas from it, so a one-segment fit is byte-identical to before.
+            base = float(sol[1])
+            new_offsets = np.zeros(n_seg, dtype=np.float64)
+            for i, k in enumerate(active):
+                new_offsets[k] = float(sol[1 + i]) - base
+            for k in range(n_seg):
+                if not usable[k] and n_seg > 1:
+                    # Carry the nearest fitted neighbour rather than snapping an
+                    # unmeasured segment to zero, which would assert a join was
+                    # clean when nothing was measured there.
+                    nearest_k = min(active, key=lambda a: abs(a - k))
+                    new_offsets[k] = new_offsets[nearest_k]
+            offset, seg_offsets = base, new_offsets
         else:
             # Not enough leverage for a slope: shift only, keeping the scale.
-            offset = float(np.median(nearest[ok] - scale * log_t[ok]))
+            offset = float(np.median(nearest[ok] - scale * log_t[ok] - seg_offsets[seg[ok]]))
 
-    ok, nearest = _pair(log_t, rec_t, scale, offset, tolerances_s[-1])
-    residuals = nearest[ok] - (scale * log_t[ok] + offset)
+    ok, nearest = _pair(log_t, rec_t, scale, offset, tolerances_s[-1], seg, seg_offsets)
+    residuals = nearest[ok] - _predict(log_t[ok], scale, offset, seg[ok], seg_offsets)
     n_matched = int(ok.sum())
 
     # Candidates are the log pulses that fall inside the recorded window under
@@ -389,6 +490,8 @@ def estimate_alignment(
         alignment=Alignment(
             scale=scale,
             offset_s=offset,
+            segment_edges_s=tuple(float(e) for e in edges),
+            segment_offsets_s=tuple(float(o) for o in seg_offsets),
             method=AlignmentMethod.AUTO_MATCHED_FILTER,
             n_matched=n_matched,
             n_candidates=n_candidates,

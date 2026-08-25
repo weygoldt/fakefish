@@ -16,6 +16,7 @@ from hypothesis import strategies as st
 
 from fakefish.clock_align import (
     MAX_PLAUSIBLE_DRIFT_PPM,
+    Alignment,
     coarse_lag,
     estimate_alignment,
     nudge,
@@ -361,3 +362,83 @@ def test_detect_then_align_recovers_the_injected_clock(tmp_path: Path) -> None:
     assert result.match_fraction > 0.9
     passed, reasons = validate(result)
     assert passed, f"{result.summary()} -- {reasons}"
+
+
+# ===== per-segment offsets =================================================
+def test_a_step_at_a_segment_boundary_tilts_an_unsegmented_fit() -> None:
+    """The failure this models, and why it is not obvious in the output.
+
+    A recorder that drops samples where it splits a file puts a STEP in the
+    mapping. Least squares cannot represent a step, so it does not report one --
+    it tilts the slope to split the difference, and the mapping comes out wrong
+    everywhere rather than wrong after the join. Measured on exp3: a ~32 ms drop
+    at one of three joins turned a true +11 ppm into a fitted +2.6 ppm.
+    """
+    rng = np.random.default_rng(4)
+    t_log = np.sort(rng.uniform(0.0, 1200.0, 3000))
+    scale, offset, step_at, step = 1.0 + 11e-6, 5.0, 800.0, -0.032
+    truth = scale * t_log + offset + np.where(t_log >= step_at, step, 0.0)
+    det = np.sort(truth + rng.normal(0.0, 30e-6, t_log.size))
+
+    flat = estimate_alignment(t_log, det)
+    assert abs(flat.alignment.drift_ppm - 11.0) > 3.0, (
+        "the unsegmented fit should be dragged off the true rate by the step"
+    )
+
+    seg = estimate_alignment(t_log, det, segment_edges_s=(step_at,))
+    assert seg.alignment.drift_ppm == pytest.approx(11.0, abs=1.5)
+    assert seg.alignment.is_piecewise
+    # The recovered step is the drop, relative to the first segment.
+    assert seg.alignment.segment_offsets_s[0] == pytest.approx(0.0, abs=1e-6)
+    assert seg.alignment.segment_offsets_s[1] == pytest.approx(step, abs=2e-3)
+    assert seg.match_fraction > flat.match_fraction
+
+
+def test_segmentation_does_not_disturb_a_clean_recording() -> None:
+    """Handing boundaries to a recording with no steps must change nothing.
+
+    Otherwise the estimator would be trading a real improvement on split
+    recordings for a quiet regression on every intact one.
+    """
+    rng = np.random.default_rng(5)
+    t_log = np.sort(rng.uniform(0.0, 900.0, 2000))
+    scale, offset = 1.0 + 20e-6, 3.5
+    det = np.sort(scale * t_log + offset + rng.normal(0.0, 30e-6, t_log.size))
+
+    flat = estimate_alignment(t_log, det)
+    seg = estimate_alignment(t_log, det, segment_edges_s=(300.0, 600.0))
+    assert seg.alignment.drift_ppm == pytest.approx(flat.alignment.drift_ppm, abs=0.5)
+    assert seg.match_fraction == pytest.approx(flat.match_fraction, abs=0.02)
+    # Every recovered step is essentially zero: nothing was lost at these joins.
+    assert max(abs(o) for o in seg.alignment.segment_offsets_s) < 1e-3
+
+
+def test_piecewise_mapping_round_trips() -> None:
+    """recording_to_log must invert log_to_recording across a step."""
+    a = Alignment(
+        scale=1.0 + 11e-6,
+        offset_s=5.0,
+        segment_edges_s=(800.0,),
+        segment_offsets_s=(0.0, -0.032),
+    )
+    t = np.array([0.0, 400.0, 799.0, 801.0, 1200.0])
+    back = a.recording_to_log(a.log_to_recording(t))
+    assert back == pytest.approx(t, abs=1e-6)
+
+
+def test_a_segment_with_too_few_pairs_borrows_its_neighbour() -> None:
+    """An unmeasured segment must not be asserted to be clean.
+
+    Snapping it to zero would claim the join lost nothing, which is a claim the
+    data does not support; carrying the nearest measured offset at least says
+    'the same as next door'.
+    """
+    rng = np.random.default_rng(6)
+    t_log = np.sort(rng.uniform(0.0, 600.0, 1500))
+    det = np.sort((1.0 + 10e-6) * t_log + 2.0 + rng.normal(0.0, 30e-6, t_log.size))
+    # A boundary right at the end, so the final segment holds almost nothing.
+    res = estimate_alignment(t_log, det, segment_edges_s=(599.0,))
+    assert len(res.alignment.segment_offsets_s) == 2
+    assert res.alignment.segment_offsets_s[1] == pytest.approx(
+        res.alignment.segment_offsets_s[0], abs=1e-9
+    )
