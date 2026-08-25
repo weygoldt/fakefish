@@ -173,3 +173,47 @@ def test_bext_closed_at_is_none_when_absent(tmp_path: Path) -> None:
     path = _write_wav(tmp_path / "plain.wav", np.zeros(100))
     assert bext_closed_at(path) is None
     assert bext_closed_at(tmp_path / "does_not_exist.wav") is None
+
+
+# ===== finding the files ===================================================
+def test_a_directory_expands_to_its_files_in_name_order(tmp_path: Path) -> None:
+    """One directory is one recording. Typing eleven of twelve names is how a
+    session gets aligned against the wrong recording."""
+    d = tmp_path / "session"
+    d.mkdir()
+    # Written out of order, and with a decoy that is not audio.
+    for name in ("DR_0003.wav", "DR_0001.wav", "DR_0002.wav"):
+        _write_wav(d / name, np.zeros(100))
+    (d / "PULS0001.CSV").write_text("not audio\n")
+    (d / "notes.txt").write_text("nor this\n")
+
+    found = Recording.resolve([d])
+    assert [p.name for p in found] == ["DR_0001.wav", "DR_0002.wav", "DR_0003.wav"]
+
+
+def test_an_explicit_list_is_left_exactly_as_given(tmp_path: Path) -> None:
+    """Explicit order must win: it is the only way to describe a recording whose
+    filenames do not sort into recording order."""
+    paths = _ramp_parts(tmp_path, [100, 100, 100])
+    backwards = list(reversed(paths))
+    assert Recording.resolve(backwards) == backwards
+
+
+def test_an_empty_directory_is_an_error(tmp_path: Path) -> None:
+    d = tmp_path / "empty"
+    d.mkdir()
+    with pytest.raises(ValueError, match="no .* files"):
+        Recording.resolve([d])
+
+
+def test_a_directory_of_two_sessions_is_caught_by_continuity(tmp_path: Path) -> None:
+    """Globbing a directory cannot tell two sessions apart, so the continuity
+    check has to -- otherwise unrelated files are silently concatenated."""
+    d = tmp_path / "mixed"
+    d.mkdir()
+    a = _write_wav(d / "a.wav", np.zeros(48_000 * 10))
+    b = _write_wav(d / "b.wav", np.zeros(48_000 * 10))
+    _add_bext(a, "2026-08-25 12:00:00")
+    _add_bext(b, "2026-08-25 18:00:00")  # hours later: a different session
+    with Recording.open(Recording.resolve([d])) as rec:
+        assert rec.continuity_problems(), "unrelated files must not pass as one recording"

@@ -163,6 +163,28 @@ class Recording:
             start += block
 
     # ----- construction ----------------------------------------------------
+    @staticmethod
+    def resolve(paths: Sequence[Path], pattern: str = "*.wav") -> list[Path]:
+        """Expand a directory into the files inside it, sorted by name.
+
+        Handing a dozen filenames to a command is how a session gets aligned
+        against eleven of them. One directory is one recording.
+
+        Sorted LEXICOGRAPHICALLY, which is what the recorder's own zero-padded
+        numbering intends (DR0000_0088 ... DR0000_0091). Nothing infers order
+        from the audio, and a directory holding two sessions is caught by the
+        continuity check rather than silently concatenated.
+        """
+        if len(paths) == 1 and Path(paths[0]).is_dir():
+            found = sorted(
+                q for q in Path(paths[0]).iterdir()
+                if q.is_file() and q.suffix.lower() == Path(pattern).suffix.lower()
+            )
+            if not found:
+                raise ValueError(f"no {pattern} files in {paths[0]}")
+            return found
+        return [Path(q) for q in paths]
+
     @classmethod
     def open(cls, paths: Sequence[Path], *, buffer_s: float = 60.0) -> "Recording":
         """Open files IN THE ORDER GIVEN as one timeline.

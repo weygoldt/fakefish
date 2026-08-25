@@ -335,8 +335,8 @@ def run(
     recordings: Annotated[
         list[Path],
         typer.Argument(
-            help="The WAV(s) recorded during that session, IN ORDER. A recorder that "
-            "splits a long session writes several; pass them all."
+            help="The WAV(s) recorded during that session, IN ORDER -- or a single "
+            "DIRECTORY holding them, which is expanded and sorted by name."
         ),
     ],
     out_dir: Annotated[
@@ -400,7 +400,10 @@ def run(
     if not n_pulses:
         raise typer.BadParameter(f"{log_path.name} contains no emitted pulses to align")
 
-    rec = Recording.open(recordings)
+    files = Recording.resolve(recordings)
+    if len(files) != len(recordings):
+        log.info("%s -> %d file(s)", recordings[0], len(files))
+    rec = Recording.open(files)
     stack.enter_context(rec)
     rate, duration_s = rec.rate, rec.duration_s
     if not 0 <= channel < rec.channels:
