@@ -588,6 +588,15 @@ def _alignment_meta(
         ),
         "residual_slope_ppm": maybe(float(a.residual_slope_ppm)),
         "residual_local_wander_s": maybe(ptp_local),
+        # PER-SEGMENT match rates, because one aggregate can hide a broken
+        # stretch: on exp3, 12 of 15 segments match at 99-100 % and one at 14 %,
+        # which averages to a number that looks merely mediocre. A reader has to
+        # be able to see WHERE a session is trustworthy, not just how much of it.
+        "segment_starts_s": [round(float(v), 3) for v in _segment_starts(result, cols)],
+        "segment_pulses": [int(v) for v in _segment_counts(result, cols)],
+        "segment_match_fraction": [
+            round(float(v), 4) for v in _segment_match(result, cols, tol)
+        ],
         "detect_snr_threshold": float(params.snr_threshold),
         "detect_absolute_floor": round(float(params.absolute_floor), 9),
         "detect_refractory_s": float(params.refractory_s),
@@ -595,6 +604,36 @@ def _alignment_meta(
         "validation_warnings": list(reasons),
         "fit_warnings": list(result.warnings),
     }
+
+
+
+def _segment_index(result, cols) -> np.ndarray:
+    """Which segment each logged pulse falls in, on the device clock."""
+    edges = np.asarray(result.alignment.segment_edges_s, dtype=np.float64)
+    return np.searchsorted(edges, cols["t_log_s"], side="right")
+
+
+def _segment_starts(result, cols) -> list[float]:
+    edges = list(result.alignment.segment_edges_s)
+    return [float(np.min(cols["t_log_s"])) if cols["t_log_s"].size else 0.0] + edges
+
+
+def _segment_counts(result, cols) -> list[int]:
+    seg = _segment_index(result, cols)
+    n = len(result.alignment.segment_edges_s) + 1
+    return list(np.bincount(seg, minlength=n)[:n])
+
+
+def _segment_match(result, cols, tol: float) -> list[float]:
+    """Fraction matched within `tol`, per segment. NaN where a segment is empty."""
+    seg = _segment_index(result, cols)
+    ok = cols["status"] == "matched"
+    n = len(result.alignment.segment_edges_s) + 1
+    out = []
+    for k in range(n):
+        m = seg == k
+        out.append(float(ok[m].mean()) if m.any() else -1.0)
+    return out
 
 
 def _write_detections(path: Path, found, cols, result, log_file: PulseLogFile) -> int:

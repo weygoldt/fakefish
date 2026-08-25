@@ -343,3 +343,44 @@ def test_a_split_recording_aligns_as_one_timeline(tmp_path: Path) -> None:
     assert a3["offset_s"] == pytest.approx(a1["offset_s"], abs=1e-3)
     assert a3["drift_ppm"] == pytest.approx(a1["drift_ppm"], abs=1.0)
     assert a3["matched_pulses"] == pytest.approx(a1["matched_pulses"], rel=0.02)
+
+
+def test_metadata_reports_match_quality_per_segment(session, tmp_path: Path) -> None:
+    """One aggregate can hide a broken stretch.
+
+    On a real hour-long session 12 of 15 segments matched at 99-100 % and one at
+    14 %, which averages to a number that reads as merely mediocre. A reader has
+    to be able to see WHERE the session is trustworthy.
+    """
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0, knot_seconds=30.0)
+
+    a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
+    starts = a["segment_starts_s"]
+    counts = a["segment_pulses"]
+    fracs = a["segment_match_fraction"]
+
+    assert len(starts) == len(counts) == len(fracs) > 1
+    assert starts == sorted(starts), "segments are reported in time order"
+    assert sum(counts) == a["matched_pulses"] + (
+        sum(counts) - a["matched_pulses"]
+    ), "counts cover every logged pulse"
+    for n, f in zip(counts, fracs, strict=True):
+        if n == 0:
+            assert f == -1.0, "an empty segment reports -1, not a match rate of zero"
+        else:
+            assert 0.0 <= f <= 1.0
+    # A clean synthetic pair should be good nearly everywhere.
+    good = [f for n, f in zip(counts, fracs, strict=True) if n >= 20]
+    assert good and min(good) > 0.8
+
+
+def test_knot_seconds_zero_fits_one_straight_line(session, tmp_path: Path) -> None:
+    """The escape hatch, for a recording short enough that segments are noise."""
+    log_path, wav = session
+    out = tmp_path / "out"
+    al.run(log_path, [wav], out_dir=out, channel=0, verbose=0, knot_seconds=0.0)
+    a = tomllib.loads((out / "PULS0003_metadata.toml").read_text())["alignment"]
+    assert len(a["segment_starts_s"]) == 1
+    assert a["validated"] is True
