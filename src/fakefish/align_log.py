@@ -90,13 +90,20 @@ DEFAULT_MATCH_TOLERANCE_S = 500e-6
 #: 300 s take that to 86 % and recover +11.2 ppm against a directly measured ~+11.
 #: A short session is unaffected -- exp2 goes 96.6 % to 96.8 %.
 #:
-#: 120 s measured best once each segment could also fit its own RATE: on exp3 it
-#: gives 89.0 % overall against 88.3 % at 300 s, isolated localization pulses at
-#: 76.7 % against 73.7 %, and a median residual of 8 us against 16. Finer still
-#: keeps improving localization (86.5 % at 60 s) but costs overall match and adds
-#: badly-fitted windows, because a segment holding one volley burst has hundreds
-#: of pulses inside half a second and no leverage on anything.
-DEFAULT_KNOT_S = 120.0
+#: 60 s, chosen on ACCURACY rather than on match count, because accuracy is what a
+#: viewer shows. Measured against the raw audio on isolated pulses -- ones with
+#: nothing within 25 ms, so no neighbour can be mistaken for them -- exp3's last
+#: 300 s sit at a median 0.009 ms with a 0.12 ms spread at 60 s, against 0.414 ms
+#: and a 1.9 ms spread at 120 s. Every other window is inside 0.25 ms, and exp2's
+#: median residual improves too.
+#:
+#: The trade is real and goes the other way on the headline: 87.2 % of pulses
+#: match at 60 s against 89.0 % at 120 s, because a segment holding one volley
+#: burst has hundreds of pulses inside half a second and no leverage on anything,
+#: and finer knots make more such segments. Those ~95 pulses were already in the
+#: session's difficult windows; the tail being sub-millisecond everywhere is worth
+#: more than counting them.
+DEFAULT_KNOT_S = 60.0
 
 
 def _sha256(path: Path) -> str:
