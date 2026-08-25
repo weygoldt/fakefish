@@ -27,6 +27,11 @@ response, so the two useful questions are "where in the recording is each pulse
 I emitted" and "what else is in there". The first is this file. The second is
 ``--detections-out``, which writes every detected pulse together with whether
 the log accounts for it: the ones it does not are the candidate responses.
+
+``--trials-out`` answers a third: when did each treatment start and stop. That
+needs its own file because a SILENCE arm emits nothing, so it has no pulse rows
+anywhere -- a third of the trials are absent from the per-pulse sidecar, and they
+are the control condition.
 """
 
 from __future__ import annotations
@@ -95,6 +100,23 @@ COLUMNS = (
 
 DETECTION_COLUMNS = ("index", "t_rec_s", "t_log_s", "amplitude", "matched_seq", "status")
 
+TRIAL_COLUMNS = (
+    "trial",
+    "arm",
+    "item",
+    "t_log_start_s",
+    "t_rec_start_s",
+    "t_rec_end_s",
+    "duration_s",
+    "n_pulses",
+    "n_matched",
+)
+
+#: The log's one-character arm codes, spelled out. ``S`` is the SILENCE arm; the
+#: character is the two-arm design's SHAM code, kept because the quantity never
+#: changed (see ``pulse_log.KIND_SHAM``).
+ARM_NAMES = {"V": "VOLLEY", "B": "BASELINE", "S": "SILENCE"}
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -149,6 +171,29 @@ def emitted_template(sample_rate_hz: float) -> NDArray[np.float64]:
     src = np.arange(eod.size, dtype=np.float64) / PLAYBACK_RATE_HZ
     dst = np.arange(n, dtype=np.float64) / sample_rate_hz
     return np.interp(dst, src, eod)
+
+
+def item_durations_s() -> dict[int, float]:
+    """Every library item's duration in DEVICE seconds, by item index.
+
+    This is what gives a trial its length. All three arms draw an item: VOLLEY
+    plays it, BASELINE and SILENCE hold for exactly its duration, so the arms
+    match in length by construction. An item runs from its first pulse to one
+    EOD after its last, i.e. ``sum(ipi_samp) + EOD_HV_LEN`` -- ``ipi_samp[k]`` is
+    the wait BEFORE pulse k, so ``[0]`` is 0.
+
+    (A volley overruns this by 2 samples, 40 us, because it ends when the player
+    runs dry rather than on the trial clock. Far below anything that matters here
+    and deliberately not modelled.)
+    """
+    from fakefish.export_teensy_stimuli import PLAYBACK_RATE_HZ, parse_firmware
+
+    parsed = parse_firmware(DEFAULT_FIRMWARE)
+    eod_len = len(parsed["EOD_HV"])
+    return {
+        i: (int(np.sum(it["ipi_samp"])) + eod_len) / float(PLAYBACK_RATE_HZ)
+        for i, it in enumerate(parsed["items"])
+    }
 
 
 def _match(
@@ -322,6 +367,14 @@ def run(
     tolerance_ms: Annotated[
         float, typer.Option("--tolerance-ms", help="Match tolerance for the status column.")
     ] = DEFAULT_MATCH_TOLERANCE_S * 1e3,
+    trials_out: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--trials-out",
+            help="Also write one row per TRIAL: when each arm starts and stops. "
+            "The only place the SILENCE arm appears at all.",
+        ),
+    ] = None,
     detections_out: Annotated[
         Optional[Path],
         typer.Option("--detections-out", help="Also write every detection, matched or not."),
@@ -411,6 +464,9 @@ def run(
     _write_csv(out, header, frame)
     log.info("wrote %s (%d rows)", out, frame.height)
 
+    if trials_out is not None:
+        _write_trials(trials_out, log_file, result, cols)
+
     if detections_out is not None:
         _write_detections(detections_out, found, cols, result, seq)
 
@@ -437,6 +493,93 @@ def _write_csv(path: Path, header: list[str], frame: pl.DataFrame) -> None:
         fh.write("\n".join(header) + "\n")
         fh.write("#" + ",".join(frame.columns) + "\n")
         frame.write_csv(fh)
+
+
+def _write_trials(path: Path, log_file: PulseLogFile, result, cols) -> None:
+    """One row per TRIAL: when each treatment starts and stops in the recording.
+
+    THIS IS THE ONLY PLACE THE SILENCE ARM EXISTS. It emits nothing, so it has no
+    pulse rows anywhere -- in the per-pulse sidecar a third of the trials are
+    simply absent, and they are the control condition. A viewer that draws only
+    pulses shows the treatment and omits what it is meant to be compared against.
+
+    The span is not "first pulse to last pulse". A trial's LENGTH is set by the
+    library item it drew, which the log records on the TRIAL row for all three
+    arms precisely so a silent arm has a knowable duration -- nothing was emitted
+    at its end to measure. A baseline arm carrying one pulse still occupies its
+    full window; measured from its pulses it would collapse to an instant.
+    """
+    if path.exists():
+        raise typer.BadParameter(f"{path} exists; refusing to overwrite")
+
+    rate = float(log_file.sample_rate_hz)
+    durations = item_durations_s()
+    a = result.alignment
+    trials = [t for t in log_file.trials() if t.tick is not None]
+
+    # Pulses per trial, from the rows already placed on the recording's clock.
+    by_trial: dict[int, list[int]] = {}
+    for i, r in enumerate(log_file.pulses()):
+        if r.trial is not None:
+            by_trial.setdefault(r.trial, []).append(i)
+    matched = cols["status"] == "matched"
+
+    ids, arms, items = [], [], []
+    t_log0, t_rec0, t_rec1, durs, n_pulses, n_matched = [], [], [], [], [], []
+    unknown_item = 0
+    for t in trials:
+        start_log = t.tick / rate
+        dur = durations.get(t.item) if t.item is not None else None
+        if dur is None:
+            unknown_item += 1
+        idx = by_trial.get(t.trial, [])
+        ids.append(t.trial)
+        arms.append(ARM_NAMES.get(t.res or "", "UNKNOWN"))
+        items.append(t.item)
+        t_log0.append(start_log)
+        t_rec0.append(float(a.log_to_recording(np.float64(start_log))))
+        # Affine, so the end maps through the same fit rather than being pasted on
+        # in device seconds -- at 14 ppm that would be wrong by microseconds, but
+        # it would be wrong for the wrong reason.
+        t_rec1.append(
+            float(a.log_to_recording(np.float64(start_log + dur))) if dur is not None else np.nan
+        )
+        durs.append(dur if dur is not None else np.nan)
+        n_pulses.append(len(idx))
+        n_matched.append(int(np.count_nonzero(matched[idx])) if idx else 0)
+
+    frame = pl.DataFrame(
+        {
+            "trial": pl.Series(ids, dtype=pl.Int64),
+            "arm": arms,
+            "item": pl.Series(items, dtype=pl.Int64),
+            "t_log_start_s": _round(np.asarray(t_log0), 6),
+            "t_rec_start_s": _round(np.asarray(t_rec0), 6),
+            "t_rec_end_s": _nullable(np.asarray(t_rec1), 6),
+            "duration_s": _nullable(np.asarray(durs), 6),
+            "n_pulses": pl.Series(n_pulses, dtype=pl.Int64),
+            "n_matched": pl.Series(n_matched, dtype=pl.Int64),
+        }
+    )
+    _write_csv(
+        path,
+        [SIDECAR_MAGIC + "-trials", f"#format_version={SIDECAR_FORMAT_VERSION}"],
+        frame,
+    )
+    counts = frame.group_by("arm").len().sort("arm")
+    log.info(
+        "wrote %s (%d trials: %s)",
+        path,
+        frame.height,
+        ", ".join(f"{r['len']} {r['arm'].lower()}" for r in counts.iter_rows(named=True)),
+    )
+    if unknown_item:
+        # v2/v3 logs leave `item` empty on the TRIAL row, so a silent arm there has
+        # no recoverable length. Say so rather than inventing one.
+        log.warning(
+            "%d trial(s) carry no item, so their end time is unknown (a pre-v4 log?)",
+            unknown_item,
+        )
 
 
 def _write_detections(path: Path, found, cols, result, seq: NDArray[np.int64]) -> None:

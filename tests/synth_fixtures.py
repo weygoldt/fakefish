@@ -328,7 +328,7 @@ def make_pulse_log(
 
     header = [
         "#fakefish-pulse-log",
-        "#format_version=3",
+        "#format_version=4",
         "#file_index=1",
         f"#sample_rate_hz={sample_rate_hz}",
         f"#rtc_unix={rtc_unix}",
@@ -366,16 +366,30 @@ def make_pulse_log(
 
     if trial_ticks is not None:
         tt = [int(t) for t in np.asarray(trial_ticks, dtype=np.int64)]
-        outcomes = trial_outcomes or ["V" if i % 2 == 0 else "S" for i in range(len(tt))]
+        outcomes = trial_outcomes or [
+            "VBS"[i % 3] for i in range(len(tt))
+        ]
         for i, (t, res) in enumerate(zip(tt, outcomes, strict=True)):
-            events.append((t, "TRIAL", {"trial": i, "req": "R", "res": res}))
+            # v4 records the drawn item on the TRIAL row for EVERY arm. It is what
+            # sets the arm's length, and for a silent arm it is the only record of
+            # it -- nothing was emitted at its end to measure. Items cycle inside
+            # the RC device's volley range so they resolve against the real library.
+            item = 7 + (i % 8)
+            events.append(
+                (t, "TRIAL", {"trial": i, "req": "R", "res": res, "item": item})
+            )
             if res == "V":
                 events.append(
-                    (t + 50, "VOLLEY", {"trial": i, "item": 7, "pulse": 0,
+                    (t + 50, "VOLLEY", {"trial": i, "item": item, "pulse": 0,
                                         "pol": 1, "amp_m": 900})
                 )
+            elif res == "B":
+                # A baseline arm anchors a pulse at trial onset.
+                events.append(
+                    (t, "BASE", {"trial": i, "item": item, "pol": 1, "amp_m": 250})
+                )
             else:
-                events.append((t, "SHAM", {"trial": i}))
+                events.append((t, "SHAM", {"trial": i, "item": item}))
 
     events.sort(key=lambda e: e[0])
 

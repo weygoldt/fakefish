@@ -506,7 +506,14 @@ The firmware is layered; the split is load-bearing and is spelled out in every f
     Detects pulses in the WAV, fits `t_rec = scale·t_log + offset` and writes a **sidecar
     CSV** giving every logged pulse its time in the recording; `--detections-out` also writes
     every detection with whether the log explains it, which is how the *animal's* pulses get
-    separated from the playback's. Three rules it exists to keep:
+    separated from the playback's, and `--trials-out` writes **one row per trial** with its arm,
+    its start and its end. That third file is not a convenience: a **SILENCE arm emits nothing**,
+    so it has no pulse rows anywhere and a third of the trials are simply absent from the
+    per-pulse sidecar — the control condition, invisible. Its span comes from the drawn library
+    item (the v4 log records `item` on the `TRIAL` row for all three arms precisely so a silent
+    arm has a knowable length), never from first-pulse-to-last-pulse: a baseline arm carrying one
+    pulse still occupies its whole window and would otherwise collapse to an instant.
+    Three rules it exists to keep:
     - **The sidecar is never a column in the pulse log.** The log is the device's record and
       sits in read-only field data; its schema is version-pinned and the reader raises on an
       unexpected column row, so a derived column would need a version no firmware could write;

@@ -14,7 +14,7 @@ import pytest
 import typer
 
 from fakefish import align_log as al
-from synth_fixtures import make_aligned_pair
+from synth_fixtures import make_aligned_pair, make_pulse_log, make_recording
 
 
 # ===== the matcher =========================================================
@@ -256,3 +256,106 @@ def test_allow_unvalidated_writes_but_says_so(tmp_path: Path) -> None:
         ln for ln in header.splitlines() if ln.startswith("#validation_warnings=")
     )
     assert reasons != "#validation_warnings=", "a failed fit must say why"
+
+
+# ===== trial spans =========================================================
+def test_item_durations_cover_the_library_and_are_plausible() -> None:
+    """A trial's length comes from its drawn item, so these must be real."""
+    d = al.item_durations_s()
+    assert len(d) >= 100
+    vals = np.array(list(d.values()))
+    assert (vals > 0).all()
+    # The RC device's volley range (items 7..106) runs ~0.2-2.2 s.
+    volleys = np.array([d[i] for i in range(7, 107)])
+    assert 0.1 < volleys.min() < 0.3
+    assert 1.5 < volleys.max() < 3.0
+
+
+def _pair_with_trials(tmp_path: Path):
+    """A synthetic pair whose log carries all three arms."""
+    rate_dev, rate_rec = 50_000, 48_000
+    scale, offset = 1.0 + 20e-6, 4.5
+    ticks = np.arange(60, dtype=np.int64) * 15_000 + 500_000
+    trial_ticks = np.array([700_000, 1_000_000, 1_300_000, 1_600_000], dtype=np.int64)
+    log_path = make_pulse_log(
+        tmp_path / "log.CSV", ticks=ticks, sample_rate_hz=rate_dev,
+        trial_ticks=trial_ticks, trial_outcomes=["V", "B", "S", "S"],
+    )
+    t_rec = scale * (ticks / rate_dev) + offset
+    wav = tmp_path / "rec.wav"
+    make_recording(
+        wav, sample_rate_hz=rate_rec, duration_s=60.0, pulse_times_s=t_rec,
+        n_channels=1, channel=0, amplitude=0.15, noise_rms=0.003,
+    )
+    return log_path, wav
+
+
+def test_trials_sidecar_contains_every_arm_including_silence(tmp_path: Path) -> None:
+    """The SILENCE arm emits nothing, so this file is the ONLY place it exists.
+
+    A viewer built on the per-pulse sidecar alone would draw the treatment and
+    silently omit the control it is meant to be compared against.
+    """
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "a.align.csv"
+    trials_out = tmp_path / "a.trials.csv"
+    al.run(log_path, wav, out=out, channel=0, verbose=0,
+           trials_out=trials_out, allow_unvalidated=True)
+
+    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
+    assert f.columns == list(al.TRIAL_COLUMNS)
+    assert f.height == 4, "every TRIAL row appears, whatever it resolved to"
+    assert f["arm"].to_list() == ["VOLLEY", "BASELINE", "SILENCE", "SILENCE"]
+
+    # A silent arm has no pulses but still occupies a real window.
+    silence = f.filter(pl.col("arm") == "SILENCE")
+    assert (silence["n_pulses"] == 0).all()
+    assert (silence["duration_s"] > 0).all()
+    assert (silence["t_rec_end_s"] > silence["t_rec_start_s"]).all()
+
+
+def test_trial_span_comes_from_the_item_not_from_its_pulses(tmp_path: Path) -> None:
+    """A baseline arm carrying one pulse still occupies its whole window.
+
+    Measured from its pulses it would collapse to an instant, which is exactly
+    the mistake this file exists to prevent.
+    """
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "a.align.csv"
+    trials_out = tmp_path / "a.trials.csv"
+    al.run(log_path, wav, out=out, channel=0, verbose=0,
+           trials_out=trials_out, allow_unvalidated=True)
+
+    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
+    base = f.filter(pl.col("arm") == "BASELINE")
+    assert base.height == 1
+    row = base.row(0, named=True)
+    assert row["n_pulses"] == 1, "the fixture's baseline arm has only its anchor"
+    # ...yet its span is the drawn item's duration, not zero.
+    durations = al.item_durations_s()
+    assert row["duration_s"] == pytest.approx(durations[row["item"]], rel=1e-6)
+    assert row["t_rec_end_s"] - row["t_rec_start_s"] > 0.1
+
+
+def test_trial_spans_are_ordered_and_do_not_overlap(tmp_path: Path) -> None:
+    log_path, wav = _pair_with_trials(tmp_path)
+    out = tmp_path / "a.align.csv"
+    trials_out = tmp_path / "a.trials.csv"
+    al.run(log_path, wav, out=out, channel=0, verbose=0,
+           trials_out=trials_out, allow_unvalidated=True)
+
+    f = pl.read_csv(trials_out, comment_prefix="#", infer_schema_length=None)
+    start = f["t_rec_start_s"].to_numpy()
+    end = f["t_rec_end_s"].to_numpy()
+    assert (np.diff(start) > 0).all(), "trials must come out in time order"
+    assert (end[:-1] < start[1:]).all(), "one trial must finish before the next starts"
+
+
+def test_trials_refuses_to_overwrite(tmp_path: Path) -> None:
+    log_path, wav = _pair_with_trials(tmp_path)
+    trials_out = tmp_path / "a.trials.csv"
+    trials_out.write_text("keep me\n")
+    with pytest.raises(typer.BadParameter):
+        al.run(log_path, wav, out=tmp_path / "a.align.csv", channel=0, verbose=0,
+               trials_out=trials_out, allow_unvalidated=True)
+    assert trials_out.read_text() == "keep me\n"
