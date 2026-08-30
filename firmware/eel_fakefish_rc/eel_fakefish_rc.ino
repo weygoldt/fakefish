@@ -141,7 +141,8 @@ static volatile uint32_t g_tick_ipi_samp = 0;      // the nominal MEDIAN IPI for
                                                    // read back as a rate without the firmware
 static volatile float    g_randomness  = 0.0f;     // localization randomness (0 = metronome, 1 = eel)
 static volatile float    g_volley_amp  = 0.0f;     // volley (max) amplitude 0..1 — the amplitude control sets THIS
-static volatile float    g_loc_amp     = 0.0f;     // localization amplitude = volley / VOLLEY_AMP_RATIO (always half)
+static volatile float    g_loc_amp     = 0.0f;     // AMBIENT train amplitude = volley / VOLLEY_AMP_RATIO
+                                                   // (a QUARTER). Not the BASELINE arm: see g_base_amp.
 static volatile bool     g_link_up     = false;    // CH3 (throttle) delivering edges
 static volatile bool     g_rc_zeroed   = false;    // the session zero has been captured (RcZero)
 static volatile bool     g_playing     = false;    // ISR is emitting a playback (owns the LED then)
@@ -241,6 +242,9 @@ static uint64_t   g_loc_last_onset = 0;
 static uint32_t   g_trig_seen = 0;                   // last consumed trigger seq (ISR only)
 static int8_t     g_playback_pol = 1;                // polarity drawn per trial
 static float      g_playback_volley_amp = 0.0f;      // volley amplitude latched at the throw (volley start)
+static float      g_base_amp            = 0.0f;      // BASELINE arm amplitude: ONE pulse drawn from the
+                                                     // trial's own item, held for every pulse of the arm.
+                                                     // Drawn in begin_trial() for ALL THREE arms — see there.
 static uint32_t   g_tick = 0;                        // monotonic sample counter (ISR only)
 static uint32_t   g_led_off_at = 0;                  // g_tick at which the per-pulse flash ends
 static uint32_t   g_volley_onset = 0;                // detect volley pulse onsets for the LED
@@ -400,8 +404,8 @@ static inline void begin_base() {
     g_base_spare_ready = 0;                      // release the slot back to loop()
   }
   locgen_reset(&trial_loc, draw_base_ipi(0),     // 0: the state is already standing at a pulse
-               rc_loc_amp(g_playback_volley_amp),   // localization level, derived through the
-               g_playback_pol);                     // one helper, from the amp latched at the throw
+               g_base_amp,                          // amplitude-matched to the volley: one pulse of
+               g_playback_pol);                     // this trial's item, drawn in begin_trial()
   src = SRC_BASE;
 }
 static inline void begin_sham() {   // the SILENCE arm — no water output at all
@@ -462,6 +466,27 @@ static inline void begin_trial(int kind) {
   uint8_t idx = (uint8_t)(RC_VOLLEY_ITEM_FIRST + (int)random(RC_VOLLEY_ITEM_COUNT));
   g_volley_item    = (int8_t)idx;
   g_trial_dur_samp = g_item_dur_samp[idx - RC_VOLLEY_ITEM_FIRST];
+
+  // THE BASELINE ARM'S AMPLITUDE, drawn HERE for exactly the reason the item is: unconditionally,
+  // for all three arms. A draw that only one arm consumed would advance the RNG stream at a rate
+  // depending on the arm sequence — the same leak the unconditional item draw exists to avoid.
+  //
+  // WHY ONE OF THE ITEM'S OWN PULSE AMPLITUDES. Volley and baseline were confounded by amplitude:
+  // a volley runs at the master setting times the measured envelope (median 0.91 of master over
+  // the library) while the arm sat at master/4 — an ~11 dB step that rides on top of the temporal
+  // contrast the arm exists to isolate. Taking ONE pulse of the item this trial would have played
+  // and holding it for the whole arm reproduces the volley's amplitude distribution BY
+  // CONSTRUCTION, not by a matched constant the library could later drift away from; and the
+  // value is inside [min, max] of that item's envelope by definition. Every drawable item carries
+  // a rel_amp table, but the guard is free and mirrors eel_player.cpp.
+  //
+  // NOT rc_loc_amp(): that is the AMBIENT train's level (g_loc_amp), which deliberately stays at
+  // volley/4. Amplitude reads as DISTANCE at these ranges, so the ambient fish stays further off
+  // while both trial arms present the same nearer one.
+  const StimItem* vit = &STIM_ITEMS[idx];
+  g_base_amp = g_playback_volley_amp;
+  if (vit->rel_amp) g_base_amp *= (float)vit->rel_amp[random(vit->n)] * (1.0f / 255.0f);
+
   g_trial_phase    = 0;
   g_trig_seen = g_trig_seq;   // consume the request (one playback per throw; later throws ignored)
   g_playing = true;
@@ -579,10 +604,14 @@ static void onSampleTick() {
       }
       break;
     }
-    // The BASELINE arm: localization-amplitude pulses from the trial's OWN rhythm, for exactly
-    // as long as the drawn volley would have run. Its pulses are logged as BASE, not LOC — both
-    // sit at the same amplitude, so once the ambient train resumes beside them nothing else
-    // could separate the treatment from the fish ticking along.
+    // The BASELINE arm: VOLLEY-AMPLITUDE pulses from the trial's OWN rhythm, for exactly as long
+    // as the drawn volley would have run. The level is g_base_amp — one pulse drawn from this
+    // trial's item — so the arm now differs from a volley in TEMPORAL STRUCTURE ALONE.
+    //
+    // Its pulses are still logged as BASE, not LOC. That used to be because the two sat at the
+    // same amplitude and nothing else could tell them apart; the reason is now the opposite (the
+    // arm runs ~4x louder than the ambient train it interrupts), but the event code is still the
+    // only thing that survives into an analysis, so it stays.
     //
     // Like the ambient train it stops at a PULSE BOUNDARY, never mid-EOD: a truncated pulse is
     // an artefact that looks like data. The arm therefore overruns its nominal length by at most
