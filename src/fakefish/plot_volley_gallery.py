@@ -13,11 +13,19 @@ menu — so drawing all of them would be a metre of page. The gallery shows an e
 slice, keeping **every** real volley (there are only a handful, and they are the reference
 the synthetic ones are judged against) and thinning only the synthetic side.
 
+``--rc`` switches from "the library" to "the RC playback device": only the item window that
+sketch can draw (``RC_VOLLEY_ITEM_FIRST/COUNT``, read from its own header), all of it, and no
+lead-in marker — that device stopped emitting one on 2026-08-22, and the pulse log's ``item``
+column identifies the pattern instead. Panels are therefore titled by that index, so a logged
+trial can be looked up here; the SD device, which still plays a marker, keeps the default view.
+
     fakefish-gallery-volley [--firmware ...] [--out ...] [--max-synth N]
+    fakefish-gallery-volley --rc [--out ...]
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import matplotlib
@@ -50,6 +58,25 @@ KIND_STYLE = {
 KIND_ORDER = {ex.STIM_REAL_VOLLEY: 0, ex.STIM_SYNTH_VOLLEY: 1}
 
 
+def _rc_pool(root: Path) -> tuple[int, int]:
+    """Return ``(first, count)`` — the STIM_ITEMS window the RC sketch can draw.
+
+    Read from ``firmware/eel_fakefish_rc/rc_control.h`` rather than hard-coded, so the
+    gallery follows the device if the pool is ever resized. The RC trial draws
+    ``RC_VOLLEY_ITEM_FIRST + random(RC_VOLLEY_ITEM_COUNT)`` and nothing else: the real-volley
+    fragments and the localization items sit outside the window and never play on this device.
+    """
+    hdr = root / "firmware" / "eel_fakefish_rc" / "rc_control.h"
+    txt = hdr.read_text()
+    got = {}
+    for key in ("RC_VOLLEY_ITEM_FIRST", "RC_VOLLEY_ITEM_COUNT"):
+        m = re.search(rf"^#define\s+{key}\s+(\d+)", txt, re.M)
+        if m is None:
+            raise typer.BadParameter(f"{key} not found in {hdr}")
+        got[key] = int(m.group(1))
+    return got["RC_VOLLEY_ITEM_FIRST"], got["RC_VOLLEY_ITEM_COUNT"]
+
+
 @app.command()
 def main(
     firmware: Path = typer.Option(
@@ -63,6 +90,13 @@ def main(
     max_synth: int = typer.Option(
         24, "--max-synth",
         help="synthetic volleys to draw, evenly spaced by duration (0 = all of them)",
+    ),
+    rc: bool = typer.Option(
+        False, "--rc/--library",
+        help="draw only what the RC playback device can draw (its item window, no marker) "
+             "instead of every volley in the library. The WHOLE pool is always drawn — the "
+             "gallery is the lookup sheet for the pulse log's `item` column, so --max-synth "
+             "does not apply here",
     ),
     verbose: int = typer.Option(1, "--verbose", "-v", count=True),
 ) -> None:
@@ -86,13 +120,21 @@ def main(
         for i, it in enumerate(parsed["items"])
         if it["kind"] in KIND_STYLE
     ]
+    # The RC device draws from ONE contiguous item window and plays no marker (removed
+    # 2026-08-22 — the pulse log's `item` column identifies the pattern instead, which is
+    # why each panel is titled by that index). Restricting here is what makes this "the
+    # device's volleys" rather than "the library's".
+    n_lib = len(vol)  # every volley in the library, before the RC pool narrows it
+    if rc:
+        first, count = _rc_pool(_res.ROOT)
+        vol = [it for it in vol if first <= it["_idx"] < first + count]
+        log.info("RC pool: items %d..%d (%d drawable)", first, first + count - 1, len(vol))
     # order by kind then by played duration
     for it in vol:
         it["_dur"] = int(np.cumsum(it["ipi_samp"].astype(np.int64))[-1]) / hz
         it["_peak"] = hz / int(it["ipi_samp"][1:].min())
     vol.sort(key=lambda it: (KIND_ORDER[it["kind"]], it["_dur"]))
-    n_total = len(vol)
-    if max_synth > 0:
+    if max_synth > 0 and not rc:
         real = [it for it in vol if it["kind"] == ex.STIM_REAL_VOLLEY]
         synth = [it for it in vol if it["kind"] == ex.STIM_SYNTH_VOLLEY]
         if len(synth) > max_synth:
@@ -102,7 +144,7 @@ def main(
             keep = np.round(np.linspace(0, len(synth) - 1, max_synth)).astype(int)
             synth = [synth[i] for i in keep]
         vol = real + synth
-    log.info("%d volley-family items (%d in the library)", len(vol), n_total)
+    log.info("%d volley-family items (%d in the library)", len(vol), n_lib)
 
     ncol = 4
     nrow = int(np.ceil(len(vol) / ncol))
@@ -115,23 +157,42 @@ def main(
         trace = ex.reconstruct_item(eod, it["ipi_samp"], it["rel_amp"]) * VOLLEY_AMPLITUDE
         t = np.arange(trace.size) / hz  # stimulus onset at t = 0
         # the alternating pulse marker + this item's fixed gap, to the left of onset
-        gap_ms = int(gaps[it["_idx"]]) / hz * 1000
-        x_left = draw_leadin(ax, int(gaps[it["_idx"]]), hz, show_s=marker_show_s)
+        if rc:
+            x_left = 0.0
+            env = it["rel_amp"]
+            lo = 1.0 if env is None else float(env.min()) / 255.0
+            hi = 1.0 if env is None else float(env.max()) / 255.0
+            # item index = the pulse log's `item` column, so a logged trial maps to a panel;
+            # the envelope range is the interval the BASELINE arm's held amplitude is drawn from.
+            title = (f"item {it['_idx']} · {it['_peak']:.0f} Hz · {it['_dur']:.2f} s\n"
+                     f"env {lo:.2f}-{hi:.2f}")
+        else:
+            gap_ms = int(gaps[it["_idx"]]) / hz * 1000
+            x_left = draw_leadin(ax, int(gaps[it["_idx"]]), hz, show_s=marker_show_s)
+            title = f"{label} · {it['_peak']:.0f} Hz · {it['_dur']:.2f} s · gap {gap_ms:.0f} ms"
         ax.plot(t, trace, color=colour, lw=0.4, zorder=3)
-        ax.set_title(
-            f"{label} · {it['_peak']:.0f} Hz · {it['_dur']:.2f} s · gap {gap_ms:.0f} ms",
-            fontsize=6,
-        )
+        ax.set_title(title, fontsize=6)
         ax.set_xlim(x_left, max(t[-1], 1e-3))
-        ax.set_ylim(-1.0, 1.05)
+        # Without the bipolar marker there is nothing below ~0 but the EOD's small negative
+        # lobe, so the RC axis drops the unused negative half and the pulse train fills the
+        # panel. The drawn sign is arbitrary either way: the firmware randomises polarity
+        # per playback, so only the envelope shape is meaningful, not which way it points.
+        ax.set_ylim(-0.2 if rc else -1.0, 1.05)
         ax.tick_params(labelsize=5)
         ax.axhline(0, color="0.7", lw=0.4, zorder=0)
     for j in range(len(vol), nrow * ncol):
         axes[j // ncol][j % ncol].axis("off")
-    fig.suptitle(
-        f"Every volley — {MARKER_N_PULSES}-pulse alternating marker → gap → onset (t=0) "
-        f"→ volley · {len(vol)} items"
-    )
+    if rc:
+        fig.suptitle(
+            f"RC playback device — every drawable volley · items {first}–{first + count - 1} "
+            f"({len(vol)} of {n_lib} library volleys) · onset at t=0, no marker",
+            fontsize=9,
+        )
+    else:
+        fig.suptitle(
+            f"Every volley — {MARKER_N_PULSES}-pulse alternating marker → gap → onset (t=0) "
+            f"→ volley · {len(vol)} of {n_lib} items"
+        )
     fig.supxlabel("time relative to stimulus onset (s)", fontsize=8)
     fig.supylabel("output level (× full scale)", fontsize=8)
     saved = save_figure(fig, out)
